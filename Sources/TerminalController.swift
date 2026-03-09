@@ -2839,10 +2839,18 @@ class TerminalController {
     }
 
     private func v2WindowCurrent(params _: [String: Any]) -> V2CallResult {
-        guard let tabManager else {
-            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        let windowId = v2MainSync { () -> UUID? in
+            if let activeManager = self.tabManager,
+               let activeWindowId = self.v2ResolveWindowId(tabManager: activeManager) {
+                return activeWindowId
+            }
+            guard let app = AppDelegate.shared else { return nil }
+            let summaries = app.listMainWindowSummaries()
+            return summaries.first(where: { $0.isKeyWindow })?.windowId
+                ?? summaries.first(where: { $0.isVisible })?.windowId
+                ?? summaries.first?.windowId
         }
-        guard let windowId = v2ResolveWindowId(tabManager: tabManager) else {
+        guard let windowId else {
             return .err(code: "not_found", message: "Current window not found", data: nil)
         }
         return .ok([
