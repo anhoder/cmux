@@ -115,17 +115,22 @@ final class BrowserLifecycleCrossWindowUITests: XCTestCase {
             return
         }
 
+        let lifecycleMatch = waitForLifecycleSnapshot(timeout: 8.0) { snapshot in
+            guard let browser = snapshot.records.first(where: { $0.panelId == browserPanelId }) else {
+                return false
+            }
+            return browser.selectedWorkspace &&
+                browser.activeWindowMembership &&
+                browser.anchorWindowNumber != 0 &&
+                browser.targetResidency == "visibleInActiveWindow"
+        }
+        let debugSnapshot = latestLifecycleSnapshot()
+        let debugBrowser = debugSnapshot?.records.first(where: { $0.panelId == browserPanelId })
         XCTAssertTrue(
-            waitForLifecycleSnapshot(timeout: 8.0) { snapshot in
-                guard let browser = snapshot.records.first(where: { $0.panelId == browserPanelId }) else {
-                    return false
-                }
-                return browser.selectedWorkspace &&
-                    browser.activeWindowMembership &&
-                    browser.anchorWindowNumber != 0 &&
-                    browser.targetResidency == "visibleInActiveWindow"
-            },
-            "Expected browser to remain visible after cross-window workspace move"
+            lifecycleMatch,
+            "Expected browser to remain visible after cross-window workspace move. " +
+                "snapshot=\(debugSnapshot?.debugSummary ?? "nil") " +
+                "browser=\(debugBrowser?.debugSummary ?? "nil")"
         )
 
         guard let snapshot = latestLifecycleSnapshot(),
@@ -248,37 +253,71 @@ final class BrowserLifecycleCrossWindowUITests: XCTestCase {
 private struct BrowserCrossWindowRecord {
     let panelId: String
     let workspaceId: String
+    let state: String
+    let residency: String
     let selectedWorkspace: Bool
+    let desiredVisible: Bool
+    let desiredActive: Bool
     let activeWindowMembership: Bool
     let targetResidency: String
+    let targetWindowNumber: Int
     let anchorWindowNumber: Int
+    let anchorSource: String
+}
+
+extension BrowserCrossWindowRecord {
+    var debugSummary: String {
+        "panelId=\(panelId) workspaceId=\(workspaceId) state=\(state) residency=\(residency) " +
+            "selectedWorkspace=\(selectedWorkspace) desiredVisible=\(desiredVisible) " +
+            "desiredActive=\(desiredActive) activeWindowMembership=\(activeWindowMembership) " +
+            "targetResidency=\(targetResidency) targetWindowNumber=\(targetWindowNumber) " +
+            "anchorWindowNumber=\(anchorWindowNumber) anchorSource=\(anchorSource)"
+    }
 }
 
 private struct BrowserCrossWindowSnapshot {
+    let activeWindowNumber: Int
+    let selectedWorkspaceId: String
     let records: [BrowserCrossWindowRecord]
 
     init?(result: [String: Any]) {
+        activeWindowNumber = result["activeWindowNumber"] as? Int ?? 0
+        selectedWorkspaceId = result["selectedWorkspaceId"] as? String ?? ""
         let rawRecords = result["records"] as? [[String: Any]] ?? []
         let desiredContainer = result["desired"] as? [String: Any] ?? [:]
         let rawDesired = desiredContainer["records"] as? [[String: Any]] ?? []
-        let desiredPairs: [(String, String)] = rawDesired.compactMap { row -> (String, String)? in
+        let desiredPairs: [(String, [String: Any])] = rawDesired.compactMap { row -> (String, [String: Any])? in
             guard let panelId = row["panelId"] as? String else { return nil }
-            return (panelId, row["targetResidency"] as? String ?? "")
+            return (panelId, row)
         }
         let desiredByPanel = Dictionary(uniqueKeysWithValues: desiredPairs)
 
         records = rawRecords.compactMap { row -> BrowserCrossWindowRecord? in
             guard let panelId = row["panelId"] as? String else { return nil }
             let anchor = row["anchor"] as? [String: Any] ?? [:]
+            let desired = desiredByPanel[panelId] ?? [:]
             return BrowserCrossWindowRecord(
                 panelId: panelId,
                 workspaceId: row["workspaceId"] as? String ?? "",
+                state: row["state"] as? String ?? "",
+                residency: row["residency"] as? String ?? "",
                 selectedWorkspace: row["selectedWorkspace"] as? Bool ?? false,
+                desiredVisible: row["desiredVisible"] as? Bool ?? false,
+                desiredActive: row["desiredActive"] as? Bool ?? false,
                 activeWindowMembership: row["activeWindowMembership"] as? Bool ?? false,
-                targetResidency: desiredByPanel[panelId] ?? "",
-                anchorWindowNumber: anchor["windowNumber"] as? Int ?? 0
+                targetResidency: desired["targetResidency"] as? String ?? "",
+                targetWindowNumber: desired["targetWindowNumber"] as? Int ?? 0,
+                anchorWindowNumber: anchor["windowNumber"] as? Int ?? 0,
+                anchorSource: anchor["source"] as? String ?? ""
             )
         }
+    }
+}
+
+extension BrowserCrossWindowSnapshot {
+    var debugSummary: String {
+        let sample = records.prefix(3).map(\.debugSummary).joined(separator: " | ")
+        return "activeWindowNumber=\(activeWindowNumber) selectedWorkspaceId=\(selectedWorkspaceId) records=\(records.count) sample=[\(sample)]"
     }
 }
 
