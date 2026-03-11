@@ -6865,16 +6865,16 @@ final class GhosttySurfaceScrollView: NSView {
 
     func capturePanelFocusIntent(in window: NSWindow?) -> TerminalPanelFocusIntent {
         if surfaceView.terminalSurface?.searchState != nil {
-            if let firstResponder = window?.firstResponder as? NSView,
-               (firstResponder === surfaceView || firstResponder.isDescendant(of: surfaceView)) {
-                return .surface
+            if searchFocusTarget == .searchField {
+                return .findField
             }
             if let firstResponder = window?.firstResponder,
                isCurrentSurfaceSearchResponder(firstResponder) {
                 return .findField
             }
-            if searchFocusTarget == .searchField {
-                return .findField
+            if let firstResponder = window?.firstResponder as? NSView,
+               (firstResponder === surfaceView || firstResponder.isDescendant(of: surfaceView)) {
+                return .surface
             }
         }
         return .surface
@@ -7016,17 +7016,7 @@ final class GhosttySurfaceScrollView: NSView {
     }
 
     private func isCurrentSurfaceSearchResponder(_ responder: NSResponder) -> Bool {
-        let resolvedResponder: NSResponder
-        if let editor = responder as? NSTextView,
-           editor.isFieldEditor,
-           let editedView = editor.delegate as? NSView {
-            resolvedResponder = editedView
-        } else {
-            resolvedResponder = responder
-        }
-
-        guard let view = resolvedResponder as? NSView else { return false }
-        return view.isDescendant(of: self)
+        isSearchOverlayOrDescendant(responder)
     }
 
 #if DEBUG
