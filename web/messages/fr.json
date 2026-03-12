@@ -540,7 +540,23 @@
     "changelog": {
       "title": "Changelog",
       "metaDescription": "Notes de version et historique des versions de cmux. Nouvelles fonctionnalités, corrections de bugs et changements pour le terminal macOS natif.",
-      "metaTitle": "Journal des modifications"
+      "metaTitle": "Journal des modifications",
+      "badgeAdded": "Ajouté",
+      "badgeChanged": "Modifié",
+      "badgeFixed": "Corrigé",
+      "badgeContributors": "Contributeurs",
+      "v0.62.0": {
+        "title": "Visionneuse Markdown, recherche navigateur, mode copie Vi et localisation"
+      },
+      "v0.61.0": {
+        "title": "Couleurs d'onglets, palette de commandes, épingler des espaces de travail"
+      },
+      "v0.60.0": {
+        "title": "Menu contextuel des onglets, DevTools, anneaux de notification, saisie CJK"
+      },
+      "v0.32.0": {
+        "title": "Métadonnées de la barre latérale"
+      }
     },
     "navItems": {
       "gettingStarted": "Premiers pas",

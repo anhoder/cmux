@@ -540,7 +540,23 @@
     "changelog": {
       "title": "Değişiklik Günlüğü",
       "metaDescription": "cmux sürüm notları ve sürüm geçmişi. Yerel macOS terminali için yeni özellikler, hata düzeltmeleri ve değişiklikler.",
-      "metaTitle": "Değişiklik günlüğü"
+      "metaTitle": "Değişiklik günlüğü",
+      "badgeAdded": "Eklendi",
+      "badgeChanged": "Değiştirildi",
+      "badgeFixed": "Düzeltildi",
+      "badgeContributors": "Katkıda bulunanlar",
+      "v0.62.0": {
+        "title": "Markdown Görüntüleyici, tarayıcı araması, Vi kopyalama modu ve yerelleştirme"
+      },
+      "v0.61.0": {
+        "title": "Sekme renkleri, komut paleti, çalışma alanlarını sabitleme"
+      },
+      "v0.60.0": {
+        "title": "Sekme bağlam menüsü, DevTools, bildirim halkaları, CJK girişi"
+      },
+      "v0.32.0": {
+        "title": "Kenar çubuğu meta verileri"
+      }
     },
     "navItems": {
       "gettingStarted": "Başlarken",

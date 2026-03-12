@@ -540,7 +540,23 @@
     "changelog": {
       "title": "Changelog",
       "metaDescription": "Notas de versión e historial de versiones de cmux. Nuevas funciones, correcciones de errores y cambios para la terminal nativa de macOS.",
-      "metaTitle": "Registro de cambios"
+      "metaTitle": "Registro de cambios",
+      "badgeAdded": "Añadido",
+      "badgeChanged": "Cambiado",
+      "badgeFixed": "Corregido",
+      "badgeContributors": "Colaboradores",
+      "v0.62.0": {
+        "title": "Visor Markdown, búsqueda en navegador, modo de copia Vi y localización"
+      },
+      "v0.61.0": {
+        "title": "Colores de pestañas, paleta de comandos, fijar espacios de trabajo"
+      },
+      "v0.60.0": {
+        "title": "Menú contextual de pestañas, DevTools, anillos de notificación, entrada CJK"
+      },
+      "v0.32.0": {
+        "title": "Metadatos de la barra lateral"
+      }
     },
     "navItems": {
       "gettingStarted": "Primeros pasos",

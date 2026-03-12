@@ -540,7 +540,23 @@
     "changelog": {
       "title": "Changelog",
       "metaDescription": "cmux Release-Notes und Versionshistorie. Neue Funktionen, Fehlerbehebungen und Änderungen für das native macOS-Terminal.",
-      "metaTitle": "Änderungsprotokoll"
+      "metaTitle": "Änderungsprotokoll",
+      "badgeAdded": "Hinzugefügt",
+      "badgeChanged": "Geändert",
+      "badgeFixed": "Behoben",
+      "badgeContributors": "Mitwirkende",
+      "v0.62.0": {
+        "title": "Markdown-Viewer, Browser-Suche, Vi-Kopiermodus und Lokalisierung"
+      },
+      "v0.61.0": {
+        "title": "Tab-Farben, Befehlspalette, Arbeitsbereiche anheften"
+      },
+      "v0.60.0": {
+        "title": "Tab-Kontextmenü, DevTools, Benachrichtigungsringe, CJK-Eingabe"
+      },
+      "v0.32.0": {
+        "title": "Seitenleisten-Metadaten"
+      }
     },
     "navItems": {
       "gettingStarted": "Erste Schritte",
