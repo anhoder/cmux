@@ -8074,6 +8074,7 @@ struct CMUXCLI {
           \(bold)Shortcuts\(reset)
 
           \(bold)\u{2318}N\(reset)\(subdued)                  New workspace\(reset)
+          \(bold)\u{2318}T\(reset)\(subdued)                  New tab\(reset)
           \(bold)\u{2318}P\(reset)\(subdued)                  Go to workspace\(reset)
           \(bold)\u{2318}D\(reset)\(subdued)                  Split right\(reset)
           \(bold)\u{2318}\u{21E7}D\(reset)\(subdued)                 Split down\(reset)
@@ -8172,7 +8173,7 @@ struct CMUXCLI {
         }
 
         let fileManager = FileManager.default
-        var current = executableURL.deletingLastPathComponent()
+        var current = executableURL.deletingLastPathComponent().standardizedFileURL
 
         while true {
             let projectFile = current.appendingPathComponent("GhosttyTabs.xcodeproj/project.pbxproj")
@@ -8193,8 +8194,7 @@ struct CMUXCLI {
                 }
             }
 
-            let parent = current.deletingLastPathComponent()
-            if parent.path == current.path {
+            guard let parent = parentSearchURL(for: current) else {
                 break
             }
             current = parent
@@ -8263,6 +8263,22 @@ struct CMUXCLI {
         return String(normalized.prefix(12))
     }
 
+    // Foundation can walk past "/" into "/.." when repeatedly deleting path
+    // components, so stop once the canonical root is reached.
+    private func parentSearchURL(for url: URL) -> URL? {
+        let standardized = url.standardizedFileURL
+        let path = standardized.path
+        guard !path.isEmpty, path != "/" else {
+            return nil
+        }
+
+        let parent = standardized.deletingLastPathComponent().standardizedFileURL
+        guard parent.path != path else {
+            return nil
+        }
+        return parent
+    }
+
     private func candidateInfoPlistURLs() -> [URL] {
         guard let executableURL = resolvedExecutableURL() else {
             return []
@@ -8280,7 +8296,7 @@ struct CMUXCLI {
             candidates.append(url)
         }
 
-        var current = executableURL.deletingLastPathComponent()
+        var current = executableURL.deletingLastPathComponent().standardizedFileURL
         while true {
             if current.pathExtension == "app" {
                 appendIfExisting(current.appendingPathComponent("Contents/Info.plist"))
@@ -8299,8 +8315,7 @@ struct CMUXCLI {
                 break
             }
 
-            let parent = current.deletingLastPathComponent()
-            if parent.path == current.path {
+            guard let parent = parentSearchURL(for: current) else {
                 break
             }
             current = parent
@@ -8313,8 +8328,8 @@ struct CMUXCLI {
         }
 
         let searchRoots = [
-            executableURL.deletingLastPathComponent(),
-            executableURL.deletingLastPathComponent().deletingLastPathComponent()
+            executableURL.deletingLastPathComponent().standardizedFileURL,
+            executableURL.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL
         ]
         for root in searchRoots {
             guard let entries = fileManager.enumerator(

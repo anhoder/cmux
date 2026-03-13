@@ -1682,6 +1682,21 @@ func shouldRouteTerminalFontZoomShortcutToGhostty(
     ) != nil
 }
 
+/// Let AppKit own native Cmd+` window cycling so key-window changes do not
+/// re-enter our direct-to-menu shortcut path.
+func shouldRouteCommandEquivalentDirectlyToMainMenu(_ event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard flags.contains(.command) else { return false }
+
+    let normalizedFlags = flags.subtracting([.numericPad, .function, .capsLock])
+    if event.keyCode == 50,
+       normalizedFlags == [.command] || normalizedFlags == [.command, .shift] {
+        return false
+    }
+
+    return true
+}
+
 func cmuxOwningGhosttyView(for responder: NSResponder?) -> GhosttyNSView? {
     guard let responder else { return nil }
     if let ghosttyView = responder as? GhosttyNSView {
@@ -1891,6 +1906,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var windowKeyObserver: NSObjectProtocol?
     private var shortcutMonitor: Any?
     private var shortcutDefaultsObserver: NSObjectProtocol?
+    private var menuBarVisibilityObserver: NSObjectProtocol?
     private var splitButtonTooltipRefreshScheduled = false
     private var ghosttyConfigObserver: NSObjectProtocol?
     private var ghosttyGotoSplitLeftShortcut: StoredShortcut?
@@ -1957,6 +1973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var didSetupGotoSplitUITest = false
     private var gotoSplitUITestObservers: [NSObjectProtocol] = []
     private var didSetupMultiWindowNotificationsUITest = false
+    var debugCloseMainWindowConfirmationHandler: ((NSWindow) -> Bool)?
     // Keep debug-only windows alive when tests intentionally inject key mismatches.
     private var debugDetachedContextWindows: [NSWindow] = []
 
@@ -2180,7 +2197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ensureApplicationIcon()
         if !isRunningUnderXCTest {
             configureUserNotifications()
-            setupMenuBarExtra()
+            installMenuBarVisibilityObserver()
+            syncMenuBarExtraVisibility()
             // Sparkle updater is started lazily on first manual check. This avoids any
             // first-launch permission prompts and keeps cmux aligned with the update pill UI.
         }
@@ -4413,6 +4431,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    private func confirmCloseMainWindow(_ window: NSWindow) -> Bool {
+#if DEBUG
+        if let debugCloseMainWindowConfirmationHandler {
+            return debugCloseMainWindowConfirmationHandler(window)
+        }
+#endif
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "dialog.closeWindow.title", defaultValue: "Close window?")
+        alert.informativeText = String(
+            localized: "dialog.closeWindow.message",
+            defaultValue: "This will close the current window and all of its workspaces."
+        )
+        alert.addButton(withTitle: String(localized: "common.close", defaultValue: "Close"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+
+        let alertWindow = alert.window
+        if let closeButton = alert.buttons.first {
+            alertWindow.defaultButtonCell = closeButton.cell as? NSButtonCell
+            alertWindow.initialFirstResponder = closeButton
+            DispatchQueue.main.async {
+                _ = alertWindow.makeFirstResponder(closeButton)
+            }
+        }
+
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    @discardableResult
+    func closeWindowWithConfirmation(_ window: NSWindow) -> Bool {
+        guard isMainTerminalWindow(window) else {
+            window.performClose(nil)
+            return true
+        }
+        guard confirmCloseMainWindow(window) else { return true }
+        window.performClose(nil)
+        return true
+    }
+
     private func orderedMainWindowSummaries(referenceWindowId: UUID?) -> [MainWindowSummary] {
         let summaries = listMainWindowSummaries()
         return summaries.sorted { lhs, rhs in
@@ -5479,6 +5537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func setupMenuBarExtra() {
+        guard menuBarExtraController == nil else { return }
         let store = TerminalNotificationStore.shared
         menuBarExtraController = MenuBarExtraController(
             notificationStore: store,
@@ -5505,6 +5564,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 NSApp.terminate(nil)
             }
         )
+    }
+
+    private func installMenuBarVisibilityObserver() {
+        guard menuBarVisibilityObserver == nil else { return }
+        menuBarVisibilityObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.syncMenuBarExtraVisibility()
+            }
+        }
+    }
+
+    private func syncMenuBarExtraVisibility(defaults: UserDefaults = .standard) {
+        if MenuBarExtraSettings.showsMenuBarExtra(defaults: defaults) {
+            setupMenuBarExtra()
+            return
+        }
+
+        menuBarExtraController?.removeFromMenuBar()
+        menuBarExtraController = nil
     }
 
     @MainActor
@@ -7683,13 +7765,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         // Don't steal shortcuts from close-confirmation alerts. Keep standard alert key
         // equivalents working and avoid surprising actions while the confirmation is up.
+        let closeConfirmationTitles = [
+            String(localized: "dialog.closeWorkspace.title", defaultValue: "Close workspace?"),
+            String(localized: "dialog.closeWorkspaces.title", defaultValue: "Close workspaces?"),
+            String(localized: "dialog.closeTab.title", defaultValue: "Close tab?"),
+            String(localized: "dialog.closeOtherTabs.title", defaultValue: "Close other tabs?"),
+            String(localized: "dialog.closeWindow.title", defaultValue: "Close window?"),
+        ]
         let closeConfirmationPanel = NSApp.windows
             .compactMap { $0 as? NSPanel }
             .first { panel in
                 guard panel.isVisible, let root = panel.contentView else { return false }
-                return findStaticText(in: root, equals: "Close workspace?")
-                    || findStaticText(in: root, equals: "Close tab?")
-                    || findStaticText(in: root, equals: "Close other tabs?")
+                return closeConfirmationTitles.contains { title in
+                    findStaticText(in: root, equals: title)
+                }
             }
         if let closeConfirmationPanel {
             // Special-case: Cmd+D should confirm destructive close on alerts.
@@ -7700,7 +7789,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 shortcut: StoredShortcut(key: "d", command: true, shift: false, option: false, control: false)
             ),
                let root = closeConfirmationPanel.contentView,
-               let closeButton = findButton(in: root, titled: "Close") {
+               let closeButton = findButton(
+                   in: root,
+                   titled: String(localized: "common.close", defaultValue: "Close")
+               ) {
                 closeButton.performClick(nil)
                 return true
             }
@@ -8213,7 +8305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 NSSound.beep()
                 return true
             }
-            targetWindow.performClose(nil)
+            closeWindowWithConfirmation(targetWindow)
             return true
         }
 
@@ -10121,6 +10213,13 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         refreshUI()
     }
 
+    func removeFromMenuBar() {
+        notificationsCancellable?.cancel()
+        notificationsCancellable = nil
+        statusItem.menu = nil
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
     private func refreshUI() {
         let snapshot = NotificationMenuSnapshotBuilder.make(
             notifications: notificationStore.notifications,
@@ -10440,6 +10539,18 @@ enum MenuBarBuildHintFormatter {
             return name
         }
         return ProcessInfo.processInfo.processName
+    }
+}
+
+enum MenuBarExtraSettings {
+    static let showInMenuBarKey = "showMenuBarExtra"
+    static let defaultShowInMenuBar = true
+
+    static func showsMenuBarExtra(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: showInMenuBarKey) == nil {
+            return defaultShowInMenuBar
+        }
+        return defaults.bool(forKey: showInMenuBarKey)
     }
 }
 
@@ -11024,7 +11135,7 @@ private extension NSWindow {
         // (which walks the SwiftUI content view hierarchy) and dispatch Command-key
         // events directly to the main menu. This avoids the broken SwiftUI focus path.
         if firstResponderGhosttyView != nil,
-           event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+           shouldRouteCommandEquivalentDirectlyToMainMenu(event),
            let mainMenu = NSApp.mainMenu {
             let consumedByMenu = mainMenu.performKeyEquivalent(with: event)
 #if DEBUG

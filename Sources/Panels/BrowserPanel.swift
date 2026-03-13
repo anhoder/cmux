@@ -1775,6 +1775,10 @@ final class BrowserPanel: Panel, ObservableObject {
     private let developerToolsRestoreRetryMaxAttempts: Int = 40
     private let developerToolsDetachedOpenGracePeriod: TimeInterval = 0.35
     private var developerToolsDetachedOpenGraceDeadline: Date?
+    private var developerToolsTransitionTargetVisible: Bool?
+    private var pendingDeveloperToolsTransitionTargetVisible: Bool?
+    private var developerToolsTransitionSettleWorkItem: DispatchWorkItem?
+    private let developerToolsTransitionSettleDelay: TimeInterval = 0.15
     private var detachedDeveloperToolsWindowCloseObserver: NSObjectProtocol?
     private var preferredAttachedDeveloperToolsWidth: CGFloat?
     private var preferredAttachedDeveloperToolsWidthFraction: CGFloat?
@@ -2005,6 +2009,12 @@ final class BrowserPanel: Panel, ObservableObject {
         setupObservers(for: webView)
     }
 
+    private func isCurrentWebView(_ candidate: WKWebView, instanceID: UUID? = nil) -> Bool {
+        guard candidate === webView else { return false }
+        guard let instanceID else { return true }
+        return instanceID == webViewInstanceID
+    }
+
     init(workspaceId: UUID, initialURL: URL? = nil, bypassInsecureHTTPHostOnce: String? = nil) {
         self.id = UUID()
         self.workspaceId = workspaceId
@@ -2020,15 +2030,16 @@ final class BrowserPanel: Panel, ObservableObject {
         navDelegate.didFinish = { webView in
             BrowserHistoryStore.shared.recordVisit(url: webView.url, title: webView.title)
             Task { @MainActor [weak self] in
-                self?.refreshFavicon(from: webView)
-                self?.applyBrowserThemeModeIfNeeded()
+                guard let self, self.isCurrentWebView(webView) else { return }
+                self.refreshFavicon(from: webView)
+                self.applyBrowserThemeModeIfNeeded()
                 // Keep find-in-page open through load completion and refresh matches for the new DOM.
-                self?.restoreFindStateAfterNavigation(replaySearch: true)
+                self.restoreFindStateAfterNavigation(replaySearch: true)
             }
         }
-        navDelegate.didFailNavigation = { [weak self] _, failedURL in
+        navDelegate.didFailNavigation = { [weak self] failedWebView, failedURL in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.isCurrentWebView(failedWebView) else { return }
                 // Clear stale title/favicon from the previous page so the tab
                 // shows the failed URL instead of the old page's branding.
                 self.pageTitle = failedURL.isEmpty ? "" : failedURL
@@ -2163,10 +2174,13 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     private func setupObservers(for webView: WKWebView) {
+        let observedWebViewInstanceID = webViewInstanceID
+
         // URL changes
         let urlObserver = webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
-                self?.currentURL = webView.url
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
+                self.currentURL = webView.url
             }
         }
         webViewObservers.append(urlObserver)
@@ -2174,12 +2188,13 @@ final class BrowserPanel: Panel, ObservableObject {
         // Title changes
         let titleObserver = webView.observe(\.title, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
                 // Keep showing the last non-empty title while the new navigation is loading.
                 // WebKit often clears title to nil/"" during reload/navigation, which causes
                 // a distracting tab-title flash (e.g. to host/URL). Only accept non-empty titles.
                 let trimmed = (webView.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return }
-                self?.pageTitle = trimmed
+                self.pageTitle = trimmed
             }
         }
         webViewObservers.append(titleObserver)
@@ -2187,7 +2202,8 @@ final class BrowserPanel: Panel, ObservableObject {
         // Loading state
         let loadingObserver = webView.observe(\.isLoading, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
-                self?.handleWebViewLoadingChanged(webView.isLoading)
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
+                self.handleWebViewLoadingChanged(webView.isLoading)
             }
         }
         webViewObservers.append(loadingObserver)
@@ -2195,7 +2211,7 @@ final class BrowserPanel: Panel, ObservableObject {
         // Can go back
         let backObserver = webView.observe(\.canGoBack, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
                 self.nativeCanGoBack = webView.canGoBack
                 self.refreshNavigationAvailability()
             }
@@ -2205,7 +2221,7 @@ final class BrowserPanel: Panel, ObservableObject {
         // Can go forward
         let forwardObserver = webView.observe(\.canGoForward, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
                 self.nativeCanGoForward = webView.canGoForward
                 self.refreshNavigationAvailability()
             }
@@ -2215,7 +2231,8 @@ final class BrowserPanel: Panel, ObservableObject {
         // Progress
         let progressObserver = webView.observe(\.estimatedProgress, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor in
-                self?.estimatedProgress = webView.estimatedProgress
+                guard let self, self.isCurrentWebView(webView, instanceID: observedWebViewInstanceID) else { return }
+                self.estimatedProgress = webView.estimatedProgress
             }
         }
         webViewObservers.append(progressObserver)
@@ -2251,6 +2268,9 @@ final class BrowserPanel: Panel, ObservableObject {
 
         webViewObservers.removeAll()
         webViewCancellables.removeAll()
+        faviconTask?.cancel()
+        faviconTask = nil
+        faviconRefreshGeneration &+= 1
         BrowserWindowPortalRegistry.detach(webView: terminatedWebView)
         terminatedWebView.stopLoading()
         terminatedWebView.navigationDelegate = nil
@@ -2261,11 +2281,12 @@ final class BrowserPanel: Panel, ObservableObject {
 
         let replacement = Self.makeWebView()
         replacement.pageZoom = desiredZoom
-        webView = replacement
         webViewInstanceID = UUID()
+        webView = replacement
         shouldRenderWebView = wasRenderable
 
         bindWebView(replacement)
+        applyBrowserThemeModeIfNeeded()
 
         if !history.backHistoryURLStrings.isEmpty || !history.forwardHistoryURLStrings.isEmpty {
             restoreSessionNavigationHistory(
@@ -2361,9 +2382,11 @@ final class BrowserPanel: Panel, ObservableObject {
         guard let scheme = pageURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
         faviconRefreshGeneration &+= 1
         let refreshGeneration = faviconRefreshGeneration
+        let refreshWebViewInstanceID = webViewInstanceID
 
         faviconTask = Task { @MainActor [weak self, weak webView] in
             guard let self, let webView else { return }
+            guard self.isCurrentWebView(webView, instanceID: refreshWebViewInstanceID) else { return }
             guard self.isCurrentFaviconRefresh(generation: refreshGeneration) else { return }
 
             // Try to discover the best icon URL from the document.
@@ -2398,6 +2421,7 @@ final class BrowserPanel: Panel, ObservableObject {
                     discoveredURL = u
                 }
             }
+            guard self.isCurrentWebView(webView, instanceID: refreshWebViewInstanceID) else { return }
             guard self.isCurrentFaviconRefresh(generation: refreshGeneration) else { return }
 
             let fallbackURL = URL(string: "/favicon.ico", relativeTo: pageURL)
@@ -2423,6 +2447,7 @@ final class BrowserPanel: Panel, ObservableObject {
             } catch {
                 return
             }
+            guard self.isCurrentWebView(webView, instanceID: refreshWebViewInstanceID) else { return }
             guard self.isCurrentFaviconRefresh(generation: refreshGeneration) else { return }
 
             guard let http = response as? HTTPURLResponse,
@@ -2699,15 +2724,126 @@ final class BrowserPanel: Panel, ObservableObject {
     deinit {
         developerToolsRestoreRetryWorkItem?.cancel()
         developerToolsRestoreRetryWorkItem = nil
+        developerToolsTransitionSettleWorkItem?.cancel()
+        developerToolsTransitionSettleWorkItem = nil
         if let detachedDeveloperToolsWindowCloseObserver {
             NotificationCenter.default.removeObserver(detachedDeveloperToolsWindowCloseObserver)
         }
+        webViewObservers.removeAll()
+        webViewCancellables.removeAll()
         let webView = webView
         Task { @MainActor in
             BrowserWindowPortalRegistry.detach(webView: webView)
         }
+    }
+}
+
+extension BrowserPanel {
+    private var needsWorkspaceContextReset: Bool {
+        shouldRenderWebView ||
+        currentURL != nil ||
+        !pageTitle.isEmpty ||
+        faviconPNGData != nil ||
+        searchState != nil ||
+        nativeCanGoBack ||
+        nativeCanGoForward ||
+        restoredHistoryCurrentURL != nil ||
+        !restoredBackHistoryStack.isEmpty ||
+        !restoredForwardHistoryStack.isEmpty ||
+        estimatedProgress > 0 ||
+        isLoading ||
+        isDownloading ||
+        activeDownloadCount != 0 ||
+        preferredDeveloperToolsVisible ||
+        webView.superview != nil
+    }
+
+    func resetForWorkspaceContextChange(reason: String) {
+        guard needsWorkspaceContextReset else {
+#if DEBUG
+            dlog(
+                "browser.contextReset.skip panel=\(id.uuidString.prefix(5)) " +
+                "reason=\(reason) render=\(shouldRenderWebView ? 1 : 0)"
+            )
+#endif
+            return
+        }
+
+#if DEBUG
+        dlog(
+            "browser.contextReset.begin panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) render=\(shouldRenderWebView ? 1 : 0) " +
+            "url=\(preferredURLStringForOmnibar() ?? "nil")"
+        )
+#endif
+
+        _ = hideDeveloperTools()
+        cancelDeveloperToolsRestoreRetry()
+        preferredDeveloperToolsVisible = false
+        preferredDeveloperToolsPresentation = .unknown
+        forceDeveloperToolsRefreshOnNextAttach = false
+        developerToolsDetachedOpenGraceDeadline = nil
+        developerToolsRestoreRetryAttempt = 0
+        preferredAttachedDeveloperToolsWidth = nil
+        preferredAttachedDeveloperToolsWidthFraction = nil
+
+        loadingEndWorkItem?.cancel()
+        loadingEndWorkItem = nil
+        faviconTask?.cancel()
+        faviconTask = nil
+        faviconRefreshGeneration &+= 1
+        loadingGeneration &+= 1
+        activeDownloadCount = 0
+        isDownloading = false
+        isLoading = false
+        estimatedProgress = 0
+        nativeCanGoBack = false
+        nativeCanGoForward = false
+        navigationDelegate?.lastAttemptedURL = nil
+        abandonRestoredSessionHistoryIfNeeded()
+
+        pendingAddressBarFocusRequestId = nil
+        preferredFocusIntent = .addressBar
+        suppressOmnibarAutofocusUntil = nil
+        suppressWebViewFocusUntil = nil
+        endSuppressWebViewFocusForAddressBar()
+        invalidateAddressBarPageFocusRestoreAttempts()
+        invalidateSearchFocusRequests(reason: "contextReset")
+        searchState = nil
+
+        pageTitle = ""
+        currentURL = nil
+        faviconPNGData = nil
+        lastFaviconURLString = nil
+        activePortalHostLease = nil
+        pendingDistinctPortalHostReplacementPaneId = nil
+        lockedPortalHost = nil
+
+        let oldWebView = webView
         webViewObservers.removeAll()
         webViewCancellables.removeAll()
+        BrowserWindowPortalRegistry.detach(webView: oldWebView)
+        oldWebView.stopLoading()
+        oldWebView.navigationDelegate = nil
+        oldWebView.uiDelegate = nil
+        if let oldCmuxWebView = oldWebView as? CmuxWebView {
+            oldCmuxWebView.onContextMenuDownloadStateChanged = nil
+        }
+
+        let replacement = Self.makeWebView()
+        webViewInstanceID = UUID()
+        webView = replacement
+        shouldRenderWebView = false
+        bindWebView(replacement)
+        applyBrowserThemeModeIfNeeded()
+        refreshNavigationAvailability()
+
+#if DEBUG
+        dlog(
+            "browser.contextReset.end panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) instance=\(webViewInstanceID.uuidString.prefix(6))"
+        )
+#endif
     }
 }
 
@@ -2993,39 +3129,112 @@ extension BrowserPanel {
         let isVisibleSelector = NSSelectorFromString("isVisible")
         guard inspector.cmuxCallBool(selector: isVisibleSelector) ?? false else { return true }
 
+        var invokedSelector = false
         for rawSelector in ["hide", "close"] {
             let selector = NSSelectorFromString(rawSelector)
             guard inspector.responds(to: selector) else { continue }
+            invokedSelector = true
             inspector.cmuxCallVoid(selector: selector)
-            return true
+            if !(inspector.cmuxCallBool(selector: isVisibleSelector) ?? false) {
+                return true
+            }
         }
 
-        return false
+        guard invokedSelector else { return false }
+        return !(inspector.cmuxCallBool(selector: isVisibleSelector) ?? false)
+    }
+
+    private var isDeveloperToolsTransitionInFlight: Bool {
+        developerToolsTransitionSettleWorkItem != nil
+    }
+
+    private func effectiveDeveloperToolsVisibilityIntent() -> Bool {
+        if let pendingDeveloperToolsTransitionTargetVisible {
+            return pendingDeveloperToolsTransitionTargetVisible
+        }
+        if let developerToolsTransitionTargetVisible {
+            return developerToolsTransitionTargetVisible
+        }
+        return isDeveloperToolsVisible()
+    }
+
+    private func scheduleDeveloperToolsTransitionSettle(source: String) {
+        developerToolsTransitionSettleWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.developerToolsTransitionSettleWorkItem = nil
+            self?.finishDeveloperToolsTransition(source: source)
+        }
+        developerToolsTransitionSettleWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + developerToolsTransitionSettleDelay, execute: workItem)
+    }
+
+    private func finishDeveloperToolsTransition(source: String) {
+        let pendingTargetVisible = pendingDeveloperToolsTransitionTargetVisible
+        pendingDeveloperToolsTransitionTargetVisible = nil
+        developerToolsTransitionTargetVisible = nil
+
+        guard let pendingTargetVisible else { return }
+        guard pendingTargetVisible != isDeveloperToolsVisible() else { return }
+        _ = performDeveloperToolsVisibilityTransition(to: pendingTargetVisible, source: "\(source).queued")
     }
 
     @discardableResult
-    func toggleDeveloperTools() -> Bool {
+    private func enqueueDeveloperToolsVisibilityTransition(
+        to targetVisible: Bool,
+        source: String
+    ) -> Bool {
+        if isDeveloperToolsTransitionInFlight {
+            pendingDeveloperToolsTransitionTargetVisible = targetVisible
+            preferredDeveloperToolsVisible = targetVisible
+            if !targetVisible {
+                developerToolsDetachedOpenGraceDeadline = nil
+                forceDeveloperToolsRefreshOnNextAttach = false
+                cancelDeveloperToolsRestoreRetry()
+            }
 #if DEBUG
-        dlog(
-            "browser.devtools toggle.begin panel=\(id.uuidString.prefix(5)) " +
-            "\(debugDeveloperToolsStateSummary()) \(debugDeveloperToolsGeometrySummary())"
-        )
+            dlog(
+                "browser.devtools transition.queue panel=\(id.uuidString.prefix(5)) " +
+                "source=\(source) target=\(targetVisible ? 1 : 0) \(debugDeveloperToolsStateSummary())"
+            )
 #endif
+            return true
+        }
+
+        return performDeveloperToolsVisibilityTransition(to: targetVisible, source: source)
+    }
+
+    @discardableResult
+    private func performDeveloperToolsVisibilityTransition(
+        to targetVisible: Bool,
+        source: String
+    ) -> Bool {
         guard let inspector = webView.cmuxInspectorObject() else { return false }
+
         let isVisibleSelector = NSSelectorFromString("isVisible")
         let visible = inspector.cmuxCallBool(selector: isVisibleSelector) ?? false
-        let targetVisible = !visible
+        preferredDeveloperToolsVisible = targetVisible
+        developerToolsTransitionTargetVisible = targetVisible
+
         if targetVisible {
-            _ = revealDeveloperTools(inspector)
+            if !visible {
+                _ = revealDeveloperTools(inspector)
+            } else {
+                developerToolsDetachedOpenGraceDeadline = nil
+            }
         } else {
-            syncDeveloperToolsPresentationPreferenceFromUI()
-            guard concealDeveloperTools(inspector) else { return false }
+            if visible {
+                syncDeveloperToolsPresentationPreferenceFromUI()
+                guard concealDeveloperTools(inspector) else {
+                    developerToolsTransitionTargetVisible = nil
+                    return false
+                }
+            }
             developerToolsDetachedOpenGraceDeadline = nil
         }
-        preferredDeveloperToolsVisible = targetVisible
+
         if targetVisible {
-            let visibleAfterToggle = inspector.cmuxCallBool(selector: isVisibleSelector) ?? false
-            if visibleAfterToggle {
+            let visibleAfterTransition = inspector.cmuxCallBool(selector: isVisibleSelector) ?? false
+            if visibleAfterTransition {
                 syncDeveloperToolsPresentationPreferenceFromUI()
                 cancelDeveloperToolsRestoreRetry()
                 scheduleDetachedDeveloperToolsWindowDismissal()
@@ -3037,6 +3246,26 @@ extension BrowserPanel {
             cancelDeveloperToolsRestoreRetry()
             forceDeveloperToolsRefreshOnNextAttach = false
         }
+
+        if visible != targetVisible {
+            scheduleDeveloperToolsTransitionSettle(source: source)
+        } else {
+            developerToolsTransitionTargetVisible = nil
+        }
+
+        return true
+    }
+
+    @discardableResult
+    func toggleDeveloperTools() -> Bool {
+#if DEBUG
+        dlog(
+            "browser.devtools toggle.begin panel=\(id.uuidString.prefix(5)) " +
+            "\(debugDeveloperToolsStateSummary()) \(debugDeveloperToolsGeometrySummary())"
+        )
+#endif
+        let targetVisible = !effectiveDeveloperToolsVisibilityIntent()
+        let handled = enqueueDeveloperToolsVisibilityTransition(to: targetVisible, source: "toggle")
 #if DEBUG
         dlog(
             "browser.devtools toggle.end panel=\(id.uuidString.prefix(5)) targetVisible=\(targetVisible ? 1 : 0) " +
@@ -3050,30 +3279,18 @@ extension BrowserPanel {
             )
         }
 #endif
-        return true
+        return handled
     }
 
     @discardableResult
     func showDeveloperTools() -> Bool {
-        guard let inspector = webView.cmuxInspectorObject() else { return false }
-        let visible = inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) ?? false
-        if !visible {
-            guard revealDeveloperTools(inspector) else { return false }
-        }
-        preferredDeveloperToolsVisible = true
-        if (inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) ?? false) {
-            syncDeveloperToolsPresentationPreferenceFromUI()
-            cancelDeveloperToolsRestoreRetry()
-            scheduleDetachedDeveloperToolsWindowDismissal()
-        } else {
-            scheduleDeveloperToolsRestoreRetry()
-        }
-        return true
+        return enqueueDeveloperToolsVisibilityTransition(to: true, source: "show")
     }
 
     @discardableResult
     func showDeveloperToolsConsole() -> Bool {
         guard showDeveloperTools() else { return false }
+        guard !isDeveloperToolsTransitionInFlight else { return true }
         guard let inspector = webView.cmuxInspectorObject() else { return true }
         // WebKit private inspector API differs by OS; try known console selectors.
         let consoleSelectors = [
@@ -3095,6 +3312,20 @@ extension BrowserPanel {
     func syncDeveloperToolsPreferenceFromInspector(preserveVisibleIntent: Bool = false) {
         guard let inspector = webView.cmuxInspectorObject() else { return }
         guard let visible = inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) else { return }
+        if isDeveloperToolsTransitionInFlight {
+            let targetVisible = pendingDeveloperToolsTransitionTargetVisible ?? developerToolsTransitionTargetVisible ?? visible
+            preferredDeveloperToolsVisible = targetVisible
+            if targetVisible, visible {
+                developerToolsDetachedOpenGraceDeadline = nil
+                syncDeveloperToolsPresentationPreferenceFromUI()
+                cancelDeveloperToolsRestoreRetry()
+            } else if !targetVisible {
+                developerToolsDetachedOpenGraceDeadline = nil
+                forceDeveloperToolsRefreshOnNextAttach = false
+                cancelDeveloperToolsRestoreRetry()
+            }
+            return
+        }
         if visible {
             developerToolsDetachedOpenGraceDeadline = nil
             syncDeveloperToolsPresentationPreferenceFromUI()
@@ -3116,6 +3347,7 @@ extension BrowserPanel {
             forceDeveloperToolsRefreshOnNextAttach = false
             return
         }
+        guard !isDeveloperToolsTransitionInFlight else { return }
         guard let inspector = webView.cmuxInspectorObject() else {
             scheduleDeveloperToolsRestoreRetry()
             return
@@ -3181,17 +3413,7 @@ extension BrowserPanel {
 
     @discardableResult
     func hideDeveloperTools() -> Bool {
-        guard let inspector = webView.cmuxInspectorObject() else { return false }
-        let visible = inspector.cmuxCallBool(selector: NSSelectorFromString("isVisible")) ?? false
-        if visible {
-            syncDeveloperToolsPresentationPreferenceFromUI()
-            guard concealDeveloperTools(inspector) else { return false }
-        }
-        preferredDeveloperToolsVisible = false
-        developerToolsDetachedOpenGraceDeadline = nil
-        forceDeveloperToolsRefreshOnNextAttach = false
-        cancelDeveloperToolsRestoreRetry()
-        return true
+        return enqueueDeveloperToolsVisibilityTransition(to: false, source: "hide")
     }
 
     /// During split/layout transitions SwiftUI can briefly mark the browser surface hidden
@@ -4057,7 +4279,9 @@ extension BrowserPanel {
         let attached = webView.superview == nil ? 0 : 1
         let inWindow = webView.window == nil ? 0 : 1
         let forceRefresh = forceDeveloperToolsRefreshOnNextAttach ? 1 : 0
-        return "pref=\(preferred) vis=\(visible) inspector=\(inspector) attached=\(attached) inWindow=\(inWindow) restoreRetry=\(developerToolsRestoreRetryAttempt) forceRefresh=\(forceRefresh)"
+        let transitionTarget = developerToolsTransitionTargetVisible.map { $0 ? "1" : "0" } ?? "nil"
+        let pendingTarget = pendingDeveloperToolsTransitionTargetVisible.map { $0 ? "1" : "0" } ?? "nil"
+        return "pref=\(preferred) vis=\(visible) inspector=\(inspector) attached=\(attached) inWindow=\(inWindow) restoreRetry=\(developerToolsRestoreRetryAttempt) forceRefresh=\(forceRefresh) tx=\(transitionTarget) pending=\(pendingTarget)"
     }
 
     func debugDeveloperToolsGeometrySummary() -> String {

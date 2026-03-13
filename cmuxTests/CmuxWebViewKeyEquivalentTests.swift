@@ -111,6 +111,23 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
         }
     }
 
+    private final class WindowCyclingActionSpy: NSObject {
+        weak var firstWindow: NSWindow?
+        weak var secondWindow: NSWindow?
+        private(set) var invocationCount = 0
+
+        @objc func cycleWindow(_ sender: Any?) {
+            invocationCount += 1
+            guard let firstWindow, let secondWindow else { return }
+
+            if NSApp.keyWindow === firstWindow {
+                secondWindow.makeKeyAndOrderFront(nil)
+            } else {
+                firstWindow.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
     private final class FirstResponderView: NSView {
         override var acceptsFirstResponder: Bool { true }
     }
@@ -677,15 +694,145 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
         }
         XCTAssertTrue(window.makeFirstResponder(responder))
     }
+
+    @MainActor
+    func testCmdBacktickMenuActionThatChangesKeyWindowOnlyRunsOnceWhenTerminalIsFirstResponder() {
+        _ = NSApplication.shared
+        AppDelegate.installWindowResponderSwizzlesForTesting()
+
+        let firstWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let secondWindow = NSWindow(
+            contentRect: NSRect(x: 40, y: 40, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+
+        let firstContainer = NSView(frame: firstWindow.contentRect(forFrameRect: firstWindow.frame))
+        let secondContainer = NSView(frame: secondWindow.contentRect(forFrameRect: secondWindow.frame))
+        firstWindow.contentView = firstContainer
+        secondWindow.contentView = secondContainer
+
+        let firstTerminal = GhosttyNSView(frame: firstContainer.bounds)
+        firstTerminal.autoresizingMask = [.width, .height]
+        firstContainer.addSubview(firstTerminal)
+
+        let secondTerminal = GhosttyNSView(frame: secondContainer.bounds)
+        secondTerminal.autoresizingMask = [.width, .height]
+        secondContainer.addSubview(secondTerminal)
+
+        let spy = WindowCyclingActionSpy()
+        spy.firstWindow = firstWindow
+        spy.secondWindow = secondWindow
+        installMenu(
+            target: spy,
+            action: #selector(WindowCyclingActionSpy.cycleWindow(_:)),
+            key: "`",
+            modifiers: [.command]
+        )
+
+        secondWindow.orderFront(nil)
+        firstWindow.makeKeyAndOrderFront(nil)
+        defer {
+            secondWindow.orderOut(nil)
+            firstWindow.orderOut(nil)
+        }
+
+        XCTAssertTrue(firstWindow.makeFirstResponder(firstTerminal))
+        guard let event = makeKeyDownEvent(
+            key: "`",
+            modifiers: [.command],
+            keyCode: 50,
+            windowNumber: firstWindow.windowNumber
+        ) else {
+            XCTFail("Failed to construct Cmd+` event")
+            return
+        }
+
+        NSApp.sendEvent(event)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        XCTAssertEqual(spy.invocationCount, 1, "Cmd+` should only trigger one window-cycle action")
+    }
+
+    @MainActor
+    func testCmdBacktickDoesNotRouteDirectlyToMainMenuWhenWebViewIsFirstResponder() {
+        _ = NSApplication.shared
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+
+        let container = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = container
+
+        let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+
+        let spy = ActionSpy()
+        installMenu(
+            target: spy,
+            action: #selector(ActionSpy.didInvoke(_:)),
+            key: "`",
+            modifiers: [.command]
+        )
+
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+        }
+
+        XCTAssertTrue(window.makeFirstResponder(webView))
+        guard let event = makeKeyDownEvent(
+            key: "`",
+            modifiers: [.command],
+            keyCode: 50,
+            windowNumber: window.windowNumber
+        ) else {
+            XCTFail("Failed to construct Cmd+` event")
+            return
+        }
+
+        XCTAssertFalse(shouldRouteCommandEquivalentDirectlyToMainMenu(event))
+        _ = webView.performKeyEquivalent(with: event)
+        XCTAssertFalse(
+            spy.invoked,
+            "CmuxWebView should not route Cmd+` directly to the menu when WebKit is first responder"
+        )
+    }
+
     private func installMenu(spy: ActionSpy, key: String, modifiers: NSEvent.ModifierFlags) {
+        installMenu(
+            target: spy,
+            action: #selector(ActionSpy.didInvoke(_:)),
+            key: key,
+            modifiers: modifiers
+        )
+    }
+
+    private func installMenu(
+        target: NSObject,
+        action: Selector,
+        key: String,
+        modifiers: NSEvent.ModifierFlags
+    ) {
         let mainMenu = NSMenu()
 
         let fileItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         let fileMenu = NSMenu(title: "File")
 
-        let item = NSMenuItem(title: "Test Item", action: #selector(ActionSpy.didInvoke(_:)), keyEquivalent: key)
+        let item = NSMenuItem(title: "Test Item", action: action, keyEquivalent: key)
         item.keyEquivalentModifierMask = modifiers
-        item.target = spy
+        item.target = target
         fileMenu.addItem(item)
 
         mainMenu.addItem(fileItem)
@@ -696,13 +843,18 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
         NSApp.mainMenu = mainMenu
     }
 
-    private func makeKeyDownEvent(key: String, modifiers: NSEvent.ModifierFlags, keyCode: UInt16) -> NSEvent? {
+    private func makeKeyDownEvent(
+        key: String,
+        modifiers: NSEvent.ModifierFlags,
+        keyCode: UInt16,
+        windowNumber: Int = 0
+    ) -> NSEvent? {
         NSEvent.keyEvent(
             with: .keyDown,
             location: .zero,
             modifierFlags: modifiers,
             timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: 0,
+            windowNumber: windowNumber,
             context: nil,
             characters: key,
             charactersIgnoringModifiers: key,
@@ -2430,6 +2582,89 @@ final class BrowserSessionHistoryRestoreTests: XCTestCase {
 
         XCTAssertFalse(panel.shouldRenderWebView)
     }
+
+    func testResetSidebarContextClearsBrowserPanelsIntoNewTabState() throws {
+        let workspace = Workspace()
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        let contextPanelId = try XCTUnwrap(workspace.focusedPanelId)
+        let browser = try XCTUnwrap(
+            workspace.newBrowserSurface(
+                inPane: paneId,
+                url: URL(string: "https://example.com"),
+                focus: false
+            )
+        )
+
+        browser.restoreSessionNavigationHistory(
+            backHistoryURLStrings: ["https://example.com/prev"],
+            forwardHistoryURLStrings: ["https://example.com/next"],
+            currentURLString: "https://example.com/current"
+        )
+        browser.startFind()
+
+        workspace.statusEntries["task"] = SidebarStatusEntry(key: "task", value: "Issue #1208")
+        workspace.metadataBlocks["notes"] = SidebarMetadataBlock(
+            key: "notes",
+            markdown: "test",
+            priority: 0,
+            timestamp: Date()
+        )
+        workspace.progress = SidebarProgressState(value: 0.5, label: "Loading")
+        workspace.updatePanelGitBranch(panelId: contextPanelId, branch: "issue-1208", isDirty: false)
+        workspace.updatePanelPullRequest(
+            panelId: contextPanelId,
+            number: 1208,
+            label: "PR",
+            url: try XCTUnwrap(URL(string: "https://example.com/pull/1208")),
+            status: .open
+        )
+        workspace.logEntries.append(
+            SidebarLogEntry(
+                message: "Issue #1208",
+                level: .info,
+                source: "test",
+                timestamp: Date()
+            )
+        )
+        workspace.surfaceListeningPorts[contextPanelId] = [3000]
+        workspace.recomputeListeningPorts()
+
+        XCTAssertTrue(browser.shouldRenderWebView)
+        XCTAssertNotNil(browser.preferredURLStringForOmnibar())
+        XCTAssertTrue(browser.canGoBack)
+        XCTAssertTrue(browser.canGoForward)
+        XCTAssertNotNil(browser.searchState)
+        XCTAssertFalse(workspace.statusEntries.isEmpty)
+        XCTAssertFalse(workspace.logEntries.isEmpty)
+        XCTAssertFalse(workspace.metadataBlocks.isEmpty)
+        XCTAssertNotNil(workspace.progress)
+        XCTAssertNotNil(workspace.gitBranch)
+        XCTAssertNotNil(workspace.pullRequest)
+        XCTAssertEqual(workspace.listeningPorts, [3000])
+
+        let priorWebView = browser.webView
+        let priorInstanceID = browser.webViewInstanceID
+        workspace.resetSidebarContext(reason: "test")
+
+        XCTAssertTrue(workspace.statusEntries.isEmpty)
+        XCTAssertTrue(workspace.logEntries.isEmpty)
+        XCTAssertTrue(workspace.metadataBlocks.isEmpty)
+        XCTAssertNil(workspace.progress)
+        XCTAssertNil(workspace.gitBranch)
+        XCTAssertTrue(workspace.panelGitBranches.isEmpty)
+        XCTAssertNil(workspace.pullRequest)
+        XCTAssertTrue(workspace.panelPullRequests.isEmpty)
+        XCTAssertTrue(workspace.surfaceListeningPorts.isEmpty)
+        XCTAssertTrue(workspace.listeningPorts.isEmpty)
+        XCTAssertFalse(browser.shouldRenderWebView)
+        XCTAssertNil(browser.preferredURLStringForOmnibar())
+        XCTAssertFalse(browser.canGoBack)
+        XCTAssertFalse(browser.canGoForward)
+        XCTAssertNil(browser.searchState)
+        XCTAssertFalse(browser.webView === priorWebView)
+        XCTAssertNotEqual(browser.webViewInstanceID, priorInstanceID)
+    }
+
 }
 
 @MainActor
@@ -2439,11 +2674,31 @@ final class BrowserDeveloperToolsVisibilityPersistenceTests: XCTestCase {
     }
 
     private final class FakeInspector: NSObject {
+        enum HideBehavior {
+            case unsupported
+            case noEffect
+            case hides
+        }
+
         private(set) var attachCount = 0
         private(set) var showCount = 0
+        private(set) var hideCount = 0
         private(set) var closeCount = 0
+        private let hideBehavior: HideBehavior
         private var visible = false
         private var attached = false
+
+        init(hideBehavior: HideBehavior = .unsupported) {
+            self.hideBehavior = hideBehavior
+            super.init()
+        }
+
+        override func responds(to aSelector: Selector!) -> Bool {
+            guard NSStringFromSelector(aSelector) == "hide" else {
+                return super.responds(to: aSelector)
+            }
+            return hideBehavior != .unsupported
+        }
 
         @objc func isVisible() -> Bool {
             visible
@@ -2464,6 +2719,12 @@ final class BrowserDeveloperToolsVisibilityPersistenceTests: XCTestCase {
             visible = true
         }
 
+        @objc func hide() {
+            hideCount += 1
+            guard hideBehavior == .hides else { return }
+            visible = false
+        }
+
         @objc func close() {
             closeCount += 1
             visible = false
@@ -2476,9 +2737,11 @@ final class BrowserDeveloperToolsVisibilityPersistenceTests: XCTestCase {
         installCmuxUnitTestInspectorOverride()
     }
 
-    private func makePanelWithInspector() -> (BrowserPanel, FakeInspector) {
+    private func makePanelWithInspector(
+        hideBehavior: FakeInspector.HideBehavior = .unsupported
+    ) -> (BrowserPanel, FakeInspector) {
         let panel = BrowserPanel(workspaceId: UUID())
-        let inspector = FakeInspector()
+        let inspector = FakeInspector(hideBehavior: hideBehavior)
         panel.webView.cmuxSetUnitTestInspector(inspector)
         return (panel, inspector)
     }
@@ -2493,6 +2756,10 @@ final class BrowserDeveloperToolsVisibilityPersistenceTests: XCTestCase {
             }
         }
         return nil
+    }
+
+    private func waitForDeveloperToolsTransitions() {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
     }
 
     private func findWindowBrowserSlotView(in root: NSView) -> WindowBrowserSlotView? {
@@ -2586,6 +2853,50 @@ final class BrowserDeveloperToolsVisibilityPersistenceTests: XCTestCase {
 
         panel.restoreDeveloperToolsAfterAttachIfNeeded()
         XCTAssertFalse(panel.hasPendingDeveloperToolsRefreshAfterAttach())
+    }
+
+    func testRapidToggleCoalescesToFinalVisibleIntentWithoutExtraInspectorCalls() {
+        let (panel, inspector) = makePanelWithInspector()
+
+        XCTAssertTrue(panel.toggleDeveloperTools())
+        XCTAssertTrue(panel.toggleDeveloperTools())
+        XCTAssertTrue(panel.toggleDeveloperTools())
+        XCTAssertEqual(inspector.showCount, 1)
+        XCTAssertEqual(inspector.closeCount, 0)
+
+        waitForDeveloperToolsTransitions()
+
+        XCTAssertTrue(panel.isDeveloperToolsVisible())
+        XCTAssertEqual(inspector.showCount, 1)
+        XCTAssertEqual(inspector.closeCount, 0)
+    }
+
+    func testRapidToggleQueuesHideAfterOpenTransitionSettles() {
+        let (panel, inspector) = makePanelWithInspector()
+
+        XCTAssertTrue(panel.toggleDeveloperTools())
+        XCTAssertTrue(panel.toggleDeveloperTools())
+        XCTAssertEqual(inspector.showCount, 1)
+        XCTAssertEqual(inspector.closeCount, 0)
+
+        waitForDeveloperToolsTransitions()
+
+        XCTAssertFalse(panel.isDeveloperToolsVisible())
+        XCTAssertEqual(inspector.showCount, 1)
+        XCTAssertEqual(inspector.closeCount, 1)
+    }
+
+    func testToggleDeveloperToolsFallsBackToCloseWhenHideDoesNotConcealInspector() {
+        let (panel, inspector) = makePanelWithInspector(hideBehavior: .noEffect)
+
+        XCTAssertTrue(panel.showDeveloperTools())
+        XCTAssertTrue(panel.isDeveloperToolsVisible())
+
+        XCTAssertTrue(panel.toggleDeveloperTools())
+
+        XCTAssertEqual(inspector.hideCount, 1)
+        XCTAssertEqual(inspector.closeCount, 1)
+        XCTAssertFalse(panel.isDeveloperToolsVisible())
     }
 
     func testTransientHideAttachmentPreserveFollowsDeveloperToolsIntent() {
@@ -4353,6 +4664,92 @@ final class SidebarBranchLayoutSettingsTests: XCTestCase {
     }
 }
 
+final class SidebarWorkspaceDetailSettingsTests: XCTestCase {
+    func testDefaultPreferencesWhenUnset() {
+        let suiteName = "SidebarWorkspaceDetailSettingsTests.Default.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(SidebarWorkspaceDetailSettings.hidesAllDetails(defaults: defaults))
+        XCTAssertTrue(SidebarWorkspaceDetailSettings.showsNotificationMessage(defaults: defaults))
+        XCTAssertTrue(
+            SidebarWorkspaceDetailSettings.resolvedNotificationMessageVisibility(
+                showNotificationMessage: SidebarWorkspaceDetailSettings.showsNotificationMessage(defaults: defaults),
+                hideAllDetails: SidebarWorkspaceDetailSettings.hidesAllDetails(defaults: defaults)
+            )
+        )
+    }
+
+    func testStoredPreferencesOverrideDefaults() {
+        let suiteName = "SidebarWorkspaceDetailSettingsTests.Stored.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(true, forKey: SidebarWorkspaceDetailSettings.hideAllDetailsKey)
+        defaults.set(false, forKey: SidebarWorkspaceDetailSettings.showNotificationMessageKey)
+
+        XCTAssertTrue(SidebarWorkspaceDetailSettings.hidesAllDetails(defaults: defaults))
+        XCTAssertFalse(SidebarWorkspaceDetailSettings.showsNotificationMessage(defaults: defaults))
+        XCTAssertFalse(
+            SidebarWorkspaceDetailSettings.resolvedNotificationMessageVisibility(
+                showNotificationMessage: SidebarWorkspaceDetailSettings.showsNotificationMessage(defaults: defaults),
+                hideAllDetails: false
+            )
+        )
+        XCTAssertFalse(
+            SidebarWorkspaceDetailSettings.resolvedNotificationMessageVisibility(
+                showNotificationMessage: true,
+                hideAllDetails: SidebarWorkspaceDetailSettings.hidesAllDetails(defaults: defaults)
+            )
+        )
+    }
+}
+
+final class SidebarWorkspaceAuxiliaryDetailVisibilityTests: XCTestCase {
+    func testResolvedVisibilityPreservesPerRowTogglesWhenDetailsAreShown() {
+        XCTAssertEqual(
+            SidebarWorkspaceAuxiliaryDetailVisibility.resolved(
+                showMetadata: true,
+                showLog: false,
+                showProgress: true,
+                showBranchDirectory: false,
+                showPullRequests: true,
+                showPorts: false,
+                hideAllDetails: false
+            ),
+            SidebarWorkspaceAuxiliaryDetailVisibility(
+                showsMetadata: true,
+                showsLog: false,
+                showsProgress: true,
+                showsBranchDirectory: false,
+                showsPullRequests: true,
+                showsPorts: false
+            )
+        )
+    }
+
+    func testResolvedVisibilityHidesAllAuxiliaryRowsWhenDetailsAreHidden() {
+        XCTAssertEqual(
+            SidebarWorkspaceAuxiliaryDetailVisibility.resolved(
+                showMetadata: true,
+                showLog: true,
+                showProgress: true,
+                showBranchDirectory: true,
+                showPullRequests: true,
+                showPorts: true,
+                hideAllDetails: true
+            ),
+            .hidden
+        )
+    }
+}
+
 final class SidebarActiveTabIndicatorSettingsTests: XCTestCase {
     func testDefaultStyleWhenUnset() {
         let suiteName = "SidebarActiveTabIndicatorSettingsTests.Default.\(UUID().uuidString)"
@@ -4684,6 +5081,114 @@ final class TabManagerWorkspaceOwnershipTests: XCTestCase {
         XCTAssertEqual(manager.selectedTabId, initialSelectedTabId)
         XCTAssertEqual(externalWorkspace.panels.count, externalPanelCountBefore)
         XCTAssertEqual(externalWorkspace.panelTitles, externalPanelTitlesBefore)
+    }
+}
+
+@MainActor
+final class TabManagerCloseWorkspacesWithConfirmationTests: XCTestCase {
+    func testCloseWorkspacesWithConfirmationPromptsOnceAndClosesAcceptedWorkspaces() {
+        let manager = TabManager()
+        let second = manager.addWorkspace()
+        let third = manager.addWorkspace()
+        manager.setCustomTitle(tabId: manager.tabs[0].id, title: "Alpha")
+        manager.setCustomTitle(tabId: second.id, title: "Beta")
+        manager.setCustomTitle(tabId: third.id, title: "Gamma")
+
+        var prompts: [(title: String, message: String, acceptCmdD: Bool)] = []
+        manager.confirmCloseHandler = { title, message, acceptCmdD in
+            prompts.append((title, message, acceptCmdD))
+            return true
+        }
+
+        manager.closeWorkspacesWithConfirmation([manager.tabs[0].id, second.id], allowPinned: true)
+
+        let expectedMessage = String(
+            format: String(
+                localized: "dialog.closeWorkspaces.message",
+                defaultValue: "This will close %1$lld workspaces and all of their panels:\n%2$@"
+            ),
+            locale: .current,
+            Int64(2),
+            "• Alpha\n• Beta"
+        )
+        XCTAssertEqual(prompts.count, 1, "Expected a single confirmation prompt for multi-close")
+        XCTAssertEqual(
+            prompts.first?.title,
+            String(localized: "dialog.closeWorkspaces.title", defaultValue: "Close workspaces?")
+        )
+        XCTAssertEqual(prompts.first?.message, expectedMessage)
+        XCTAssertEqual(prompts.first?.acceptCmdD, false)
+        XCTAssertEqual(manager.tabs.map(\.title), ["Gamma"])
+    }
+
+    func testCloseWorkspacesWithConfirmationKeepsWorkspacesWhenCancelled() {
+        let manager = TabManager()
+        let second = manager.addWorkspace()
+        manager.setCustomTitle(tabId: manager.tabs[0].id, title: "Alpha")
+        manager.setCustomTitle(tabId: second.id, title: "Beta")
+
+        var prompts: [(title: String, message: String, acceptCmdD: Bool)] = []
+        manager.confirmCloseHandler = { title, message, acceptCmdD in
+            prompts.append((title, message, acceptCmdD))
+            return false
+        }
+
+        manager.closeWorkspacesWithConfirmation([manager.tabs[0].id, second.id], allowPinned: true)
+
+        let expectedMessage = String(
+            format: String(
+                localized: "dialog.closeWorkspacesWindow.message",
+                defaultValue: "This will close the current window, its %1$lld workspaces, and all of their panels:\n%2$@"
+            ),
+            locale: .current,
+            Int64(2),
+            "• Alpha\n• Beta"
+        )
+        XCTAssertEqual(prompts.count, 1)
+        XCTAssertEqual(
+            prompts.first?.title,
+            String(localized: "dialog.closeWindow.title", defaultValue: "Close window?")
+        )
+        XCTAssertEqual(prompts.first?.message, expectedMessage)
+        XCTAssertEqual(prompts.first?.acceptCmdD, true)
+        XCTAssertEqual(manager.tabs.map(\.title), ["Alpha", "Beta"])
+    }
+
+    func testCloseCurrentWorkspaceWithConfirmationUsesSidebarMultiSelection() {
+        let manager = TabManager()
+        let second = manager.addWorkspace()
+        let third = manager.addWorkspace()
+        manager.setCustomTitle(tabId: manager.tabs[0].id, title: "Alpha")
+        manager.setCustomTitle(tabId: second.id, title: "Beta")
+        manager.setCustomTitle(tabId: third.id, title: "Gamma")
+        manager.selectWorkspace(second)
+        manager.setSidebarSelectedWorkspaceIds([manager.tabs[0].id, second.id])
+
+        var prompts: [(title: String, message: String, acceptCmdD: Bool)] = []
+        manager.confirmCloseHandler = { title, message, acceptCmdD in
+            prompts.append((title, message, acceptCmdD))
+            return false
+        }
+
+        manager.closeCurrentWorkspaceWithConfirmation()
+
+        let expectedMessage = String(
+            format: String(
+                localized: "dialog.closeWorkspaces.message",
+                defaultValue: "This will close %1$lld workspaces and all of their panels:\n%2$@"
+            ),
+            locale: .current,
+            Int64(2),
+            "• Alpha\n• Beta"
+        )
+        XCTAssertEqual(prompts.count, 1, "Expected Cmd+Shift+W path to reuse the multi-close summary dialog")
+        XCTAssertEqual(
+            prompts.first?.title,
+            String(localized: "dialog.closeWorkspaces.title", defaultValue: "Close workspaces?")
+        )
+        XCTAssertEqual(prompts.first?.message, expectedMessage)
+        XCTAssertEqual(prompts.first?.acceptCmdD, false)
+        XCTAssertEqual(manager.tabs.map(\.title), ["Alpha", "Beta", "Gamma"])
     }
 }
 
@@ -7415,6 +7920,25 @@ final class NotificationDockBadgeTests: XCTestCase {
         XCTAssertTrue(NotificationPaneFlashSettings.isEnabled(defaults: defaults))
     }
 
+    func testMenuBarExtraPreferenceDefaultsToVisible() {
+        let suiteName = "MenuBarExtraVisibilityTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create isolated UserDefaults suite")
+            return
+        }
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        XCTAssertTrue(MenuBarExtraSettings.showsMenuBarExtra(defaults: defaults))
+
+        defaults.set(false, forKey: MenuBarExtraSettings.showInMenuBarKey)
+        XCTAssertFalse(MenuBarExtraSettings.showsMenuBarExtra(defaults: defaults))
+
+        defaults.set(true, forKey: MenuBarExtraSettings.showInMenuBarKey)
+        XCTAssertTrue(MenuBarExtraSettings.showsMenuBarExtra(defaults: defaults))
+    }
+
     func testNotificationSoundUsesSystemSoundForDefaultAndNamedSounds() {
         let suiteName = "NotificationDockBadgeTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -9278,6 +9802,18 @@ final class BrowserPanelHostContainerViewTests: XCTestCase {
         }
     }
 
+    private final class TrackingInspectorFrontendWebView: WKWebView {
+        private(set) var evaluatedJavaScript: [String] = []
+
+        @MainActor override func evaluateJavaScript(
+            _ javaScriptString: String,
+            completionHandler: (@MainActor @Sendable (Any?, (any Error)?) -> Void)? = nil
+        ) {
+            evaluatedJavaScript.append(javaScriptString)
+            completionHandler?(nil, nil)
+        }
+    }
+
     private final class WKInspectorProbeView: NSView {
         override func hitTest(_ point: NSPoint) -> NSView? {
             bounds.contains(point) ? self : nil
@@ -9415,6 +9951,45 @@ final class BrowserPanelHostContainerViewTests: XCTestCase {
         XCTAssertGreaterThan(inspectorContainer.frame.minX, 0)
     }
 
+    func testBrowserPanelHostClaimsHostedInspectorDividerAcrossFullHeight() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 240, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let webViewRoot = NSView(frame: host.bounds)
+        webViewRoot.autoresizingMask = [.width, .height]
+        host.addSubview(webViewRoot)
+
+        let pageView = PrimaryPageProbeView(frame: NSRect(x: 0, y: 20, width: 92, height: webViewRoot.bounds.height - 40))
+        let inspectorContainer = EdgeTransparentWKInspectorProbeView(
+            frame: NSRect(x: 92, y: 20, width: webViewRoot.bounds.width - 92, height: webViewRoot.bounds.height - 40)
+        )
+        webViewRoot.addSubview(pageView)
+        webViewRoot.addSubview(inspectorContainer)
+        contentView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(
+            host.hitTest(NSPoint(x: inspectorContainer.frame.minX + 2, y: 4)) === host,
+            "The custom DevTools divider should remain draggable at the top edge of the browser pane"
+        )
+        XCTAssertTrue(
+            host.hitTest(NSPoint(x: inspectorContainer.frame.minX + 2, y: host.bounds.maxY - 4)) === host,
+            "The custom DevTools divider should remain draggable at the bottom edge of the browser pane"
+        )
+    }
+
     func testBrowserPanelHostFallsBackToManualHostedInspectorDragWhenNativeDividerHitIsUnavailable() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
@@ -9464,6 +10039,346 @@ final class BrowserPanelHostContainerViewTests: XCTestCase {
 
         XCTAssertGreaterThan(pageView.frame.width, 92)
         XCTAssertGreaterThan(inspectorContainer.frame.minX, 92)
+    }
+
+    func testBrowserPanelHostKeepsInspectorResizableAfterShrinkingToMinimumWidth() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 240, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let webViewRoot = NSView(frame: host.bounds)
+        webViewRoot.autoresizingMask = [.width, .height]
+        host.addSubview(webViewRoot)
+
+        let pageView = PrimaryPageProbeView(frame: NSRect(x: 0, y: 0, width: 92, height: webViewRoot.bounds.height))
+        let inspectorContainer = EdgeTransparentWKInspectorProbeView(
+            frame: NSRect(x: 92, y: 0, width: webViewRoot.bounds.width - 92, height: webViewRoot.bounds.height)
+        )
+        webViewRoot.addSubview(pageView)
+        webViewRoot.addSubview(inspectorContainer)
+        contentView.layoutSubtreeIfNeeded()
+
+        let dividerPointInHost = NSPoint(x: inspectorContainer.frame.minX + 2, y: host.bounds.midY)
+        let dividerPointInWindow = host.convert(dividerPointInHost, to: nil)
+
+        host.mouseDown(with: makeMouseEvent(type: .leftMouseDown, location: dividerPointInWindow, window: window))
+        let drag = makeMouseEvent(
+            type: .leftMouseDragged,
+            location: NSPoint(x: dividerPointInWindow.x + 220, y: dividerPointInWindow.y),
+            window: window
+        )
+        host.mouseDragged(with: drag)
+        host.mouseUp(with: makeMouseEvent(type: .leftMouseUp, location: drag.locationInWindow, window: window))
+
+        XCTAssertGreaterThanOrEqual(
+            inspectorContainer.frame.width,
+            120,
+            "Shrinking the DevTools pane should clamp to a recoverable minimum width"
+        )
+        XCTAssertTrue(
+            host.hitTest(NSPoint(x: inspectorContainer.frame.minX + 2, y: 4)) === host,
+            "After clamping, the DevTools divider should still be draggable near the top edge"
+        )
+        XCTAssertTrue(
+            host.hitTest(NSPoint(x: inspectorContainer.frame.minX + 2, y: host.bounds.maxY - 4)) === host,
+            "After clamping, the DevTools divider should still be draggable near the bottom edge"
+        )
+    }
+
+    func testBrowserPanelHostPromotesVisibleRightDockedInspectorIntoManagedSideDock() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 240, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let slotView = host.ensureLocalInlineSlotView()
+        let pageView = WKWebView(frame: NSRect(x: 0, y: 0, width: 92, height: host.bounds.height + 180))
+        let inspectorView = WKWebView(
+            frame: NSRect(x: 92, y: 0, width: slotView.bounds.width - 92, height: host.bounds.height)
+        )
+        slotView.addSubview(pageView)
+        slotView.addSubview(inspectorView)
+        host.pinHostedWebView(pageView, in: slotView)
+        host.setHostedInspectorFrontendWebView(inspectorView)
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(
+            host.promoteHostedInspectorSideDockFromCurrentLayoutIfNeeded(),
+            "A visible right-docked inspector should not wait on async dock-configuration JS before entering the managed side-dock path"
+        )
+        XCTAssertTrue(
+            pageView.superview === inspectorView.superview && pageView.superview !== slotView,
+            "Promotion should move both hosted inspector siblings into the managed side-dock container"
+        )
+        XCTAssertEqual(
+            pageView.frame.height,
+            host.bounds.height,
+            accuracy: 0.5,
+            "Promotion should normalize stale page heights to the host height so the page layer stops covering the divider"
+        )
+        XCTAssertEqual(
+            inspectorView.frame.height,
+            host.bounds.height,
+            accuracy: 0.5,
+            "Promotion should normalize the inspector height to the host height"
+        )
+    }
+
+    func testBrowserPanelHostAllowsRightDockedInspectorToExpandLeftAfterPromotion() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 240, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let slotView = host.ensureLocalInlineSlotView()
+        let pageView = WKWebView(frame: NSRect(x: 0, y: 0, width: 92, height: host.bounds.height))
+        let inspectorView = WKWebView(
+            frame: NSRect(x: 92, y: 0, width: slotView.bounds.width - 92, height: host.bounds.height)
+        )
+        slotView.addSubview(pageView)
+        slotView.addSubview(inspectorView)
+        host.pinHostedWebView(pageView, in: slotView)
+        host.setHostedInspectorFrontendWebView(inspectorView)
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(
+            host.promoteHostedInspectorSideDockFromCurrentLayoutIfNeeded(),
+            "The managed side-dock path should be active before drag assertions run"
+        )
+
+        let initialPageWidth = pageView.frame.width
+        let initialInspectorWidth = inspectorView.frame.width
+        let dividerPointInHost = NSPoint(x: inspectorView.frame.minX + 2, y: host.bounds.midY)
+        let dividerPointInWindow = host.convert(dividerPointInHost, to: nil)
+
+        host.mouseDown(with: makeMouseEvent(type: .leftMouseDown, location: dividerPointInWindow, window: window))
+        let drag = makeMouseEvent(
+            type: .leftMouseDragged,
+            location: NSPoint(x: dividerPointInWindow.x - 40, y: dividerPointInWindow.y),
+            window: window
+        )
+        host.mouseDragged(with: drag)
+        host.mouseUp(with: makeMouseEvent(type: .leftMouseUp, location: drag.locationInWindow, window: window))
+
+        XCTAssertGreaterThan(
+            inspectorView.frame.width,
+            initialInspectorWidth,
+            "Right-docked DevTools should expand when the divider is dragged left"
+        )
+        XCTAssertLessThan(
+            pageView.frame.width,
+            initialPageWidth,
+            "Expanding right-docked DevTools should shrink the page width"
+        )
+    }
+
+    func testBrowserPanelHostKeepsAutomaticRightDockedWidthAboveMinimumWhileShrinking() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 140, y: 0, width: 280, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let slotView = host.ensureLocalInlineSlotView()
+        let pageView = WKWebView(frame: NSRect(x: 0, y: 0, width: 132, height: host.bounds.height))
+        let inspectorView = WKWebView(
+            frame: NSRect(x: 132, y: 0, width: slotView.bounds.width - 132, height: host.bounds.height)
+        )
+        slotView.addSubview(pageView)
+        slotView.addSubview(inspectorView)
+        host.pinHostedWebView(pageView, in: slotView)
+        host.setHostedInspectorFrontendWebView(inspectorView)
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(host.promoteHostedInspectorSideDockFromCurrentLayoutIfNeeded())
+
+        host.setPreferredHostedInspectorWidth(width: 80, widthFraction: nil)
+        host.setFrameSize(NSSize(width: 210, height: host.frame.height))
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThanOrEqual(
+            inspectorView.frame.width,
+            120,
+            "Automatic pane resize should honor the same minimum hosted inspector width as manual dragging"
+        )
+        XCTAssertEqual(
+            inspectorView.frame.height,
+            host.bounds.height,
+            accuracy: 0.5,
+            "Automatic shrink should keep the inspector vertically normalized to the host height"
+        )
+    }
+
+    func testBrowserPanelHostRequestsBottomDockWhenSideDockLeavesTooLittlePageWidth() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 280, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let slotView = host.ensureLocalInlineSlotView()
+        let pageView = WKWebView(frame: NSRect(x: 0, y: 0, width: 120, height: host.bounds.height))
+        let inspectorView = TrackingInspectorFrontendWebView(
+            frame: NSRect(x: 120, y: 0, width: slotView.bounds.width - 120, height: host.bounds.height)
+        )
+        slotView.addSubview(pageView)
+        slotView.addSubview(inspectorView)
+        host.pinHostedWebView(pageView, in: slotView)
+        host.setHostedInspectorFrontendWebView(inspectorView)
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(host.promoteHostedInspectorSideDockFromCurrentLayoutIfNeeded())
+
+        host.setFrameSize(NSSize(width: 210, height: host.frame.height))
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(
+            inspectorView.evaluatedJavaScript.contains(where: { $0.contains("WI._dockBottom()") }),
+            "Narrow pane widths should request bottom-docked DevTools instead of leaving the side-docked inspector in an unstable layout"
+        )
+        XCTAssertTrue(
+            inspectorView.evaluatedJavaScript.contains(where: { $0.contains("const allowSideDock = false;") }),
+            "Once a narrow pane proves it cannot safely side-dock DevTools, the inspector frontend should hide and disable left/right dock controls"
+        )
+    }
+
+    func testBrowserPanelManagedSideDockDoesNotAutoresizeDraggedFrames() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let host = WebViewRepresentable.HostContainerView(frame: NSRect(x: 180, y: 0, width: 240, height: contentView.bounds.height))
+        host.autoresizingMask = [.minXMargin, .height]
+        contentView.addSubview(host)
+
+        let slotView = host.ensureLocalInlineSlotView()
+        let pageView = WKWebView(frame: NSRect(x: 0, y: 0, width: 92, height: host.bounds.height))
+        let inspectorView = WKWebView(
+            frame: NSRect(x: 92, y: 0, width: slotView.bounds.width - 92, height: host.bounds.height)
+        )
+        slotView.addSubview(pageView)
+        slotView.addSubview(inspectorView)
+        host.pinHostedWebView(pageView, in: slotView)
+        host.setHostedInspectorFrontendWebView(inspectorView)
+        contentView.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(host.promoteHostedInspectorSideDockFromCurrentLayoutIfNeeded())
+
+        let dividerPointInHost = NSPoint(x: inspectorView.frame.minX + 2, y: host.bounds.midY)
+        let dividerPointInWindow = host.convert(dividerPointInHost, to: nil)
+        host.mouseDown(with: makeMouseEvent(type: .leftMouseDown, location: dividerPointInWindow, window: window))
+        let drag = makeMouseEvent(
+            type: .leftMouseDragged,
+            location: NSPoint(x: dividerPointInWindow.x - 30, y: dividerPointInWindow.y),
+            window: window
+        )
+        host.mouseDragged(with: drag)
+        host.mouseUp(with: makeMouseEvent(type: .leftMouseUp, location: drag.locationInWindow, window: window))
+
+        guard let managedContainer = pageView.superview else {
+            XCTFail("Expected managed side-dock container")
+            return
+        }
+        let draggedPageFrame = pageView.frame
+        let draggedInspectorFrame = inspectorView.frame
+
+        managedContainer.setFrameSize(
+            NSSize(width: managedContainer.frame.width, height: managedContainer.frame.height + 24)
+        )
+
+        XCTAssertEqual(
+            pageView.frame.origin.x,
+            draggedPageFrame.origin.x,
+            accuracy: 0.5,
+            "Managed side-dock container should not autoresize the page back to a stale divider position"
+        )
+        XCTAssertEqual(
+            pageView.frame.width,
+            draggedPageFrame.width,
+            accuracy: 0.5,
+            "Managed side-dock container should preserve the dragged page width until the host explicitly reapplies layout"
+        )
+        XCTAssertEqual(
+            inspectorView.frame.origin.x,
+            draggedInspectorFrame.origin.x,
+            accuracy: 0.5,
+            "Managed side-dock container should preserve the dragged inspector origin"
+        )
+        XCTAssertEqual(
+            inspectorView.frame.width,
+            draggedInspectorFrame.width,
+            accuracy: 0.5,
+            "Managed side-dock container should preserve the dragged inspector width"
+        )
     }
 
     func testBrowserPanelHostFallsBackToManualHostedInspectorDragForLeftDockedInspector() {
@@ -11330,16 +12245,101 @@ final class TerminalWindowPortalLifecycleTests: XCTestCase {
         portal.synchronizeHostedViewForAnchor(anchor)
         XCTAssertFalse(hosted.isHidden, "Portal should unhide after geometry is usable")
     }
+
+    func testScheduledExternalGeometrySyncRefreshesAncestorLayoutShift() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer {
+            NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+            window.orderOut(nil)
+        }
+
+        realizeWindowLayout(window)
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let shiftedContainer = NSView(frame: NSRect(x: 120, y: 60, width: 220, height: 160))
+        contentView.addSubview(shiftedContainer)
+        let anchor = NSView(frame: NSRect(x: 24, y: 28, width: 72, height: 56))
+        shiftedContainer.addSubview(anchor)
+
+        let surface = TerminalSurface(
+            tabId: UUID(),
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: nil,
+            workingDirectory: nil
+        )
+        let hosted = surface.hostedView
+        TerminalWindowPortalRegistry.bind(
+            hostedView: hosted,
+            to: anchor,
+            visibleInUI: true,
+            expectedSurfaceId: surface.id,
+            expectedGeneration: surface.portalBindingGeneration()
+        )
+        TerminalWindowPortalRegistry.synchronizeForAnchor(anchor)
+
+        let anchorCenter = NSPoint(x: anchor.bounds.midX, y: anchor.bounds.midY)
+        let originalWindowPoint = anchor.convert(anchorCenter, to: nil)
+        XCTAssertNotNil(
+            TerminalWindowPortalRegistry.terminalViewAtWindowPoint(originalWindowPoint, in: window),
+            "Initial hit-testing should resolve the portal-hosted terminal at its original window position"
+        )
+
+        shiftedContainer.frame.origin.x += 96
+        contentView.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+
+        let shiftedWindowPoint = anchor.convert(anchorCenter, to: nil)
+        XCTAssertNotEqual(originalWindowPoint.x, shiftedWindowPoint.x, accuracy: 0.5)
+        XCTAssertNil(
+            TerminalWindowPortalRegistry.terminalViewAtWindowPoint(shiftedWindowPoint, in: window),
+            "Ancestor-only layout shifts should leave the portal stale until an external geometry sync runs"
+        )
+        XCTAssertNotNil(
+            TerminalWindowPortalRegistry.terminalViewAtWindowPoint(originalWindowPoint, in: window),
+            "Before the external geometry sync, hit-testing should still point at the stale portal location"
+        )
+
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertNil(
+            TerminalWindowPortalRegistry.terminalViewAtWindowPoint(originalWindowPoint, in: window),
+            "The stale portal position should be cleared after the scheduled external geometry sync"
+        )
+        XCTAssertNotNil(
+            TerminalWindowPortalRegistry.terminalViewAtWindowPoint(shiftedWindowPoint, in: window),
+            "The scheduled external geometry sync should move the portal-hosted terminal to the anchor's new window position"
+        )
+    }
 }
 
 @MainActor
 final class BrowserWindowPortalLifecycleTests: XCTestCase {
     private final class TrackingPortalWebView: WKWebView {
         private(set) var displayIfNeededCount = 0
+        private(set) var reattachRenderingStateCount = 0
 
         override func displayIfNeeded() {
             displayIfNeededCount += 1
             super.displayIfNeeded()
+        }
+
+        @objc(_enterInWindow)
+        func cmuxUnitTestEnterInWindow() {
+            reattachRenderingStateCount += 1
+        }
+
+        @objc(_endDeferringViewInWindowChangesSync)
+        func cmuxUnitTestEndDeferringViewInWindowChangesSync() {
+            reattachRenderingStateCount += 1
         }
     }
 
@@ -11609,6 +12609,33 @@ final class BrowserWindowPortalLifecycleTests: XCTestCase {
         XCTAssertEqual(webView.frame.size.height, slot.bounds.size.height, accuracy: 0.5)
     }
 
+    func testPortalSlotPinPreservesSideDockedInspectorManagedWebViewFrameOnRehost() {
+        let slot = WindowBrowserSlotView(frame: NSRect(x: 0, y: 0, width: 240, height: 160))
+        let webView = CmuxWebView(frame: NSRect(x: 0, y: 0, width: 132, height: 160), configuration: WKWebViewConfiguration())
+        let inspectorContainer = NSView(frame: NSRect(x: 132, y: 0, width: 108, height: 160))
+        let inspectorView = WKInspectorProbeView(frame: inspectorContainer.bounds)
+        inspectorView.autoresizingMask = [.width, .height]
+        inspectorContainer.addSubview(inspectorView)
+        slot.addSubview(webView)
+        slot.addSubview(inspectorContainer)
+
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.autoresizingMask = []
+        slot.pinHostedWebView(webView)
+
+        XCTAssertEqual(
+            webView.frame.maxX,
+            inspectorContainer.frame.minX,
+            accuracy: 0.5,
+            "Rehosting a portal-managed browser should preserve the WebKit-owned side inspector split"
+        )
+        XCTAssertLessThan(
+            webView.frame.width,
+            slot.bounds.width,
+            "The page frame should stay narrower than the full slot while a side-docked inspector is present"
+        )
+    }
+
     func testPortalResizePreservesSideDockedInspectorManagedWebViewFrame() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
@@ -11676,6 +12703,138 @@ final class BrowserWindowPortalLifecycleTests: XCTestCase {
             webView.frame.width,
             slot.bounds.width,
             "Side-docked inspector should still own part of the slot after pane resize"
+        )
+    }
+
+    func testPortalAnchorResizeDoesNotForceHostedWebViewPresentationRefresh() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        realizeWindowLayout(window)
+        let portal = WindowBrowserPortal(window: window)
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let anchor = NSView(frame: NSRect(x: 40, y: 24, width: 220, height: 160))
+        contentView.addSubview(anchor)
+
+        let webView = TrackingPortalWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        portal.bind(webView: webView, to: anchor, visibleInUI: true)
+        contentView.layoutSubtreeIfNeeded()
+        portal.synchronizeWebViewForAnchor(anchor)
+        advanceAnimations()
+
+        guard let slot = webView.superview as? WindowBrowserSlotView else {
+            XCTFail("Expected browser slot")
+            return
+        }
+
+        let initialDisplayCount = webView.displayIfNeededCount
+        let initialReattachCount = webView.reattachRenderingStateCount
+        anchor.frame = NSRect(x: 52, y: 30, width: 248, height: 178)
+        contentView.layoutSubtreeIfNeeded()
+        portal.synchronizeWebViewForAnchor(anchor)
+        advanceAnimations()
+
+        XCTAssertFalse(slot.isHidden, "Anchor resize should keep the portal-hosted browser visible")
+        XCTAssertEqual(slot.frame.origin.x, 52, accuracy: 0.5)
+        XCTAssertEqual(slot.frame.origin.y, 30, accuracy: 0.5)
+        XCTAssertEqual(slot.frame.size.width, 248, accuracy: 0.5)
+        XCTAssertEqual(slot.frame.size.height, 178, accuracy: 0.5)
+        XCTAssertGreaterThan(
+            webView.displayIfNeededCount,
+            initialDisplayCount,
+            "Pure anchor geometry updates should still repaint the hosted browser"
+        )
+        XCTAssertEqual(
+            webView.reattachRenderingStateCount,
+            initialReattachCount,
+            "Pure anchor geometry updates should not trigger the WebKit reattach path"
+        )
+    }
+
+    func testExternalSplitResizeDoesNotForceHostedWebViewPresentationRefresh() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        realizeWindowLayout(window)
+        let portal = WindowBrowserPortal(window: window)
+        guard let contentView = window.contentView else {
+            XCTFail("Expected content view")
+            return
+        }
+
+        let splitView = NSSplitView(frame: contentView.bounds)
+        splitView.autoresizingMask = [.width, .height]
+        splitView.isVertical = true
+
+        let leadingPane = NSView(
+            frame: NSRect(x: 0, y: 0, width: 220, height: contentView.bounds.height)
+        )
+        leadingPane.autoresizingMask = [.height]
+        let trailingPane = NSView(
+            frame: NSRect(
+                x: 221,
+                y: 0,
+                width: contentView.bounds.width - 221,
+                height: contentView.bounds.height
+            )
+        )
+        trailingPane.autoresizingMask = [.width, .height]
+        splitView.addSubview(leadingPane)
+        splitView.addSubview(trailingPane)
+        contentView.addSubview(splitView)
+        splitView.adjustSubviews()
+
+        let anchor = NSView(frame: trailingPane.bounds.insetBy(dx: 12, dy: 12))
+        anchor.autoresizingMask = [.width, .height]
+        trailingPane.addSubview(anchor)
+
+        let webView = TrackingPortalWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        portal.bind(webView: webView, to: anchor, visibleInUI: true)
+        contentView.layoutSubtreeIfNeeded()
+        portal.synchronizeWebViewForAnchor(anchor)
+        advanceAnimations()
+
+        guard let slot = webView.superview as? WindowBrowserSlotView else {
+            XCTFail("Expected browser slot")
+            return
+        }
+
+        let initialDisplayCount = webView.displayIfNeededCount
+        let initialReattachCount = webView.reattachRenderingStateCount
+        let initialWidth = slot.frame.width
+
+        splitView.setPosition(280, ofDividerAt: 0)
+        contentView.layoutSubtreeIfNeeded()
+        NotificationCenter.default.post(name: NSSplitView.didResizeSubviewsNotification, object: splitView)
+        advanceAnimations()
+
+        XCTAssertFalse(slot.isHidden, "App split resize should keep the browser slot visible")
+        XCTAssertLessThan(
+            slot.frame.width,
+            initialWidth,
+            "Moving the app split divider should shrink the hosted browser slot"
+        )
+        XCTAssertGreaterThan(
+            webView.displayIfNeededCount,
+            initialDisplayCount,
+            "External split resize should still repaint the hosted browser"
+        )
+        XCTAssertEqual(
+            webView.reattachRenderingStateCount,
+            initialReattachCount,
+            "External split resize should not trigger the WebKit reattach path"
         )
     }
 
@@ -11966,21 +13125,33 @@ final class BrowserWindowPortalLifecycleTests: XCTestCase {
         portal.synchronizeWebViewForAnchor(anchor)
         advanceAnimations()
         let initialDisplayCount = webView.displayIfNeededCount
+        let initialReattachCount = webView.reattachRenderingStateCount
 
         portal.updateEntryVisibility(forWebViewId: ObjectIdentifier(webView), visibleInUI: false, zPriority: 0)
         portal.synchronizeWebViewForAnchor(anchor)
         advanceAnimations()
         let hiddenDisplayCount = webView.displayIfNeededCount
+        let hiddenReattachCount = webView.reattachRenderingStateCount
 
         portal.updateEntryVisibility(forWebViewId: ObjectIdentifier(webView), visibleInUI: true, zPriority: 0)
         portal.synchronizeWebViewForAnchor(anchor)
         advanceAnimations()
 
         XCTAssertGreaterThanOrEqual(hiddenDisplayCount, initialDisplayCount)
+        XCTAssertEqual(
+            hiddenReattachCount,
+            initialReattachCount,
+            "Hiding a portal-hosted browser should not itself trigger the WebKit reattach path"
+        )
         XCTAssertGreaterThan(
             webView.displayIfNeededCount,
             hiddenDisplayCount,
             "Revealing an existing portal-hosted browser should refresh WebKit presentation immediately"
+        )
+        XCTAssertGreaterThan(
+            webView.reattachRenderingStateCount,
+            hiddenReattachCount,
+            "Revealing an existing portal-hosted browser should trigger the WebKit reattach path"
         )
     }
 
