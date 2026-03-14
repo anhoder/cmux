@@ -14525,9 +14525,6 @@ final class GhosttyTerminalViewVisibilityPolicyTests: XCTestCase {
 
 @MainActor
 final class LocalWebKitBrowserSurfaceRuntimeTests: XCTestCase {
-    private final class TestNavigationDelegate: NSObject, WKNavigationDelegate {}
-    private final class TestUIDelegate: NSObject, WKUIDelegate {}
-
     private func assertColorsEqual(
         _ lhs: NSColor?,
         _ rhs: NSColor,
@@ -14632,26 +14629,72 @@ final class LocalWebKitBrowserSurfaceRuntimeTests: XCTestCase {
         XCTAssertEqual(observedStates.last?.pageZoom ?? 0, 1.4, accuracy: 0.001)
     }
 
-    func testReplaceWebViewRebindsDelegatesAndDownloadHandler() {
+    func testSurfaceInstallsInternalDelegatesAndForwardsRuntimeEvents() {
         let surface = LocalWebKitBrowserSurfaceRuntime(
             processPool: WKProcessPool(),
             configuration: makeConfiguration()
         )
-        let navigationDelegate = TestNavigationDelegate()
-        let uiDelegate = TestUIDelegate()
+        var finishedNavigationCount = 0
+        var failedURLs: [String] = []
+        var terminatedProcessCount = 0
+
+        surface.eventHandlers = BrowserSurfaceRuntimeEventHandlers(
+            didFinishNavigation: {
+                finishedNavigationCount += 1
+            },
+            didFailNavigation: { failedURL in
+                failedURLs.append(failedURL)
+            },
+            didTerminateWebContentProcess: {
+                terminatedProcessCount += 1
+            }
+        )
+
+        guard let navigationDelegate = surface.webView.navigationDelegate else {
+            return XCTFail("Expected runtime to install an internal navigation delegate")
+        }
+        XCTAssertNotNil(surface.webView.uiDelegate, "Expected runtime to install an internal UI delegate")
+
+        let attemptedURL = URL(string: "https://cmux.invalid/runtime")!
+        surface.setLastAttemptedNavigationURL(attemptedURL)
+        navigationDelegate.webView?(surface.webView, didFinish: nil)
+        navigationDelegate.webView?(
+            surface.webView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        )
+        navigationDelegate.webViewWebContentProcessDidTerminate?(surface.webView)
+
+        XCTAssertEqual(finishedNavigationCount, 1)
+        XCTAssertEqual(failedURLs, [attemptedURL.absoluteString])
+        XCTAssertEqual(terminatedProcessCount, 1)
+    }
+
+    func testReplaceWebViewRebindsInternalDelegatesAndDownloadHandler() {
+        let surface = LocalWebKitBrowserSurfaceRuntime(
+            processPool: WKProcessPool(),
+            configuration: makeConfiguration()
+        )
+        var finishedNavigationCount = 0
         var downloadStates: [Bool] = []
 
-        surface.configureDelegates(
-            navigationDelegate: navigationDelegate,
-            uiDelegate: uiDelegate
+        surface.eventHandlers = BrowserSurfaceRuntimeEventHandlers(
+            didFinishNavigation: {
+                finishedNavigationCount += 1
+            },
+            downloadStateChanged: { isDownloading in
+                downloadStates.append(isDownloading)
+            }
         )
-        surface.setDownloadStateChangeHandler { downloadStates.append($0) }
 
         guard let initialWebView = surface.webView as? CmuxWebView else {
             return XCTFail("Expected CmuxWebView runtime surface")
         }
-        XCTAssertTrue(initialWebView.navigationDelegate === navigationDelegate)
-        XCTAssertTrue(initialWebView.uiDelegate === uiDelegate)
+        guard let initialNavigationDelegate = initialWebView.navigationDelegate else {
+            return XCTFail("Expected initial runtime navigation delegate")
+        }
+        XCTAssertNotNil(initialWebView.uiDelegate, "Expected initial runtime UI delegate")
+        initialNavigationDelegate.webView?(initialWebView, didFinish: nil)
         initialWebView.onContextMenuDownloadStateChanged?(true)
 
         let replacement = surface.replaceWebView(
@@ -14662,9 +14705,16 @@ final class LocalWebKitBrowserSurfaceRuntimeTests: XCTestCase {
             return XCTFail("Expected replacement CmuxWebView runtime surface")
         }
 
-        XCTAssertTrue(replacementWebView.navigationDelegate === navigationDelegate)
-        XCTAssertTrue(replacementWebView.uiDelegate === uiDelegate)
+        XCTAssertNil(initialWebView.navigationDelegate)
+        XCTAssertNil(initialWebView.uiDelegate)
+        XCTAssertNil(initialWebView.onContextMenuDownloadStateChanged)
+        guard let replacementNavigationDelegate = replacementWebView.navigationDelegate else {
+            return XCTFail("Expected replacement runtime navigation delegate")
+        }
+        XCTAssertNotNil(replacementWebView.uiDelegate, "Expected replacement runtime UI delegate")
+        replacementNavigationDelegate.webView?(replacementWebView, didFinish: nil)
         replacementWebView.onContextMenuDownloadStateChanged?(false)
+        XCTAssertEqual(finishedNavigationCount, 2)
         XCTAssertEqual(downloadStates, [true, false])
     }
 }

@@ -1227,7 +1227,7 @@ actor BrowserSearchSuggestionService {
 
 /// BrowserPanel provides a WKWebView-based browser panel.
 /// All browser panels share a WKProcessPool for cookie sharing.
-private enum BrowserInsecureHTTPNavigationIntent {
+enum BrowserInsecureHTTPNavigationIntent {
     case currentTab
     case newTab
 }
@@ -1273,12 +1273,24 @@ struct BrowserSurfaceRuntimeState: Equatable {
     let pageZoom: CGFloat
 }
 
+struct BrowserSurfaceRuntimeEventHandlers {
+    var didFinishNavigation: (() -> Void)?
+    var didFailNavigation: ((String) -> Void)?
+    var didTerminateWebContentProcess: (() -> Void)?
+    var openInNewTab: ((URL) -> Void)?
+    var requestNavigation: ((URLRequest, BrowserInsecureHTTPNavigationIntent) -> Void)?
+    var shouldBlockInsecureHTTPNavigation: ((URL) -> Bool)?
+    var handleBlockedInsecureHTTPNavigation: ((URLRequest, BrowserInsecureHTTPNavigationIntent) -> Void)?
+    var downloadStateChanged: ((Bool) -> Void)?
+}
+
 @MainActor
 protocol BrowserSurfaceRuntime: AnyObject {
     var backendKind: BrowserRuntimeBackendKind { get }
     var webView: WKWebView { get }
     var webViewInstanceID: UUID { get }
     var state: BrowserSurfaceRuntimeState { get }
+    var eventHandlers: BrowserSurfaceRuntimeEventHandlers { get set }
     var onStateChange: ((BrowserSurfaceRuntimeState) -> Void)? { get set }
 
     @discardableResult
@@ -1287,11 +1299,7 @@ protocol BrowserSurfaceRuntime: AnyObject {
         pageZoom: CGFloat?
     ) -> WKWebView
 
-    func configureDelegates(
-        navigationDelegate: WKNavigationDelegate?,
-        uiDelegate: WKUIDelegate?
-    )
-    func setDownloadStateChangeHandler(_ handler: ((Bool) -> Void)?)
+    func setLastAttemptedNavigationURL(_ url: URL?)
     func setCustomUserAgent(_ customUserAgent: String)
     func setUnderPageBackgroundColor(_ color: NSColor)
     @discardableResult
@@ -1334,10 +1342,15 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
     private(set) var webView: WKWebView
     private(set) var webViewInstanceID: UUID
     private var observations: [NSKeyValueObservation] = []
-    private var navigationDelegate: WKNavigationDelegate?
-    private var uiDelegate: WKUIDelegate?
-    private var downloadStateChangeHandler: ((Bool) -> Void)?
+    private let navigationDelegate = BrowserNavigationDelegate()
+    private let uiDelegate = BrowserUIDelegate()
+    private let downloadDelegate = BrowserDownloadDelegate()
     private var lastEmittedState: BrowserSurfaceRuntimeState?
+    var eventHandlers = BrowserSurfaceRuntimeEventHandlers() {
+        didSet {
+            applyEventHandlersToCurrentWebView()
+        }
+    }
     var onStateChange: ((BrowserSurfaceRuntimeState) -> Void)? {
         didSet {
             emitStateChange(force: true)
@@ -1367,6 +1380,7 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
         )
         self.webView = webView
         self.webViewInstanceID = UUID()
+        wireInternalDelegates()
         bindWebView(webView)
     }
 
@@ -1375,7 +1389,9 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
         using configuration: BrowserRuntimeSurfaceConfiguration,
         pageZoom: CGFloat?
     ) -> WKWebView {
+        let retiredWebView = webView
         observations.removeAll()
+        clearBindings(on: retiredWebView)
         let replacement = Self.makeWebView(
             processPool: processPool,
             configuration: configuration
@@ -1383,26 +1399,15 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
         if let pageZoom {
             replacement.pageZoom = pageZoom
         }
-        bindWebView(replacement)
         webView = replacement
         webViewInstanceID = UUID()
+        bindWebView(replacement)
         emitStateChange(force: true)
         return replacement
     }
 
-    func configureDelegates(
-        navigationDelegate: WKNavigationDelegate?,
-        uiDelegate: WKUIDelegate?
-    ) {
-        self.navigationDelegate = navigationDelegate
-        self.uiDelegate = uiDelegate
-        webView.navigationDelegate = navigationDelegate
-        webView.uiDelegate = uiDelegate
-    }
-
-    func setDownloadStateChangeHandler(_ handler: ((Bool) -> Void)?) {
-        downloadStateChangeHandler = handler
-        (webView as? CmuxWebView)?.onContextMenuDownloadStateChanged = handler
+    func setLastAttemptedNavigationURL(_ url: URL?) {
+        navigationDelegate.lastAttemptedURL = url
     }
 
     func setCustomUserAgent(_ customUserAgent: String) {
@@ -1497,13 +1502,71 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
         return webView
     }
 
+    private func wireInternalDelegates() {
+        navigationDelegate.didFinish = { [weak self] webView in
+            guard let self, self.isCurrentWebView(webView) else { return }
+            self.eventHandlers.didFinishNavigation?()
+        }
+        navigationDelegate.didFailNavigation = { [weak self] webView, failedURL in
+            guard let self, self.isCurrentWebView(webView) else { return }
+            self.eventHandlers.didFailNavigation?(failedURL)
+        }
+        navigationDelegate.didTerminateWebContentProcess = { [weak self] webView in
+            guard let self, self.isCurrentWebView(webView) else { return }
+            self.eventHandlers.didTerminateWebContentProcess?()
+        }
+        navigationDelegate.openInNewTab = { [weak self] url in
+            self?.eventHandlers.openInNewTab?(url)
+        }
+        navigationDelegate.shouldBlockInsecureHTTPNavigation = { [weak self] url in
+            self?.eventHandlers.shouldBlockInsecureHTTPNavigation?(url) ?? false
+        }
+        navigationDelegate.handleBlockedInsecureHTTPNavigation = { [weak self] request, intent in
+            self?.eventHandlers.handleBlockedInsecureHTTPNavigation?(request, intent)
+        }
+        navigationDelegate.downloadDelegate = downloadDelegate
+
+        uiDelegate.openInNewTab = { [weak self] url in
+            self?.eventHandlers.openInNewTab?(url)
+        }
+        uiDelegate.requestNavigation = { [weak self] request, intent in
+            self?.eventHandlers.requestNavigation?(request, intent)
+        }
+
+        downloadDelegate.onDownloadStarted = { [weak self] _ in
+            self?.eventHandlers.downloadStateChanged?(true)
+        }
+        downloadDelegate.onDownloadReadyToSave = { [weak self] in
+            self?.eventHandlers.downloadStateChanged?(false)
+        }
+        downloadDelegate.onDownloadFailed = { [weak self] _ in
+            self?.eventHandlers.downloadStateChanged?(false)
+        }
+    }
+
     private func bindWebView(_ webView: WKWebView) {
         webView.navigationDelegate = navigationDelegate
         webView.uiDelegate = uiDelegate
-        if let cmuxWebView = webView as? CmuxWebView {
-            cmuxWebView.onContextMenuDownloadStateChanged = downloadStateChangeHandler
-        }
+        applyEventHandlers(to: webView)
         installObservers(on: webView)
+    }
+
+    private func clearBindings(on webView: WKWebView) {
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        if let cmuxWebView = webView as? CmuxWebView {
+            cmuxWebView.onContextMenuDownloadStateChanged = nil
+        }
+    }
+
+    private func applyEventHandlersToCurrentWebView() {
+        applyEventHandlers(to: webView)
+    }
+
+    private func applyEventHandlers(to webView: WKWebView) {
+        if let cmuxWebView = webView as? CmuxWebView {
+            cmuxWebView.onContextMenuDownloadStateChanged = eventHandlers.downloadStateChanged
+        }
     }
 
     private func installObservers(on webView: WKWebView) {
@@ -1545,6 +1608,10 @@ final class LocalWebKitBrowserSurfaceRuntime: BrowserSurfaceRuntime {
             forwardObserver,
             progressObserver,
         ]
+    }
+
+    private func isCurrentWebView(_ candidate: WKWebView) -> Bool {
+        candidate === webView
     }
 
     private func emitStateChange(force: Bool = false) {
@@ -2059,9 +2126,6 @@ final class BrowserPanel: Panel, ObservableObject {
     private var pendingDistinctPortalHostReplacementPaneId: UUID?
     private var lockedPortalHost: PortalHostLock?
     private var webViewCancellables = Set<AnyCancellable>()
-    private var navigationDelegate: BrowserNavigationDelegate?
-    private var uiDelegate: BrowserUIDelegate?
-    private var downloadDelegate: BrowserDownloadDelegate?
     private var activeDownloadCount: Int = 0
 
     // Avoid flickering the loading indicator for very fast navigations.
@@ -2327,21 +2391,17 @@ final class BrowserPanel: Panel, ObservableObject {
         self.webViewInstanceID = runtime.webViewInstanceID
         self.insecureHTTPAlertFactory = { NSAlert() }
 
-        // Set up navigation delegate
-        let navDelegate = BrowserNavigationDelegate()
-        navDelegate.didFinish = { webView in
-            BrowserHistoryStore.shared.recordVisit(url: webView.url, title: webView.title)
-            Task { @MainActor [weak self] in
-                guard let self, self.isCurrentWebView(webView) else { return }
-                self.refreshFavicon(from: webView)
+        runtime.eventHandlers = BrowserSurfaceRuntimeEventHandlers(
+            didFinishNavigation: { [weak self] in
+                guard let self else { return }
+                BrowserHistoryStore.shared.recordVisit(url: self.webView.url, title: self.webView.title)
+                self.refreshFavicon(from: self.webView)
                 self.applyBrowserThemeModeIfNeeded()
                 // Keep find-in-page open through load completion and refresh matches for the new DOM.
                 self.restoreFindStateAfterNavigation(replaySearch: true)
-            }
-        }
-        navDelegate.didFailNavigation = { [weak self] failedWebView, failedURL in
-            Task { @MainActor in
-                guard let self, self.isCurrentWebView(failedWebView) else { return }
+            },
+            didFailNavigation: { [weak self] failedURL in
+                guard let self else { return }
                 // Clear stale title/favicon from the previous page so the tab
                 // shows the failed URL instead of the old page's branding.
                 self.pageTitle = failedURL.isEmpty ? "" : failedURL
@@ -2349,59 +2409,31 @@ final class BrowserPanel: Panel, ObservableObject {
                 self.lastFaviconURLString = nil
                 // Keep find-in-page open and clear stale counters on failed loads.
                 self.restoreFindStateAfterNavigation(replaySearch: false)
+            },
+            didTerminateWebContentProcess: { [weak self] in
+                guard let self else { return }
+                self.replaceWebViewAfterContentProcessTermination(for: self.webView)
+            },
+            openInNewTab: { [weak self] url in
+                self?.openLinkInNewTab(url: url)
+            },
+            requestNavigation: { [weak self] request, intent in
+                self?.requestNavigation(request, intent: intent)
+            },
+            shouldBlockInsecureHTTPNavigation: { [weak self] url in
+                self?.shouldBlockInsecureHTTPNavigation(to: url) ?? false
+            },
+            handleBlockedInsecureHTTPNavigation: { [weak self] request, intent in
+                self?.presentInsecureHTTPAlert(for: request, intent: intent, recordTypedNavigation: false)
+            },
+            downloadStateChanged: { [weak self] downloading in
+                if downloading {
+                    self?.beginDownloadActivity()
+                } else {
+                    self?.endDownloadActivity()
+                }
             }
-        }
-        navDelegate.openInNewTab = { [weak self] url in
-            self?.openLinkInNewTab(url: url)
-        }
-        navDelegate.shouldBlockInsecureHTTPNavigation = { [weak self] url in
-            self?.shouldBlockInsecureHTTPNavigation(to: url) ?? false
-        }
-        navDelegate.handleBlockedInsecureHTTPNavigation = { [weak self] request, intent in
-            self?.presentInsecureHTTPAlert(for: request, intent: intent, recordTypedNavigation: false)
-        }
-        navDelegate.didTerminateWebContentProcess = { [weak self] webView in
-            self?.replaceWebViewAfterContentProcessTermination(for: webView)
-        }
-        // Set up download delegate for navigation-based downloads.
-        // Downloads save to a temp file synchronously (no NSSavePanel during WebKit
-        // callbacks), then show NSSavePanel after the download completes.
-        let dlDelegate = BrowserDownloadDelegate()
-        dlDelegate.onDownloadStarted = { [weak self] _ in
-            self?.beginDownloadActivity()
-        }
-        dlDelegate.onDownloadReadyToSave = { [weak self] in
-            self?.endDownloadActivity()
-        }
-        dlDelegate.onDownloadFailed = { [weak self] _ in
-            self?.endDownloadActivity()
-        }
-        navDelegate.downloadDelegate = dlDelegate
-        self.downloadDelegate = dlDelegate
-        self.navigationDelegate = navDelegate
-
-        // Set up UI delegate (handles cmd+click, target=_blank, and context menu)
-        let browserUIDelegate = BrowserUIDelegate()
-        browserUIDelegate.openInNewTab = { [weak self] url in
-            guard let self else { return }
-            self.openLinkInNewTab(url: url)
-        }
-        browserUIDelegate.requestNavigation = { [weak self] request, intent in
-            self?.requestNavigation(request, intent: intent)
-        }
-        self.uiDelegate = browserUIDelegate
-
-        runtime.configureDelegates(
-            navigationDelegate: navDelegate,
-            uiDelegate: browserUIDelegate
         )
-        runtime.setDownloadStateChangeHandler { [weak self] downloading in
-            if downloading {
-                self?.beginDownloadActivity()
-            } else {
-                self?.endDownloadActivity()
-            }
-        }
         runtime.onStateChange = { [weak self] state in
             self?.applyRuntimeState(state)
         }
@@ -2512,11 +2544,6 @@ final class BrowserPanel: Panel, ObservableObject {
         faviconRefreshGeneration &+= 1
         BrowserWindowPortalRegistry.detach(webView: terminatedWebView)
         terminatedWebView.stopLoading()
-        terminatedWebView.navigationDelegate = nil
-        terminatedWebView.uiDelegate = nil
-        if let terminatedCmuxWebView = terminatedWebView as? CmuxWebView {
-            terminatedCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
 
         _ = replaceRuntimeWebView(pageZoom: desiredZoom)
         shouldRenderWebView = wasRenderable
@@ -2599,10 +2626,8 @@ final class BrowserPanel: Panel, ObservableObject {
         // bonsplit/SwiftUI reshuffles views during close.
         unfocus()
         runtime.stopLoading()
-        runtime.configureDelegates(navigationDelegate: nil, uiDelegate: nil)
-        runtime.setDownloadStateChangeHandler(nil)
-        navigationDelegate = nil
-        uiDelegate = nil
+        runtime.eventHandlers = BrowserSurfaceRuntimeEventHandlers()
+        runtime.onStateChange = nil
         webViewCancellables.removeAll()
         faviconTask?.cancel()
         faviconTask = nil
@@ -2840,7 +2865,7 @@ final class BrowserPanel: Panel, ObservableObject {
         if recordTypedNavigation {
             BrowserHistoryStore.shared.recordTypedNavigation(url: url)
         }
-        navigationDelegate?.lastAttemptedURL = url
+        runtime.setLastAttemptedNavigationURL(url)
         _ = runtime.loadRequest(request)
     }
 
@@ -3032,7 +3057,7 @@ extension BrowserPanel {
         estimatedProgress = 0
         nativeCanGoBack = false
         nativeCanGoForward = false
-        navigationDelegate?.lastAttemptedURL = nil
+        runtime.setLastAttemptedNavigationURL(nil)
         abandonRestoredSessionHistoryIfNeeded()
 
         pendingAddressBarFocusRequestId = nil
@@ -3056,11 +3081,6 @@ extension BrowserPanel {
         let oldWebView = webView
         BrowserWindowPortalRegistry.detach(webView: oldWebView)
         oldWebView.stopLoading()
-        oldWebView.navigationDelegate = nil
-        oldWebView.uiDelegate = nil
-        if let oldCmuxWebView = oldWebView as? CmuxWebView {
-            oldCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
 
         _ = replaceRuntimeWebView()
         shouldRenderWebView = false
