@@ -7266,10 +7266,8 @@ struct VerticalTabsSidebar: View {
                     .frame(width: 0, height: 0)
                 )
                 .overlay(alignment: .top) {
-                    if showWorkspaceTitlebar {
-                        SidebarTopScrim(height: trafficLightPadding + 20)
-                            .allowsHitTesting(false)
-                    }
+                    SidebarTopScrim(height: effectiveTrafficLightPadding + 20)
+                        .allowsHitTesting(false)
                 }
                 .overlay(alignment: .top) {
                     if showWorkspaceTitlebar {
