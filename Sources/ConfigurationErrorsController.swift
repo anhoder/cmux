@@ -10,10 +10,16 @@ protocol GhosttyConfigurationErrorsPresenting: AnyObject {
     func closeConfigurationErrorsWindow()
 }
 
+enum GhosttyConfigurationErrorsTrigger {
+    case automatic
+    case explicitReload
+}
+
 enum GhosttyConfigurationErrors {
     static func synchronize(
         _ errors: [String],
-        presenter: GhosttyConfigurationErrorsPresenting
+        presenter: GhosttyConfigurationErrorsPresenting,
+        trigger: GhosttyConfigurationErrorsTrigger = .automatic
     ) {
         let previousErrors = presenter.displayedErrors
         let wasShowing = presenter.isShowingConfigurationErrors
@@ -24,7 +30,9 @@ enum GhosttyConfigurationErrors {
             return
         }
 
-        if !wasShowing, previousErrors == errors {
+        if !wasShowing,
+           previousErrors == errors,
+           trigger != .explicitReload {
             return
         }
 

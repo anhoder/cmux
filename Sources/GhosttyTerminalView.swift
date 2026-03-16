@@ -1025,6 +1025,19 @@ class GhosttyApp {
         return errors
     }
 
+    static func configurationErrorsTrigger(forReloadSource source: String) -> GhosttyConfigurationErrorsTrigger {
+        switch source {
+        case "action.reload_config.app",
+             "configuration_errors.reload_button",
+             "menu.reload_configuration",
+             "shortcut.cmd_shift_comma",
+             "socket.reload_config":
+            return .explicitReload
+        default:
+            return .automatic
+        }
+    }
+
     private func initializeGhostty() {
         // Ensure TUI apps can use colors even if NO_COLOR is set in the launcher env.
         if getenv("NO_COLOR") != nil {
@@ -1611,18 +1624,25 @@ class GhosttyApp {
             ghostty_config_free(oldConfig)
         }
         config = newConfig
-        synchronizeConfigurationErrors(configErrors)
+        synchronizeConfigurationErrors(
+            configErrors,
+            trigger: Self.configurationErrorsTrigger(forReloadSource: source)
+        )
         lastAppearanceColorScheme = GhosttyConfig.currentColorSchemePreference()
         NotificationCenter.default.post(name: .ghosttyConfigDidReload, object: nil)
         scheduleSurfaceRefreshAfterConfigurationReload(source: source)
         logThemeAction("reload end source=\(source) soft=\(soft) mode=full")
     }
 
-    private func synchronizeConfigurationErrors(_ errors: [String]) {
+    private func synchronizeConfigurationErrors(
+        _ errors: [String],
+        trigger: GhosttyConfigurationErrorsTrigger = .automatic
+    ) {
         let applyPresentation = {
             GhosttyConfigurationErrors.synchronize(
                 errors,
-                presenter: ConfigurationErrorsController.shared
+                presenter: ConfigurationErrorsController.shared,
+                trigger: trigger
             )
         }
 
