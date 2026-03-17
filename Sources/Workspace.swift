@@ -2544,9 +2544,6 @@ final class Workspace: Identifiable, ObservableObject {
             }
             // Close the tab in bonsplit (this triggers delegate callback)
             let closed = bonsplitController.closeTab(tabId)
-            if !closed {
-                postCloseFocusPanelId.removeValue(forKey: tabId)
-            }
 #if DEBUG
             dlog(
                 "surface.close.request.done panel=\(panelId.uuidString.prefix(5)) " +
@@ -2582,9 +2579,6 @@ final class Workspace: Identifiable, ObservableObject {
         }
         recordPostCloseFocus(forClosingTabId: selected.id)
         let closed = bonsplitController.closeTab(selected.id)
-        if !closed {
-            postCloseFocusPanelId.removeValue(forKey: selected.id)
-        }
 #if DEBUG
         dlog(
             "surface.close.fallback panel=\(panelId.uuidString.prefix(5)) " +
