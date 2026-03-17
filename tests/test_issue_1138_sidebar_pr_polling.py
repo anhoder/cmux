@@ -11,6 +11,8 @@ Validates that shell integration:
 5) keeps polling in bash after prompt-render helper commands run
 6) tears down the timed-out gh probe instead of leaking it in the background
 7) falls back to explicit branch lookup when implicit gh branch resolution fails
+8) does not clear an existing PR badge on the first prompt while establishing
+   the HEAD baseline
 """
 
 from __future__ import annotations
@@ -142,6 +144,9 @@ def _gh_stub() -> str:
           prompt_helper_idle)
             printf '1138\\tOPEN\\thttps://github.com/manaflow-ai/cmux/pull/1138\\n'
             ;;
+          initial_prompt_preserves_pr_badge)
+            printf '1138\\tOPEN\\thttps://github.com/manaflow-ai/cmux/pull/1138\\n'
+            ;;
           transient_same_context)
             if [ "$count" -eq 1 ]; then
               printf 'rate limit exceeded\\n' >&2
@@ -228,6 +233,13 @@ def _shell_command(kind: str, scenario: str) -> str:
             '_cmux_cleanup\n'
         ),
         "explicit_branch_fallback": (
+            'cd "$CMUX_TEST_REPO"\n'
+            '_CMUX_PR_POLL_INTERVAL=10\n'
+            '_cmux_prompt_entry\n'
+            'sleep 2\n'
+            '_cmux_cleanup\n'
+        ),
+        "initial_prompt_preserves_pr_badge": (
             'cd "$CMUX_TEST_REPO"\n'
             '_CMUX_PR_POLL_INTERVAL=10\n'
             '_cmux_prompt_entry\n'
@@ -390,6 +402,17 @@ def _run_case(base: Path, *, shell: str, shell_args: list[str], script: Path, sc
             )
         return (0, f"{shell}/{scenario}: ok")
 
+    if scenario == "initial_prompt_preserves_pr_badge":
+        if _report_line(1138) not in send_lines:
+            return (1, f"{shell}/{scenario}: missing report_pr payload\n" + "\n".join(send_lines))
+        if any(line.startswith("clear_pr ") for line in send_lines):
+            return (
+                1,
+                f"{shell}/{scenario}: initial prompt should not clear an existing PR badge\n"
+                + "\n".join(send_lines),
+            )
+        return (0, f"{shell}/{scenario}: ok")
+
     return (1, f"{shell}/{scenario}: unhandled scenario")
 
 
@@ -405,6 +428,7 @@ def main() -> int:
         "branch_switch_clear",
         "timeout_recovery",
         "explicit_branch_fallback",
+        "initial_prompt_preserves_pr_badge",
     ]
 
     base = Path("/tmp") / f"cmux_issue_1138_pr_poll_{os.getpid()}"
