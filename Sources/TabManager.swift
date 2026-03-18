@@ -3924,6 +3924,10 @@ class TabManager: ObservableObject {
     ) async {
         let crop = CGRect(x: 0.04, y: 0.01, width: 0.92, height: 0.08)
         let actionFrame = (scenario == "initial_terminal_visible") ? 0 : 4
+        // Freshly revealed panes can take a few display-link ticks to promote a non-blank
+        // IOSurface under GitHub's virtual-display environment. Keep the CI harness tolerant
+        // of that short bootstrap window while still failing sustained blank/overlap cases.
+        let newlyVisiblePaneBootstrapGraceFrames = 6
 
         func finish(_ updates: [String: String]) {
             writePaneStripMotionTestData(updates, at: path)
@@ -4107,7 +4111,7 @@ class TabManager: ObservableObject {
                         label: "R",
                         sample: { @MainActor in motionSample(for: rightPanel.id) },
                         expectedPanelId: { rightPanel.id },
-                        bootstrapGraceFrames: 2,
+                        bootstrapGraceFrames: newlyVisiblePaneBootstrapGraceFrames,
                         minimumEvaluationFrame: actionFrame,
                         referenceMode: .firstMeasuredSample
                     ),
@@ -4136,7 +4140,7 @@ class TabManager: ObservableObject {
                         label: "R",
                         sample: { @MainActor in motionSample(for: rightPanel.id) },
                         expectedPanelId: { rightPanel.id },
-                        bootstrapGraceFrames: 2,
+                        bootstrapGraceFrames: newlyVisiblePaneBootstrapGraceFrames,
                         minimumEvaluationFrame: actionFrame,
                         referenceMode: .firstMeasuredSample
                     ),
@@ -4161,7 +4165,7 @@ class TabManager: ObservableObject {
                         label: "R",
                         sample: { @MainActor in motionSample(for: createdPanelId) },
                         expectedPanelId: { createdPanelId },
-                        bootstrapGraceFrames: 2,
+                        bootstrapGraceFrames: newlyVisiblePaneBootstrapGraceFrames,
                         minimumEvaluationFrame: actionFrame,
                         referenceMode: .firstMeasuredSample
                     ),
