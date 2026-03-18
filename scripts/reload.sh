@@ -13,6 +13,30 @@ CMUX_DEBUG_LOG=""
 CLI_PATH=""
 LAST_SOCKET_PATH_DIR="$HOME/Library/Application Support/cmux"
 LAST_SOCKET_PATH_FILE="${LAST_SOCKET_PATH_DIR}/last-socket-path"
+CMUX_PUBLIC_WWW_ORIGIN=""
+CMUX_PUBLIC_API_BASE_URL=""
+CMUX_PUBLIC_STACK_PROJECT_ID=""
+CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY=""
+
+load_public_auth_env() {
+  if [[ -f "$HOME/.secrets/cmux.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.secrets/cmux.env"
+    CMUX_PUBLIC_WWW_ORIGIN="${NEXT_PUBLIC_WWW_ORIGIN:-$CMUX_PUBLIC_WWW_ORIGIN}"
+    CMUX_PUBLIC_API_BASE_URL="${API_BASE_URL_DEV:-${NEXT_PUBLIC_WWW_ORIGIN:-$CMUX_PUBLIC_API_BASE_URL}}"
+    CMUX_PUBLIC_STACK_PROJECT_ID="${NEXT_PUBLIC_STACK_PROJECT_ID:-$CMUX_PUBLIC_STACK_PROJECT_ID}"
+    CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY="${NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY:-$CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY}"
+  fi
+
+  if [[ -f "$HOME/.secrets/cmux.prod.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.secrets/cmux.prod.env"
+    CMUX_PUBLIC_WWW_ORIGIN="${CMUX_PUBLIC_WWW_ORIGIN:-https://cmux.dev}"
+    CMUX_PUBLIC_API_BASE_URL="${CMUX_PUBLIC_API_BASE_URL:-${API_BASE_URL_PROD:-https://api.cmux.sh}}"
+    CMUX_PUBLIC_STACK_PROJECT_ID="${CMUX_PUBLIC_STACK_PROJECT_ID:-${STACK_PROJECT_ID_PROD:-}}"
+    CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY="${CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY:-${STACK_PUBLISHABLE_CLIENT_KEY_PROD:-}}"
+  fi
+}
 
 write_dev_cli_shim() {
   local target="$1"
@@ -265,6 +289,8 @@ if [[ -n "$TAG" ]]; then
   fi
 fi
 
+load_public_auth_env
+
 XCODEBUILD_ARGS=(
   -project GhosttyTabs.xcodeproj
   -scheme cmux
@@ -358,6 +384,7 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
       CMUXD_SOCKET="${APP_SUPPORT_DIR}/cmuxd-dev-${TAG_SLUG}.sock"
       CMUX_SOCKET="/tmp/cmux-debug-${TAG_SLUG}.sock"
       CMUX_DEBUG_LOG="/tmp/cmux-debug-${TAG_SLUG}.log"
+      CMUX_AUTH_CALLBACK_SCHEME="cmux-dev-${TAG_SLUG}"
       write_last_socket_path "$CMUX_SOCKET"
       echo "$CMUX_DEBUG_LOG" > /tmp/cmux-last-debug-log-path || true
       /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$INFO_PLIST" 2>/dev/null || true
@@ -375,6 +402,25 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
         || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_REMOTE_DAEMON_ALLOW_LOCAL_BUILD string 1" "$INFO_PLIST"
       /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUXTERM_REPO_ROOT \"${PWD}\"" "$INFO_PLIST" 2>/dev/null \
         || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUXTERM_REPO_ROOT string \"${PWD}\"" "$INFO_PLIST"
+      /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUX_AUTH_CALLBACK_SCHEME \"${CMUX_AUTH_CALLBACK_SCHEME}\"" "$INFO_PLIST" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_AUTH_CALLBACK_SCHEME string \"${CMUX_AUTH_CALLBACK_SCHEME}\"" "$INFO_PLIST"
+      /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:1:CFBundleURLSchemes:1 string ${CMUX_AUTH_CALLBACK_SCHEME}" "$INFO_PLIST" 2>/dev/null || true
+      if [[ -n "${CMUX_PUBLIC_WWW_ORIGIN:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUX_WWW_ORIGIN \"${CMUX_PUBLIC_WWW_ORIGIN}\"" "$INFO_PLIST" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_WWW_ORIGIN string \"${CMUX_PUBLIC_WWW_ORIGIN}\"" "$INFO_PLIST"
+      fi
+      if [[ -n "${CMUX_PUBLIC_API_BASE_URL:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUX_API_BASE_URL \"${CMUX_PUBLIC_API_BASE_URL}\"" "$INFO_PLIST" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_API_BASE_URL string \"${CMUX_PUBLIC_API_BASE_URL}\"" "$INFO_PLIST"
+      fi
+      if [[ -n "${CMUX_PUBLIC_STACK_PROJECT_ID:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUX_STACK_PROJECT_ID \"${CMUX_PUBLIC_STACK_PROJECT_ID}\"" "$INFO_PLIST" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_STACK_PROJECT_ID string \"${CMUX_PUBLIC_STACK_PROJECT_ID}\"" "$INFO_PLIST"
+      fi
+      if [[ -n "${CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY:-}" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUX_STACK_PUBLISHABLE_CLIENT_KEY \"${CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY}\"" "$INFO_PLIST" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUX_STACK_PUBLISHABLE_CLIENT_KEY string \"${CMUX_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY}\"" "$INFO_PLIST"
+      fi
       if [[ -S "$CMUXD_SOCKET" ]]; then
         for PID in $(lsof -t "$CMUXD_SOCKET" 2>/dev/null); do
           kill "$PID" 2>/dev/null || true
@@ -418,11 +464,15 @@ fi
 sleep 0.3
 CMUXD_SRC="$PWD/cmuxd/zig-out/bin/cmuxd"
 GHOSTTY_HELPER_SRC="$PWD/ghostty/zig-out/bin/ghostty"
+CMUXD_REMOTE_SRC="/tmp/cmuxd-remote-${TAG_SLUG:-default}"
 if [[ -d "$PWD/cmuxd" ]]; then
   (cd "$PWD/cmuxd" && zig build -Doptimize=ReleaseFast)
 fi
 if [[ -d "$PWD/ghostty" ]]; then
   (cd "$PWD/ghostty" && zig build cli-helper -Dapp-runtime=none -Demit-macos-app=false -Demit-xcframework=false -Doptimize=ReleaseFast)
+fi
+if [[ -d "$PWD/daemon/remote" ]] && command -v go >/dev/null 2>&1; then
+  (cd "$PWD/daemon/remote" && go build -trimpath -buildvcs=false -o "$CMUXD_REMOTE_SRC" ./cmd/cmuxd-remote)
 fi
 if [[ -x "$CMUXD_SRC" ]]; then
   BIN_DIR="$APP_PATH/Contents/Resources/bin"
@@ -435,6 +485,12 @@ if [[ -x "$GHOSTTY_HELPER_SRC" ]]; then
   mkdir -p "$BIN_DIR"
   cp "$GHOSTTY_HELPER_SRC" "$BIN_DIR/ghostty"
   chmod +x "$BIN_DIR/ghostty"
+fi
+if [[ -x "$CMUXD_REMOTE_SRC" ]]; then
+  BIN_DIR="$APP_PATH/Contents/Resources/bin"
+  mkdir -p "$BIN_DIR"
+  cp "$CMUXD_REMOTE_SRC" "$BIN_DIR/cmuxd-remote"
+  chmod +x "$BIN_DIR/cmuxd-remote"
 fi
 CLI_PATH="$APP_PATH/Contents/Resources/bin/cmux"
 if [[ -x "$CLI_PATH" ]]; then

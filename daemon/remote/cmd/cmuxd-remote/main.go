@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -123,18 +126,36 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		stdio := fs.Bool("stdio", false, "serve over stdin/stdout")
+		tlsMode := fs.Bool("tls", false, "serve over TLS")
+		listenAddr := fs.String("listen", "", "listen address for TLS mode")
+		serverID := fs.String("server-id", "", "expected server id for direct tickets")
+		ticketSecret := fs.String("ticket-secret", "", "ticket secret for direct tickets")
+		certFile := fs.String("cert-file", "", "certificate file for TLS mode")
+		keyFile := fs.String("key-file", "", "private key file for TLS mode")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		if !*stdio {
-			_, _ = fmt.Fprintln(stderr, "serve requires --stdio")
+		switch {
+		case *stdio:
+			if err := runStdioServer(stdin, stdout); err != nil {
+				_, _ = fmt.Fprintf(stderr, "serve failed: %v\n", err)
+				return 1
+			}
+			return 0
+		case *tlsMode:
+			if *listenAddr == "" || *serverID == "" || *ticketSecret == "" || *certFile == "" || *keyFile == "" {
+				_, _ = fmt.Fprintln(stderr, "serve --tls requires --listen, --server-id, --ticket-secret, --cert-file, and --key-file")
+				return 2
+			}
+			if err := runTLSServer(*listenAddr, *serverID, *ticketSecret, *certFile, *keyFile, stderr); err != nil {
+				_, _ = fmt.Fprintf(stderr, "serve failed: %v\n", err)
+				return 1
+			}
+			return 0
+		default:
+			_, _ = fmt.Fprintln(stderr, "serve requires --stdio or --tls")
 			return 2
 		}
-		if err := runStdioServer(stdin, stdout); err != nil {
-			_, _ = fmt.Fprintf(stderr, "serve failed: %v\n", err)
-			return 1
-		}
-		return 0
 	case "cli":
 		return runCLI(args[1:])
 	default:
@@ -147,6 +168,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote version")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote serve --stdio")
+	_, _ = fmt.Fprintln(w, "  cmuxd-remote serve --tls --listen 0.0.0.0:9443 --server-id <id> --ticket-secret <hex> --cert-file <path> --key-file <path>")
 	_, _ = fmt.Fprintln(w, "  cmuxd-remote cli <command> [args...]")
 }
 
@@ -211,6 +233,195 @@ func runStdioServer(stdin io.Reader, stdout io.Writer) error {
 			return err
 		}
 	}
+}
+
+type directDaemonTicketClaims struct {
+	ServerID     string   `json:"server_id"`
+	TeamID       string   `json:"team_id"`
+	SessionID    string   `json:"session_id"`
+	AttachmentID string   `json:"attachment_id"`
+	Capabilities []string `json:"capabilities"`
+	Exp          int64    `json:"exp"`
+	Nonce        string   `json:"nonce"`
+}
+
+type directDaemonHandshakeRequest struct {
+	Ticket string `json:"ticket"`
+}
+
+func runTLSServer(listenAddr, serverID, ticketSecret, certFile, keyFile string, stderr io.Writer) error {
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return err
+	}
+
+	listener, err := tls.Listen("tcp", listenAddr, &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+	})
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	_, _ = fmt.Fprintf(stderr, "READY listen=%s\n", listener.Addr().String())
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go func() {
+			_ = handleTLSConnection(conn, serverID, ticketSecret)
+		}()
+	}
+}
+
+func handleTLSConnection(conn net.Conn, serverID, ticketSecret string) error {
+	defer conn.Close()
+	reader := bufio.NewReaderSize(conn, 64*1024)
+	writer := &stdioFrameWriter{
+		writer: bufio.NewWriter(conn),
+	}
+
+	line, oversized, readErr := readRPCFrame(reader, maxRPCFrameBytes)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	if oversized {
+		return writer.writeResponse(rpcResponse{
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_request",
+				Message: "request frame exceeds maximum size",
+			},
+		})
+	}
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return writer.writeResponse(rpcResponse{
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_request",
+				Message: "missing handshake request",
+			},
+		})
+	}
+
+	var handshake directDaemonHandshakeRequest
+	if err := json.Unmarshal(line, &handshake); err != nil {
+		return writer.writeResponse(rpcResponse{
+			OK: false,
+			Error: &rpcError{
+				Code:    "invalid_request",
+				Message: "invalid handshake request",
+			},
+		})
+	}
+
+	if _, rpcErr := verifyDirectDaemonTicket(handshake.Ticket, serverID, ticketSecret, time.Now()); rpcErr != nil {
+		return writer.writeResponse(rpcResponse{
+			OK: false,
+			Error: rpcErr,
+		})
+	}
+
+	if err := writer.writeResponse(rpcResponse{OK: true}); err != nil {
+		return err
+	}
+
+	server := &rpcServer{
+		nextStreamID:  1,
+		nextSessionID: 1,
+		streams:       map[string]*streamState{},
+		sessions:      map[string]*sessionState{},
+		frameWriter:   writer,
+	}
+	defer server.closeAll()
+
+	for {
+		line, oversized, readErr = readRPCFrame(reader, maxRPCFrameBytes)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+		if oversized {
+			if err := writer.writeResponse(rpcResponse{
+				OK: false,
+				Error: &rpcError{
+					Code:    "invalid_request",
+					Message: "request frame exceeds maximum size",
+				},
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if len(line) == 0 {
+			continue
+		}
+
+		var req rpcRequest
+		if err := json.Unmarshal(line, &req); err != nil {
+			if err := writer.writeResponse(rpcResponse{
+				OK: false,
+				Error: &rpcError{
+					Code:    "invalid_request",
+					Message: "invalid JSON request",
+				},
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := writer.writeResponse(server.handleRequest(req)); err != nil {
+			return err
+		}
+	}
+}
+
+func verifyDirectDaemonTicket(ticket, expectedServerID, ticketSecret string, now time.Time) (*directDaemonTicketClaims, *rpcError) {
+	parts := strings.Split(ticket, ".")
+	if len(parts) != 2 {
+		return nil, &rpcError{Code: "unauthorized", Message: "invalid ticket format"}
+	}
+
+	encodedPayload := parts[0]
+	decodedPayload, err := base64.RawURLEncoding.DecodeString(encodedPayload)
+	if err != nil {
+		return nil, &rpcError{Code: "unauthorized", Message: "invalid ticket payload"}
+	}
+
+	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, &rpcError{Code: "unauthorized", Message: "invalid ticket signature"}
+	}
+
+	expectedSignature := hmac.New(sha256.New, []byte(ticketSecret))
+	expectedSignature.Write([]byte(encodedPayload))
+	if !hmac.Equal(signature, expectedSignature.Sum(nil)) {
+		return nil, &rpcError{Code: "unauthorized", Message: "invalid ticket signature"}
+	}
+
+	var claims directDaemonTicketClaims
+	if err := json.Unmarshal(decodedPayload, &claims); err != nil {
+		return nil, &rpcError{Code: "unauthorized", Message: "invalid ticket payload"}
+	}
+	if claims.ServerID == "" || claims.ServerID != expectedServerID {
+		return nil, &rpcError{Code: "forbidden", Message: "ticket server mismatch"}
+	}
+	if claims.Exp <= now.Unix() {
+		return nil, &rpcError{Code: "unauthorized", Message: "ticket expired"}
+	}
+	if len(claims.Capabilities) == 0 {
+		return nil, &rpcError{Code: "unauthorized", Message: "ticket capabilities missing"}
+	}
+	return &claims, nil
 }
 
 func setTCPNoDelay(conn net.Conn) {

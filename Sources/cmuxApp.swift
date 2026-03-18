@@ -3844,6 +3844,7 @@ struct SettingsView: View {
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
     @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
 
+    @StateObject private var authManager = AuthManager.shared
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
     @State private var shortcutResetToken = UUID()
     @State private var topBlurOpacity: Double = 0
@@ -4092,6 +4093,54 @@ struct SettingsView: View {
         }
     }
 
+    private var accountEmailText: String {
+        if let email = authManager.currentUser?.primaryEmail?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !email.isEmpty {
+            return email
+        }
+        if let displayName = authManager.currentUser?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !displayName.isEmpty {
+            return displayName
+        }
+        return String(
+            localized: "settings.account.state.signedIn",
+            defaultValue: "Signed in"
+        )
+    }
+
+    private var accountStatusSubtitle: String {
+        if authManager.isAuthenticated {
+            return String(
+                localized: "settings.account.subtitle.signedIn",
+                defaultValue: "This Mac can appear in your mobile terminal list."
+            )
+        }
+        return String(
+            localized: "settings.account.subtitle.signedOut",
+            defaultValue: "Optional. Sign in to publish this Mac to iPhone."
+        )
+    }
+
+    private var selectedAccountTeamName: String {
+        if let selectedTeamID = authManager.selectedTeamID,
+           let team = authManager.availableTeams.first(where: { $0.id == selectedTeamID }) {
+            return team.displayName
+        }
+        return authManager.availableTeams.first?.displayName ?? String(
+            localized: "settings.account.team.none",
+            defaultValue: "No team"
+        )
+    }
+
+    private var accountTeamSelection: Binding<String> {
+        Binding(
+            get: { authManager.selectedTeamID ?? authManager.availableTeams.first?.id ?? "" },
+            set: { newValue in
+                authManager.selectedTeamID = newValue.isEmpty ? nil : newValue
+            }
+        )
+    }
+
     private var notificationPermissionStatusText: String {
         notificationStore.authorizationState.statusLabel
     }
@@ -4304,6 +4353,74 @@ struct SettingsView: View {
             ZStack(alignment: .top) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    SettingsSectionHeader(title: String(localized: "settings.section.account", defaultValue: "Account"))
+                    SettingsCard {
+                        SettingsCardRow(
+                            String(localized: "settings.account.title", defaultValue: "cmux Account"),
+                            subtitle: accountStatusSubtitle,
+                            controlWidth: pickerColumnWidth
+                        ) {
+                            if authManager.isLoading || authManager.isRestoringSession {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else if authManager.isAuthenticated {
+                                HStack(spacing: 8) {
+                                    Text(accountEmailText)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 220, alignment: .trailing)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+
+                                    Button(
+                                        String(localized: "settings.account.signOut", defaultValue: "Sign Out")
+                                    ) {
+                                        Task {
+                                            await authManager.signOut()
+                                        }
+                                    }
+                                    .controlSize(.small)
+                                }
+                            } else {
+                                Button(
+                                    String(localized: "settings.account.signIn", defaultValue: "Sign In in Browser")
+                                ) {
+                                    authManager.beginSignInInBrowser()
+                                }
+                                .controlSize(.small)
+                                .accessibilityIdentifier("settings.account.signIn")
+                            }
+                        }
+
+                        if authManager.isAuthenticated, !authManager.availableTeams.isEmpty {
+                            SettingsCardDivider()
+
+                            SettingsCardRow(
+                                String(localized: "settings.account.team", defaultValue: "Team"),
+                                subtitle: String(
+                                    localized: "settings.account.team.subtitle",
+                                    defaultValue: "The first team is selected automatically for mobile sync."
+                                ),
+                                controlWidth: pickerColumnWidth
+                            ) {
+                                if authManager.availableTeams.count > 1 {
+                                    Picker("", selection: accountTeamSelection) {
+                                        ForEach(authManager.availableTeams) { team in
+                                            Text(team.displayName).tag(team.id)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .frame(width: pickerColumnWidth)
+                                } else {
+                                    Text(selectedAccountTeamName)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: pickerColumnWidth, alignment: .trailing)
+                                }
+                            }
+                        }
+                    }
+
                     SettingsSectionHeader(title: String(localized: "settings.section.app", defaultValue: "App"))
                     SettingsCard {
                         SettingsCardRow(

@@ -6,6 +6,7 @@ import XCTest
 @testable import cmux
 #endif
 
+@MainActor
 final class AuthManagerTests: XCTestCase {
     func testSignedOutStateDoesNotGateLocalApp() {
         let manager = AuthManager(
@@ -40,8 +41,11 @@ final class AuthManagerTests: XCTestCase {
 
         try await manager.handleCallbackURL(callbackURL)
 
-        XCTAssertEqual(await tokenStore.currentRefreshToken(), "refresh-123")
-        XCTAssertEqual(await tokenStore.currentAccessToken(), "access-456")
+        let refreshToken = await tokenStore.currentRefreshToken()
+        let accessToken = await tokenStore.currentAccessToken()
+
+        XCTAssertEqual(refreshToken, "refresh-123")
+        XCTAssertEqual(accessToken, "access-456")
         XCTAssertEqual(manager.selectedTeamID, "team_alpha")
     }
 }
@@ -60,11 +64,11 @@ private actor StubStackTokenStore: StackAuthTokenStoreProtocol {
         refreshToken = nil
     }
 
-    func currentAccessToken() -> String? {
+    func currentAccessToken() async -> String? {
         accessToken
     }
 
-    func currentRefreshToken() -> String? {
+    func currentRefreshToken() async -> String? {
         refreshToken
     }
 }

@@ -15,6 +15,15 @@ final class MobileDirectDaemonManagerTests: XCTestCase {
                 FileManager.default.temporaryDirectory.appendingPathComponent("MobileDirectDaemonManagerTests-\(UUID().uuidString)")
             },
             allocatePort: { 9443 },
+            ensureMaterial: { _, hosts in
+                MobileDirectDaemonMaterial(
+                    certPath: "/tmp/server.crt",
+                    keyPath: "/tmp/server.key",
+                    ticketSecret: "test-ticket-secret",
+                    pin: "sha256:test-pin",
+                    hosts: hosts
+                )
+            },
             spawn: recorder.spawn(binary:arguments:)
         )
 
