@@ -6,12 +6,14 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
     private var launchTag = ""
     private var socketPath = ""
     private var diagnosticsPath = ""
+    private var appLogPath = ""
     private var displayReadyPath = ""
     private var displayIDPath = ""
     private var displayStartPath = ""
     private var displayDonePath = ""
     private var helperBinaryPath = ""
     private var helperLogPath = ""
+    private var appProcess: Process?
     private var helperProcess: Process?
 
     override func setUp() {
@@ -22,6 +24,7 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
         launchTag = "ui-tests-display-resolution-\(token.prefix(8))"
         socketPath = "/tmp/cmux-ui-test-display-churn-\(token).sock"
         diagnosticsPath = "/tmp/cmux-ui-test-display-churn-\(token).json"
+        appLogPath = "/tmp/cmux-ui-test-display-churn-\(token).log"
         displayReadyPath = "/tmp/cmux-ui-test-display-ready-\(token)"
         displayIDPath = "/tmp/cmux-ui-test-display-id-\(token)"
         displayStartPath = "/tmp/cmux-ui-test-display-start-\(token)"
@@ -33,6 +36,9 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
     }
 
     override func tearDown() {
+        appProcess?.terminate()
+        appProcess?.waitUntilExit()
+        appProcess = nil
         helperProcess?.terminate()
         helperProcess?.waitUntilExit()
         helperProcess = nil
@@ -49,22 +55,12 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
             return
         }
 
-        let app = XCUIApplication()
-        app.launchArguments += ["-socketControlMode", "allowAll"]
-        app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
-        app.launchEnvironment["CMUX_SOCKET_MODE"] = "allowAll"
-        app.launchEnvironment["CMUX_SOCKET_ENABLE"] = "1"
-        app.launchEnvironment["CMUX_UI_TEST_SOCKET_SANITY"] = "1"
-        app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
-        app.launchEnvironment["CMUX_UI_TEST_TARGET_DISPLAY_ID"] = targetDisplayID
-        app.launchEnvironment["CMUX_TAG"] = launchTag
-        app.launch()
-        // Self-hosted CI runners can keep the app backgrounded even while its window and
-        // automation socket are live, so don't require foreground activation here.
+        try launchAppProcess(targetDisplayID: targetDisplayID)
         guard let resolvedSocketPath = resolveSocketPath(timeout: 12.0) else {
             XCTFail(
                 "Expected control socket to respond. requested=\(socketPath) tag=\(launchTag) " +
-                "candidates=\(expectedSocketCandidates(includeFallback: true)) diagnostics=\(loadDiagnostics() ?? [:])"
+                "candidates=\(expectedSocketCandidates(includeFallback: true)) diagnostics=\(loadDiagnostics() ?? [:]) " +
+                "appLog=\(readTrimmedFile(atPath: appLogPath) ?? "<missing>")"
             )
             return
         }
@@ -72,7 +68,7 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
         XCTAssertTrue(waitForSocketPong(timeout: 4.0), "Expected control socket to respond at \(socketPath)")
         XCTAssertTrue(
             waitForTargetDisplayMove(targetDisplayID: targetDisplayID, timeout: 12.0),
-            "Expected app window to move to display \(targetDisplayID). diagnostics=\(loadDiagnostics() ?? [:])"
+            "Expected app window to move to display \(targetDisplayID). diagnostics=\(loadDiagnostics() ?? [:]) appLog=\(readTrimmedFile(atPath: appLogPath) ?? "<missing>")"
         )
 
         guard let baselineStats = waitForRenderStats(timeout: 8.0) else {
@@ -215,6 +211,51 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
 
         try proc.run()
         helperProcess = proc
+    }
+
+    private func launchAppProcess(targetDisplayID: String) throws {
+        let executableURL = try builtAppExecutableURL()
+        let proc = Process()
+        proc.executableURL = executableURL
+        proc.arguments = ["-socketControlMode", "allowAll"]
+
+        var env = ProcessInfo.processInfo.environment
+        env["CMUX_SOCKET_PATH"] = socketPath
+        env["CMUX_SOCKET_MODE"] = "allowAll"
+        env["CMUX_SOCKET_ENABLE"] = "1"
+        env["CMUX_UI_TEST_MODE"] = "1"
+        env["CMUX_UI_TEST_SOCKET_SANITY"] = "1"
+        env["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
+        env["CMUX_UI_TEST_TARGET_DISPLAY_ID"] = targetDisplayID
+        env["CMUX_TAG"] = launchTag
+        proc.environment = env
+
+        let logHandle = FileHandle(forWritingAtPath: appLogPath) ?? {
+            FileManager.default.createFile(atPath: appLogPath, contents: nil)
+            return FileHandle(forWritingAtPath: appLogPath)
+        }()
+        proc.standardOutput = logHandle
+        proc.standardError = logHandle
+
+        try proc.run()
+        appProcess = proc
+    }
+
+    private func builtAppExecutableURL() throws -> URL {
+        let bundleURL = Bundle(for: Self.self).bundleURL
+        let productsURL = bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let appURL = productsURL.appendingPathComponent("cmux DEV.app")
+        let executableURL = appURL.appendingPathComponent("Contents/MacOS/cmux DEV")
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw NSError(domain: "DisplayResolutionRegressionUITests", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Built app executable not found at \(executableURL.path)"
+            ])
+        }
+        return executableURL
     }
 
     private func waitForTargetDisplayMove(targetDisplayID: String, timeout: TimeInterval) -> Bool {
@@ -435,6 +476,7 @@ final class DisplayResolutionRegressionUITests: XCTestCase {
         for path in [
             socketPath,
             diagnosticsPath,
+            appLogPath,
             displayReadyPath,
             displayIDPath,
             displayStartPath,
