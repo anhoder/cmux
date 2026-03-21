@@ -2064,6 +2064,8 @@ final class WindowBrowserPortal: NSObject {
         super.init()
         hostView.wantsLayer = true
         hostView.layer?.masksToBounds = true
+        hostView.postsFrameChangedNotifications = true
+        hostView.postsBoundsChangedNotifications = true
         hostView.translatesAutoresizingMaskIntoConstraints = true
         hostView.autoresizingMask = []
         installGeometryObservers(for: window)
@@ -2122,6 +2124,24 @@ final class WindowBrowserPortal: NSObject {
             }
         })
         geometryObservers.append(center.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: hostView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.synchronizeExternalGeometryNowIfPossible()
+            }
+        })
+        geometryObservers.append(center.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: hostView,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.synchronizeExternalGeometryNowIfPossible()
+            }
+        })
+        geometryObservers.append(center.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: window,
             queue: .main
@@ -2176,6 +2196,15 @@ final class WindowBrowserPortal: NSObject {
         }
     }
 
+    private func synchronizeExternalGeometryNowIfPossible() {
+        guard Thread.isMainThread else {
+            scheduleExternalGeometrySynchronize()
+            return
+        }
+        hasExternalGeometrySyncScheduled = false
+        synchronizeAllEntriesFromExternalGeometryChange()
+    }
+
     private func scheduleActivationRecoverySynchronize() {
         scheduleExternalGeometrySynchronize()
         DispatchQueue.main.async { [weak self] in
@@ -2200,10 +2229,7 @@ final class WindowBrowserPortal: NSObject {
 
     fileprivate func synchronizeAllEntriesFromExternalGeometryChange() {
         guard ensureInstalled() else { return }
-        installedContainerView?.layoutSubtreeIfNeeded()
-        installedReferenceView?.layoutSubtreeIfNeeded()
-        hostView.superview?.layoutSubtreeIfNeeded()
-        hostView.layoutSubtreeIfNeeded()
+        synchronizeLayoutHierarchy()
         synchronizeAllWebViews(excluding: nil, source: "externalGeometry")
 
         for entry in entriesByWebViewId.values {
@@ -2217,6 +2243,14 @@ final class WindowBrowserPortal: NSObject {
                 reason: "externalGeometry"
             )
         }
+    }
+
+    private func synchronizeLayoutHierarchy() {
+        installedContainerView?.layoutSubtreeIfNeeded()
+        installedReferenceView?.layoutSubtreeIfNeeded()
+        hostView.superview?.layoutSubtreeIfNeeded()
+        hostView.layoutSubtreeIfNeeded()
+        _ = synchronizeHostFrameToReference()
     }
 
     @discardableResult
@@ -2251,7 +2285,9 @@ final class WindowBrowserPortal: NSObject {
               let reference = installedReferenceView else {
             return false
         }
-        let frameInContainer = container.convert(reference.bounds, from: reference)
+        let referenceFrameInWindow = presentationFrameInWindow(for: reference)
+        let frameInContainerRaw = container.convert(referenceFrameInWindow, from: nil)
+        let frameInContainer = Self.pixelSnappedRect(frameInContainerRaw, in: container)
         let hasFiniteFrame =
             frameInContainer.origin.x.isFinite &&
             frameInContainer.origin.y.isFinite &&
