@@ -13,7 +13,9 @@ final class AutomationSocketUITests: XCTestCase {
     }
 
     private var socketPath = ""
+    private var diagnosticsPath = ""
     private var ensureTerminalSurfaceFailure = ""
+    private var lastPingResponse = ""
     private let defaultsDomain = "com.cmuxterm.app.debug"
     private let modeKey = "socketControlMode"
     private let legacyKey = "socketControlEnabled"
@@ -24,9 +26,12 @@ final class AutomationSocketUITests: XCTestCase {
         continueAfterFailure = false
         launchTag = "ui-tests-automation-socket-\(UUID().uuidString.prefix(8))"
         socketPath = "/tmp/cmux-debug-\(launchTag).sock"
+        diagnosticsPath = "/tmp/cmux-ui-test-diagnostics-\(UUID().uuidString).json"
         ensureTerminalSurfaceFailure = ""
+        lastPingResponse = ""
         resetSocketDefaults()
         removeSocketFile()
+        try? FileManager.default.removeItem(atPath: diagnosticsPath)
     }
 
     func testSocketToggleDisablesAndEnables() {
@@ -77,7 +82,12 @@ final class AutomationSocketUITests: XCTestCase {
             return
         }
         socketPath = resolvedPath
-        XCTAssertTrue(waitForSocketPong(timeout: 12.0), "Expected control socket to respond at \(socketPath)")
+        XCTAssertTrue(
+            waitForSocketPong(timeout: 12.0),
+            "Expected control socket to respond at \(socketPath). " +
+                "lastPing=\(lastPingResponse.isEmpty ? "<nil>" : lastPingResponse) " +
+                "diagnostics=\(loadDiagnostics() ?? [:])"
+        )
 
         guard let target = ensureTerminalSurface(timeout: 10.0) else {
             XCTFail(
@@ -124,6 +134,7 @@ final class AutomationSocketUITests: XCTestCase {
         app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
         app.launchEnvironment["CMUX_SOCKET_MODE"] = mode
         app.launchEnvironment["CMUX_UI_TEST_SOCKET_SANITY"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
         // Debug launches require a tag outside reload.sh; provide one in UITests so CI
         // does not fail with "Application ... does not have a process ID".
         app.launchEnvironment["CMUX_TAG"] = launchTag
@@ -165,7 +176,9 @@ final class AutomationSocketUITests: XCTestCase {
     private func waitForSocketPong(timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate { _, _ in
-                self.socketCommand("ping", responseTimeout: 1.5) == "PONG"
+                let response = self.socketCommand("ping", responseTimeout: 1.5)
+                self.lastPingResponse = response ?? ""
+                return response == "PONG"
             },
             object: NSObject()
         )
@@ -612,5 +625,13 @@ final class AutomationSocketUITests: XCTestCase {
 
     private func removeSocketFile() {
         try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    private func loadDiagnostics() -> [String: String]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: diagnosticsPath)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            return nil
+        }
+        return object
     }
 }
