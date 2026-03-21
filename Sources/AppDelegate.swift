@@ -2572,7 +2572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         cancelUITestStartupActivation()
         uiTestStartupActivationGeneration += 1
         let generation = uiTestStartupActivationGeneration
-        let delays: [TimeInterval] = [0, 0.05, 0.2, 0.5, 1.0]
+        let delays: [TimeInterval] = [0, 0.05, 0.2, 0.5, 1.0, 2.0, 4.0, 8.0, 12.0]
 
         for (index, delay) in delays.enumerated() {
             let isFinalAttempt = index == delays.count - 1
@@ -2600,6 +2600,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard uiTestStartupActivationGeneration == generation else { return }
 
         if let window = preferredUITestStartupWindow() {
+            NSApp.unhide(nil)
+            if !window.isMainWindow {
+                window.makeMain()
+            }
+            if !window.isKeyWindow {
+                window.makeKey()
+            }
             window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
         } else if NSApp.windows.isEmpty {
