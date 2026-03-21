@@ -7959,6 +7959,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return
             }
 
+            let firstResponder = panel.webView.window?.firstResponder
+            let firstResponderType = firstResponder.map { String(describing: type(of: $0)) } ?? ""
+            let firstResponderIsFieldEditor = ((firstResponder as? NSTextView)?.isFieldEditor == true)
+            let firstResponderIsCmuxWebView = (firstResponder as? CmuxWebView) === panel.webView
+            let focusedAddressBarPanelId = self.focusedBrowserAddressBarPanelId()?.uuidString ?? ""
             let down = (payload["down"] as? NSNumber)?.intValue ?? 0
             let up = (payload["up"] as? NSNumber)?.intValue ?? 0
             let activeId = (payload["activeId"] as? String) ?? ""
@@ -7975,7 +7980,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "browserArrowActiveElementId": activeId,
                 "browserArrowSelectionStart": selectionStart.map(String.init) ?? "",
                 "browserArrowSelectionEnd": selectionEnd.map(String.init) ?? "",
-                "browserArrowReadyState": readyState
+                "browserArrowReadyState": readyState,
+                "browserArrowFirstResponderType": firstResponderType,
+                "browserArrowFirstResponderIsFieldEditor": firstResponderIsFieldEditor ? "true" : "false",
+                "browserArrowFirstResponderIsCmuxWebView": firstResponderIsCmuxWebView ? "true" : "false",
+                "browserArrowFocusedAddressBarPanelId": focusedAddressBarPanelId
             ])
         }
     }
