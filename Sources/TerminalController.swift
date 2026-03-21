@@ -11081,12 +11081,6 @@ class TerminalController {
         return result
     }
 
-#if DEBUG
-    func simulateShortcutForUITest(_ combo: String) -> String {
-        simulateShortcut(combo)
-    }
-#endif
-
     private func activateApp() -> String {
         DispatchQueue.main.sync {
             NSApp.activate(ignoringOtherApps: true)

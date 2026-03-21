@@ -38,12 +38,6 @@ private enum CmuxThemeNotifications {
 }
 
 #if DEBUG
-private enum CmuxUITestNotifications {
-    static let simulateShortcut = Notification.Name("com.cmuxterm.ui-test.simulate-shortcut")
-}
-#endif
-
-#if DEBUG
 enum CmuxTypingTiming {
     static let isEnabled: Bool = {
         let environment = ProcessInfo.processInfo.environment
@@ -2280,13 +2274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // UI tests run on a shared VM user profile, so persisted shortcuts can drift and make
         // key-equivalent routing flaky. Force defaults for deterministic tests.
         if isRunningUnderXCTest {
-            DistributedNotificationCenter.default().addObserver(
-                self,
-                selector: #selector(handleUITestSimulateShortcutNotification(_:)),
-                name: CmuxUITestNotifications.simulateShortcut,
-                object: nil,
-                suspensionBehavior: .deliverImmediately
-            )
             KeyboardShortcutSettings.resetAll()
         }
 #endif
@@ -12326,31 +12313,6 @@ private extension AppDelegate {
             GhosttyApp.shared.reloadConfiguration(source: "distributed.cmux.themes")
         }
     }
-
-#if DEBUG
-    @objc func handleUITestSimulateShortcutNotification(_ notification: Notification) {
-        guard isRunningUnderXCTest(ProcessInfo.processInfo.environment) else { return }
-        let combo = (notification.userInfo?["combo"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let requestId = (notification.userInfo?["requestId"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !combo.isEmpty else {
-            writeGotoSplitTestData([
-                "uiTestShortcutLastRequestId": requestId,
-                "uiTestShortcutLastError": "missing_combo",
-            ])
-            return
-        }
-
-        let result = TerminalController.shared.simulateShortcutForUITest(combo)
-        writeGotoSplitTestData([
-            "uiTestShortcutLastRequestId": requestId,
-            "uiTestShortcutLastCombo": combo,
-            "uiTestShortcutLastResult": result,
-            "uiTestShortcutLastError": ""
-        ])
-    }
-#endif
 }
 
 private extension NSWindow {

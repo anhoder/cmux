@@ -2,7 +2,6 @@ import XCTest
 import Foundation
 
 final class BrowserPaneNavigationKeybindUITests: XCTestCase {
-    private static let uiTestSimulateShortcutNotification = Notification.Name("com.cmuxterm.ui-test.simulate-shortcut")
     private var dataPath = ""
     private var socketPath = ""
     private var launchDiagnosticsPath = ""
@@ -417,7 +416,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let initialDownCount = Int(initialArrowSnapshot["browserArrowDownCount"] ?? "") ?? -1
         let initialUpCount = Int(initialArrowSnapshot["browserArrowUpCount"] ?? "") ?? -1
 
-        simulateShortcut("down")
+        simulateShortcut("down", app: app)
         guard let baselineDownSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -435,7 +434,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let baselineDownCount = Int(baselineDownSnapshot["browserArrowDownCount"] ?? "") ?? -1
         let baselineUpCount = Int(baselineDownSnapshot["browserArrowUpCount"] ?? "") ?? -1
 
-        simulateShortcut("up")
+        simulateShortcut("up", app: app)
         guard let baselineUpSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -478,7 +477,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
             return
         }
 
-        simulateShortcut("down")
+        simulateShortcut("down", app: app)
         guard let postCmdLDownSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -495,7 +494,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         }
         let postCmdLDownCount = Int(postCmdLDownSnapshot["browserArrowDownCount"] ?? "") ?? -1
 
-        simulateShortcut("up")
+        simulateShortcut("up", app: app)
         guard let postCmdLUpSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -1225,26 +1224,15 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
-    private func simulateShortcut(_ combo: String) {
-        let requestId = UUID().uuidString
-        DistributedNotificationCenter.default().postNotificationName(
-            Self.uiTestSimulateShortcutNotification,
-            object: nil,
-            userInfo: [
-                "combo": combo,
-                "requestId": requestId,
-            ],
-            deliverImmediately: true
-        )
-        guard let response = waitForDataSnapshot(timeout: 5.0, predicate: { data in
-            data["uiTestShortcutLastRequestId"] == requestId
-        }) else {
-            XCTFail("Expected UI-test shortcut \(combo) request \(requestId) to be acknowledged. data=\(String(describing: self.loadData()))")
-            return
+    private func simulateShortcut(_ combo: String, app: XCUIApplication) {
+        switch combo {
+        case "down":
+            app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        case "up":
+            app.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
+        default:
+            XCTFail("Unsupported test shortcut combo \(combo)")
         }
-        XCTAssertEqual(response["uiTestShortcutLastCombo"], combo, "Expected UI-test shortcut ack to match combo \(combo). response=\(response)")
-        XCTAssertEqual(response["uiTestShortcutLastResult"], "OK", "Expected UI-test shortcut \(combo) to return OK. response=\(response)")
-        XCTAssertEqual(response["uiTestShortcutLastError"] ?? "", "", "Expected UI-test shortcut \(combo) to have no error. response=\(response)")
     }
 
     private func loadData() -> [String: String]? {
