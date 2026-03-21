@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CoreGraphics
 
 final class BrowserPaneNavigationKeybindUITests: XCTestCase {
     private var dataPath = ""
@@ -416,7 +417,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let initialDownCount = Int(initialArrowSnapshot["browserArrowDownCount"] ?? "") ?? -1
         let initialUpCount = Int(initialArrowSnapshot["browserArrowUpCount"] ?? "") ?? -1
 
-        app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        pressRawArrowKey(.down)
         guard let baselineDownSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -434,7 +435,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let baselineDownCount = Int(baselineDownSnapshot["browserArrowDownCount"] ?? "") ?? -1
         let baselineUpCount = Int(baselineDownSnapshot["browserArrowUpCount"] ?? "") ?? -1
 
-        app.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
+        pressRawArrowKey(.up)
         guard let baselineUpSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -477,7 +478,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
             return
         }
 
-        app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        pressRawArrowKey(.down)
         guard let postCmdLDownSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -494,7 +495,7 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         }
         let postCmdLDownCount = Int(postCmdLDownSnapshot["browserArrowDownCount"] ?? "") ?? -1
 
-        app.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
+        pressRawArrowKey(.up)
         guard let postCmdLUpSnapshot = waitForDataSnapshot(
             timeout: 5.0,
             predicate: { data in
@@ -1211,6 +1212,60 @@ final class BrowserPaneNavigationKeybindUITests: XCTestCase {
         let predicate = NSPredicate(format: "exists == false")
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private enum RawArrowKey {
+        case down
+        case up
+
+        var keyCode: CGKeyCode {
+            switch self {
+            case .down:
+                return 125
+            case .up:
+                return 126
+            }
+        }
+
+        var name: String {
+            switch self {
+            case .down:
+                return "Down Arrow"
+            case .up:
+                return "Up Arrow"
+            }
+        }
+    }
+
+    private func pressRawArrowKey(_ key: RawArrowKey) {
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            XCTFail("Expected CGEventSource for raw \(key.name) keypress")
+            return
+        }
+
+        postRawKeyboardEvent(keyCode: key.keyCode, keyDown: true, source: source, keyName: key.name)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        postRawKeyboardEvent(keyCode: key.keyCode, keyDown: false, source: source, keyName: key.name)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.10))
+    }
+
+    private func postRawKeyboardEvent(
+        keyCode: CGKeyCode,
+        keyDown: Bool,
+        source: CGEventSource,
+        keyName: String
+    ) {
+        guard let event = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: keyCode,
+            keyDown: keyDown
+        ) else {
+            XCTFail("Expected CGEvent for raw \(keyName) keyDown=\(keyDown)")
+            return
+        }
+
+        event.flags = []
+        event.post(tap: .cghidEventTap)
     }
 
     private func loadData() -> [String: String]? {
