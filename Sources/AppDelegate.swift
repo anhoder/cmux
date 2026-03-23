@@ -2085,6 +2085,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var bonsplitTabDragUITestRecorder: DispatchSourceTimer?
     private var gotoSplitUITestArrowRecorder: DispatchSourceTimer?
     private var gotoSplitUITestInputSetupGeneration = 0
+    private var gotoSplitUITestContentEditableSetupGeneration = 0
     private var gotoSplitUITestObservers: [NSObjectProtocol] = []
     private var didSetupMultiWindowNotificationsUITest = false
     private var didSetupDisplayResolutionUITestDiagnostics = false
@@ -7859,6 +7860,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     if ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_ARROW_SETUP"] == "1" {
                         self.startGotoSplitUITestArrowRecorder(panelId: panel.id)
                     }
+                    if ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_CONTENTEDITABLE_SETUP"] == "1" {
+                        self.setupContentEditableForGotoSplitUITest(panel: panel)
+                    }
                     return
                 }
 
@@ -7907,6 +7911,214 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         attempt()
     }
 
+    private func setupContentEditableForGotoSplitUITest(panel: BrowserPanel) {
+        guard ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_CONTENTEDITABLE_SETUP"] == "1" else {
+            return
+        }
+
+        gotoSplitUITestContentEditableSetupGeneration += 1
+        let generation = gotoSplitUITestContentEditableSetupGeneration
+        let deadline = Date().addingTimeInterval(8.0)
+        let script = """
+        (() => {
+          const snapshot = () => {
+            const active = document.activeElement;
+            return {
+              seeded: false,
+              editorId: "",
+              activeId: active && typeof active.id === "string" ? active.id : "",
+              readyState: String(document.readyState || ""),
+              secondaryCenterX: -1,
+              secondaryCenterY: -1,
+              editorCenterX: -1,
+              editorCenterY: -1
+            };
+          };
+          const seed = () => {
+            const parent = document.getElementById("cmux-ui-test-focus-container");
+            const secondary = document.getElementById("cmux-ui-test-focus-input-secondary");
+            if (!document.body || !parent || !secondary) {
+              return snapshot();
+            }
+
+            let editor = document.getElementById("cmux-ui-test-contenteditable");
+            if (!editor || !editor.tagName || editor.tagName.toLowerCase() !== "div") {
+              editor = document.createElement("div");
+              editor.id = "cmux-ui-test-contenteditable";
+            }
+
+            editor.setAttribute("contenteditable", "true");
+            editor.setAttribute("role", "textbox");
+            editor.setAttribute("aria-label", "cmux-ui-test-contenteditable");
+            editor.spellcheck = false;
+            editor.tabIndex = 0;
+            editor.innerHTML = "alpha<br>beta<br>gamma";
+            editor.style.display = "block";
+            editor.style.minHeight = "84px";
+            editor.style.padding = "8px 10px";
+            editor.style.border = "1px solid #5f6368";
+            editor.style.borderRadius = "6px";
+            editor.style.boxSizing = "border-box";
+            editor.style.fontSize = "14px";
+            editor.style.fontFamily = "system-ui, -apple-system, sans-serif";
+            editor.style.background = "white";
+            editor.style.color = "black";
+            editor.style.whiteSpace = "pre-wrap";
+            editor.style.outline = "none";
+
+            if (editor.parentElement !== parent) {
+              parent.appendChild(editor);
+            }
+
+            if (!window.__cmuxContentEditableArrowReport || typeof window.__cmuxContentEditableArrowReport !== "object") {
+              window.__cmuxContentEditableArrowReport = {
+                down: 0,
+                up: 0,
+                commandShiftDown: 0,
+                commandShiftUp: 0
+              };
+            }
+
+            if (!editor.__cmuxContentEditableArrowReportInstalled) {
+              editor.__cmuxContentEditableArrowReportInstalled = true;
+              editor.addEventListener("keydown", (event) => {
+                if (event.key === "ArrowDown") window.__cmuxContentEditableArrowReport.down += 1;
+                if (event.key === "ArrowUp") window.__cmuxContentEditableArrowReport.up += 1;
+                if (event.key === "ArrowDown" && event.metaKey && event.shiftKey) {
+                  window.__cmuxContentEditableArrowReport.commandShiftDown += 1;
+                }
+                if (event.key === "ArrowUp" && event.metaKey && event.shiftKey) {
+                  window.__cmuxContentEditableArrowReport.commandShiftUp += 1;
+                }
+              }, true);
+            }
+
+            editor.focus({ preventScroll: true });
+            const selection = window.getSelection();
+            if (selection) {
+              const range = document.createRange();
+              range.selectNodeContents(editor);
+              range.collapse(false);
+              selection.removeAllRanges();
+              selection.addRange(range);
+            }
+
+            const secondaryRect = secondary.getBoundingClientRect();
+            const editorRect = editor.getBoundingClientRect();
+            const active = document.activeElement;
+            return {
+              seeded: active === editor,
+              editorId: editor.id || "",
+              activeId: active && typeof active.id === "string" ? active.id : "",
+              readyState: String(document.readyState || ""),
+              secondaryCenterX: secondaryRect.left + (secondaryRect.width / 2),
+              secondaryCenterY: secondaryRect.top + (secondaryRect.height / 2),
+              editorCenterX: editorRect.left + (editorRect.width / 2),
+              editorCenterY: editorRect.top + (editorRect.height / 2)
+            };
+          };
+          const ready =
+            String(document.readyState || "") === "complete" &&
+            !!document.body &&
+            !!document.getElementById("cmux-ui-test-focus-container") &&
+            !!document.getElementById("cmux-ui-test-focus-input-secondary");
+
+          if (!ready) {
+            return snapshot();
+          }
+
+          try {
+            return seed();
+          } catch (_) {
+            return snapshot();
+          }
+        })();
+        """
+
+        func attempt() {
+            guard gotoSplitUITestContentEditableSetupGeneration == generation else { return }
+
+            panel.webView.evaluateJavaScript(script) { [weak self, weak panel] result, _ in
+                guard let self,
+                      self.gotoSplitUITestContentEditableSetupGeneration == generation,
+                      let panel else { return }
+
+                let payload = result as? [String: Any]
+                let seeded = (payload?["seeded"] as? Bool) ?? false
+                let editorId = (payload?["editorId"] as? String) ?? ""
+                let activeId = (payload?["activeId"] as? String) ?? ""
+                let readyState = (payload?["readyState"] as? String) ?? ""
+                let secondaryCenterX = (payload?["secondaryCenterX"] as? NSNumber)?.doubleValue ?? -1
+                let secondaryCenterY = (payload?["secondaryCenterY"] as? NSNumber)?.doubleValue ?? -1
+                let editorCenterX = (payload?["editorCenterX"] as? NSNumber)?.doubleValue ?? -1
+                let editorCenterY = (payload?["editorCenterY"] as? NSNumber)?.doubleValue ?? -1
+                var editorClickOffsetX = -1.0
+                var editorClickOffsetY = -1.0
+
+                if let window = panel.webView.window {
+                    let webFrame = panel.webView.convert(panel.webView.bounds, to: nil)
+                    let contentHeight = Double(window.contentView?.bounds.height ?? 0)
+                    if webFrame.width > 1,
+                       webFrame.height > 1,
+                       contentHeight > 1,
+                       secondaryCenterX >= 0,
+                       secondaryCenterY >= 0,
+                       editorCenterX >= 0,
+                       editorCenterY >= 0 {
+                        let editorXInContent = Double(webFrame.minX) + editorCenterX
+                        let editorYInContent = Double(webFrame.maxY) - editorCenterY
+                        let titlebarHeight = max(0, Double(window.frame.height) - contentHeight)
+                        editorClickOffsetX = editorXInContent
+                        editorClickOffsetY = titlebarHeight + (contentHeight - editorYInContent)
+                    }
+                }
+
+                if seeded,
+                   !editorId.isEmpty,
+                   activeId == editorId,
+                   editorClickOffsetX > 0,
+                   editorClickOffsetY > 0 {
+                    self.writeGotoSplitTestData([
+                        "webContentEditableSeeded": "true",
+                        "webContentEditableElementId": editorId,
+                        "webContentEditableActiveElementId": activeId,
+                        "webContentEditableReadyState": readyState,
+                        "webContentEditableClickOffsetX": "\(editorClickOffsetX)",
+                        "webContentEditableClickOffsetY": "\(editorClickOffsetY)"
+                    ])
+                    return
+                }
+
+                if Date() < deadline {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        guard let self,
+                              self.gotoSplitUITestContentEditableSetupGeneration == generation else { return }
+                        attempt()
+                    }
+                    return
+                }
+
+                self.writeGotoSplitTestData([
+                    "webContentEditableSeeded": "false",
+                    "webContentEditableElementId": editorId,
+                    "webContentEditableActiveElementId": activeId,
+                    "webContentEditableReadyState": readyState,
+                    "webContentEditableClickOffsetX": "\(editorClickOffsetX)",
+                    "webContentEditableClickOffsetY": "\(editorClickOffsetY)",
+                    "setupError":
+                        "Timed out focusing contenteditable for omnibar restore test " +
+                        "seeded=\(seeded) editorId=\(editorId) activeId=\(activeId) " +
+                        "readyState=\(readyState) secondaryCenterX=\(secondaryCenterX) " +
+                        "secondaryCenterY=\(secondaryCenterY) editorCenterX=\(editorCenterX) " +
+                        "editorCenterY=\(editorCenterY) editorClickOffsetX=\(editorClickOffsetX) " +
+                        "editorClickOffsetY=\(editorClickOffsetY)"
+                ])
+            }
+        }
+
+        attempt()
+    }
+
     private func startGotoSplitUITestArrowRecorder(panelId: UUID) {
         guard ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_ARROW_SETUP"] == "1" else { return }
 
@@ -7932,12 +8144,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let script = """
         (() => {
-          const report = window.__cmuxArrowKeyReport || { down: 0, up: 0 };
+          const report = window.__cmuxArrowKeyReport || {
+            down: 0,
+            up: 0,
+            commandShiftDown: 0,
+            commandShiftUp: 0
+          };
+          const contentEditableReport = window.__cmuxContentEditableArrowReport || {
+            down: 0,
+            up: 0,
+            commandShiftDown: 0,
+            commandShiftUp: 0
+          };
           const active = document.activeElement;
           return {
             installed: !!window.__cmuxArrowKeyReport,
             down: Number(report.down || 0),
             up: Number(report.up || 0),
+            commandShiftDown: Number(report.commandShiftDown || 0),
+            commandShiftUp: Number(report.commandShiftUp || 0),
+            contentEditableInstalled: !!window.__cmuxContentEditableArrowReport,
+            contentEditableDown: Number(contentEditableReport.down || 0),
+            contentEditableUp: Number(contentEditableReport.up || 0),
+            contentEditableCommandShiftDown: Number(contentEditableReport.commandShiftDown || 0),
+            contentEditableCommandShiftUp: Number(contentEditableReport.commandShiftUp || 0),
             activeId: active && typeof active.id === "string" ? active.id : "",
             selectionStart: active && typeof active.selectionStart === "number" ? active.selectionStart : null,
             selectionEnd: active && typeof active.selectionEnd === "number" ? active.selectionEnd : null,
@@ -7959,6 +8189,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let focusedAddressBarPanelId = self.focusedBrowserAddressBarPanelId()?.uuidString ?? ""
             let down = (payload["down"] as? NSNumber)?.intValue ?? 0
             let up = (payload["up"] as? NSNumber)?.intValue ?? 0
+            let commandShiftDown = (payload["commandShiftDown"] as? NSNumber)?.intValue ?? 0
+            let commandShiftUp = (payload["commandShiftUp"] as? NSNumber)?.intValue ?? 0
+            let contentEditableInstalled = (payload["contentEditableInstalled"] as? Bool) ?? false
+            let contentEditableDown = (payload["contentEditableDown"] as? NSNumber)?.intValue ?? 0
+            let contentEditableUp = (payload["contentEditableUp"] as? NSNumber)?.intValue ?? 0
+            let contentEditableCommandShiftDown = (payload["contentEditableCommandShiftDown"] as? NSNumber)?.intValue ?? 0
+            let contentEditableCommandShiftUp = (payload["contentEditableCommandShiftUp"] as? NSNumber)?.intValue ?? 0
             let activeId = (payload["activeId"] as? String) ?? ""
             let selectionStart = (payload["selectionStart"] as? NSNumber)?.intValue
             let selectionEnd = (payload["selectionEnd"] as? NSNumber)?.intValue
@@ -7974,6 +8211,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "browserArrowSelectionStart": selectionStart.map(String.init) ?? "",
                 "browserArrowSelectionEnd": selectionEnd.map(String.init) ?? "",
                 "browserArrowReadyState": readyState,
+                "browserContentEditableInstalled": contentEditableInstalled ? "true" : "false",
+                "browserContentEditableDownCount": "\(contentEditableDown)",
+                "browserContentEditableUpCount": "\(contentEditableUp)",
+                "browserContentEditableCommandShiftDownCount": "\(contentEditableCommandShiftDown)",
+                "browserContentEditableCommandShiftUpCount": "\(contentEditableCommandShiftUp)",
+                "browserContentEditableActiveElementId": activeId,
+                "browserContentEditableReadyState": readyState,
                 "browserArrowFirstResponderType": firstResponderType,
                 "browserArrowFirstResponderIsFieldEditor": firstResponderIsFieldEditor ? "true" : "false",
                 "browserArrowFirstResponderIsCmuxWebView": firstResponderIsCmuxWebView ? "true" : "false",
