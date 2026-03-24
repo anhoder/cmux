@@ -521,6 +521,28 @@ struct BrowserPanelView: View {
 #if DEBUG
                 logBrowserFocusState(event: "addressBarFocus.webViewClickBlur")
 #endif
+                NotificationCenter.default.post(
+                    name: .browserWillBlurAddressBarForWebViewClick,
+                    object: panel.id
+                )
+                panel.prepareForExplicitWebViewFocus(
+                    isPanelFocused: isFocused,
+                    reason: "webView.clickIntent"
+                )
+                if isFocused,
+                   let window = panel.webView.window,
+                   !panel.webView.isHiddenOrHasHiddenAncestor {
+                    let focusedWebView = window.makeFirstResponder(panel.webView)
+                    if focusedWebView {
+                        panel.noteWebViewFocused()
+                    }
+#if DEBUG
+                    logBrowserFocusState(
+                        event: "addressBarFocus.webViewClickFocus",
+                        detail: "focusedWebView=\(focusedWebView ? 1 : 0)"
+                    )
+#endif
+                }
                 setAddressBarFocused(false, reason: "webView.clickIntent")
             }
             if !isFocused {
@@ -1033,6 +1055,7 @@ struct BrowserPanelView: View {
             }
 
             OmnibarTextFieldRepresentable(
+                panelId: panel.id,
                 text: Binding(
                     get: { omnibarState.buffer },
                     set: { newValue in
@@ -3169,9 +3192,10 @@ struct OmnibarSuggestion: Identifiable, Hashable {
 
 func browserOmnibarShouldReacquireFocusAfterEndEditing(
     desiredOmnibarFocus: Bool,
-    nextResponderIsOtherTextField: Bool
+    nextResponderIsOtherTextField: Bool,
+    explicitPointerBlurIntent: Bool = false
 ) -> Bool {
-    desiredOmnibarFocus && !nextResponderIsOtherTextField
+    desiredOmnibarFocus && !nextResponderIsOtherTextField && !explicitPointerBlurIntent
 }
 
 private final class OmnibarNativeTextField: NSTextField {
@@ -3337,6 +3361,7 @@ private final class OmnibarNativeTextField: NSTextField {
 }
 
 private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
+    let panelId: UUID
     @Binding var text: String
     @Binding var isFocused: Bool
     let inlineCompletion: OmnibarInlineCompletion?
@@ -3356,15 +3381,33 @@ private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
         var parent: OmnibarTextFieldRepresentable
         var isProgrammaticMutation: Bool = false
         var selectionObserver: NSObjectProtocol?
+        var explicitPointerBlurObserver: NSObjectProtocol?
         weak var observedEditor: NSTextView?
         var appliedInlineCompletion: OmnibarInlineCompletion?
         var lastPublishedSelection: NSRange = NSRange(location: NSNotFound, length: 0)
         var lastPublishedHasMarkedText: Bool = false
         /// Guards against infinite focus loops: `true` = focus requested, `false` = blur requested, `nil` = idle.
         var pendingFocusRequest: Bool?
+        var pendingExplicitPointerBlurIntent: Bool = false
 
         init(parent: OmnibarTextFieldRepresentable) {
             self.parent = parent
+            super.init()
+            explicitPointerBlurObserver = NotificationCenter.default.addObserver(
+                forName: .browserWillBlurAddressBarForWebViewClick,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let self,
+                      let panelId = notification.object as? UUID,
+                      panelId == self.parent.panelId else {
+                    return
+                }
+                self.pendingExplicitPointerBlurIntent = true
+#if DEBUG
+                self.logFocusEvent("webViewClickBlurIntent")
+#endif
+            }
         }
 
 #if DEBUG
@@ -3399,6 +3442,9 @@ private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
         deinit {
             if let selectionObserver {
                 NotificationCenter.default.removeObserver(selectionObserver)
+            }
+            if let explicitPointerBlurObserver {
+                NotificationCenter.default.removeObserver(explicitPointerBlurObserver)
             }
         }
 
@@ -3471,12 +3517,10 @@ private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
         }
 
         private func shouldReacquireFocusAfterEndEditing(window: NSWindow?) -> Bool {
-            if pointerDownBlurIntent(window: window) {
-                return false
-            }
             return browserOmnibarShouldReacquireFocusAfterEndEditing(
                 desiredOmnibarFocus: parent.isFocused,
-                nextResponderIsOtherTextField: nextResponderIsOtherTextField(window: window)
+                nextResponderIsOtherTextField: nextResponderIsOtherTextField(window: window),
+                explicitPointerBlurIntent: pointerDownBlurIntent(window: window) || pendingExplicitPointerBlurIntent
             )
         }
 
@@ -3484,6 +3528,7 @@ private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
 #if DEBUG
             logFocusEvent("controlTextDidBeginEditing")
 #endif
+            pendingExplicitPointerBlurIntent = false
             if !parent.isFocused {
                 DispatchQueue.main.async {
 #if DEBUG
@@ -3497,16 +3542,23 @@ private struct OmnibarTextFieldRepresentable: NSViewRepresentable {
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
-#if DEBUG
+            let explicitPointerBlurIntent =
+                pointerDownBlurIntent(window: parentField?.window) || pendingExplicitPointerBlurIntent
+            pendingExplicitPointerBlurIntent = false
             let nextOther = nextResponderIsOtherTextField(window: parentField?.window)
-            let pointerBlur = pointerDownBlurIntent(window: parentField?.window)
+            let shouldReacquire = browserOmnibarShouldReacquireFocusAfterEndEditing(
+                desiredOmnibarFocus: parent.isFocused,
+                nextResponderIsOtherTextField: nextOther,
+                explicitPointerBlurIntent: explicitPointerBlurIntent
+            )
+#if DEBUG
             logFocusEvent(
                 "controlTextDidEndEditing",
-                detail: "nextOther=\(nextOther ? 1 : 0) pointerBlur=\(pointerBlur ? 1 : 0) shouldReacquire=\(shouldReacquireFocusAfterEndEditing(window: parentField?.window) ? 1 : 0)"
+                detail: "nextOther=\(nextOther ? 1 : 0) pointerBlur=\(explicitPointerBlurIntent ? 1 : 0) shouldReacquire=\(shouldReacquire ? 1 : 0)"
             )
 #endif
             if parent.isFocused {
-                if shouldReacquireFocusAfterEndEditing(window: parentField?.window) {
+                if shouldReacquire {
 #if DEBUG
                     logFocusEvent("controlTextDidEndEditing.reacquire.begin")
 #endif

@@ -3262,4 +3262,14 @@ final class BrowserOmnibarFocusPolicyTests: XCTestCase {
             )
         )
     }
+
+    func testDoesNotReacquireFocusWhenExplicitPointerBlurIntentExists() {
+        XCTAssertFalse(
+            browserOmnibarShouldReacquireFocusAfterEndEditing(
+                desiredOmnibarFocus: true,
+                nextResponderIsOtherTextField: false,
+                explicitPointerBlurIntent: true
+            )
+        )
+    }
 }
