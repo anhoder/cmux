@@ -7362,12 +7362,12 @@ struct ContentView: View {
     private func openFocusedDirectoryInInlineVSCode(_ directoryURL: URL) -> Bool {
         guard let vscodeApplicationURL = TerminalDirectoryOpenTarget.vscodeInline.applicationURL(),
               let workspace = tabManager.selectedWorkspace,
-              let sourcePanelId = workspace.focusedPanelId,
-              let sourcePaneId = workspace.paneId(forPanelId: sourcePanelId) else {
+              let sourcePanelId = workspace.focusedPanelId else {
             return false
         }
         let sourceTabId = workspace.id
         let openDirection = vscodeInlineSplitDirection
+        let fallbackPaneId = workspace.bonsplitController.focusedPaneId
         let tabManager = tabManager
         VSCodeServeWebController.shared.ensureServeWebURL(vscodeApplicationURL: vscodeApplicationURL) { serveWebURL in
             guard let serveWebURL,
@@ -7388,6 +7388,9 @@ struct ContentView: View {
                         url: openFolderURL,
                         focus: true
                     )
+                }
+                guard let sourcePaneId = workspace.paneId(forPanelId: sourcePanelId) ?? fallbackPaneId else {
+                    return nil
                 }
                 return tabManager.newBrowserSurface(
                     tabId: sourceTabId,
