@@ -1,44 +1,37 @@
 #!/usr/bin/env bash
 # Regression test for https://github.com/manaflow-ai/cmux/issues/385.
-# Ensures pull_request CI stays on GitHub-hosted runners and privileged
-# workflows stay off the PR path.
+# Ensures paid CI jobs use WarpBuild runners.
+# Fork PRs are gated by GitHub's built-in "Require approval for outside
+# collaborators" setting, so workflow-level fork guards are not needed.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PR_WORKFLOW="$ROOT_DIR/.github/workflows/ci.yml"
-DEPOT_WORKFLOW="$ROOT_DIR/.github/workflows/test-depot.yml"
-BUILD_GHOSTTYKIT_WORKFLOW="$ROOT_DIR/.github/workflows/build-ghosttykit.yml"
+CI_FILE="$ROOT_DIR/.github/workflows/ci.yml"
+GHOSTTYKIT_FILE="$ROOT_DIR/.github/workflows/build-ghosttykit.yml"
+COMPAT_FILE="$ROOT_DIR/.github/workflows/ci-macos-compat.yml"
 
-if ! grep -Eq '^  pull_request:$' "$PR_WORKFLOW"; then
-  echo "FAIL: $PR_WORKFLOW must remain the pull_request workflow"
-  exit 1
-fi
-
-if grep -Fq 'runs-on: depot-macos-latest' "$PR_WORKFLOW"; then
-  echo "FAIL: $PR_WORKFLOW must not run Depot jobs on the pull_request path"
-  exit 1
-fi
-
-if grep -Fq 'secrets.GHOSTTY_RELEASE_TOKEN' "$PR_WORKFLOW"; then
-  echo "FAIL: $PR_WORKFLOW must not use release-token secrets on the pull_request path"
-  exit 1
-fi
-
-for trusted_workflow in "$DEPOT_WORKFLOW" "$BUILD_GHOSTTYKIT_WORKFLOW"; do
-  if grep -Eq '^  pull_request:$' "$trusted_workflow"; then
-    echo "FAIL: $trusted_workflow must not trigger on pull_request"
+check_warp_runner() {
+  local file="$1" job="$2"
+  if ! awk -v job="$job" '
+    $0 ~ "^  "job":" { in_job=1; next }
+    in_job && /^  [^[:space:]]/ { in_job=0 }
+    in_job && /runs-on:.*warp-macos-.*-arm64/ { saw_warp=1 }
+    in_job && /os: warp-macos-.*-arm64/ { saw_warp=1 }
+    END { exit !(saw_warp) }
+  ' "$file"; then
+    echo "FAIL: $job in $(basename "$file") must use a WarpBuild runner"
     exit 1
   fi
-done
+  echo "PASS: $job WarpBuild runner is present"
+}
 
-if ! awk '
-  /^  tests:/ { in_tests=1; next }
-  in_tests && /^  [^[:space:]]/ { in_tests=0 }
-  in_tests && /runs-on: depot-macos-latest/ { saw_depot=1 }
-  END { exit !saw_depot }
-' "$DEPOT_WORKFLOW"; then
-  echo "FAIL: $DEPOT_WORKFLOW must keep its Depot-hosted tests job"
-  exit 1
-fi
+# ci.yml jobs
+check_warp_runner "$CI_FILE" "tests"
+check_warp_runner "$CI_FILE" "tests-build-and-lag"
+check_warp_runner "$CI_FILE" "ui-regressions"
 
-echo "PASS: pull_request CI is GitHub-hosted only and privileged workflows stay trusted-only"
+# build-ghosttykit.yml
+check_warp_runner "$GHOSTTYKIT_FILE" "build-ghosttykit"
+
+# ci-macos-compat.yml (uses matrix.os with WarpBuild runners)
+check_warp_runner "$COMPAT_FILE" "compat-tests"
