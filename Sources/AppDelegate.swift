@@ -9595,6 +9595,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        // New pane: Cmd+Opt+N
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .newPane)) {
+#if DEBUG
+            dlog("shortcut.action name=newPane \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            tabManager?.selectedTab?.newPaneToRight()
+            return true
+        }
+
         if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .splitBrowserRight)) {
 #if DEBUG
             dlog("shortcut.action name=splitBrowserRight \(debugShortcutRouteSnapshot(event: event))")

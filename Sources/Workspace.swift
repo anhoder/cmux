@@ -7098,6 +7098,70 @@ final class Workspace: Identifiable, ObservableObject {
         return newPanel
     }
 
+    /// Create a new pane on the canvas at 2/3 viewport width, appended to the right.
+    /// This is the paper WM "new pane" operation (Cmd+Opt+N).
+    @discardableResult
+    func newPaneToRight() -> TerminalPanel? {
+        let paneWidth = max(layoutController.viewportWidth * 2.0 / 3.0, 200)
+        let afterPaneId = layoutController.focusedPaneId
+
+        let inheritedConfig = focusedPanelId.flatMap { inheritedTerminalConfig(preferredPanelId: $0, inPane: layoutController.focusedPaneId ?? layoutController.allPaneIds[0]) }
+        let remoteTerminalStartupCommand = remoteTerminalStartupCommand()
+
+        let workingDirectory: String? = {
+            if let panelId = focusedPanelId,
+               let dir = panelDirectories[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !dir.isEmpty {
+                return dir
+            }
+            let dir = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            return dir.isEmpty ? nil : dir
+        }()
+
+        let newPanel = TerminalPanel(
+            workspaceId: id,
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: inheritedConfig,
+            workingDirectory: workingDirectory,
+            portOrdinal: portOrdinal,
+            initialCommand: remoteTerminalStartupCommand
+        )
+        configureTerminalPanel(newPanel)
+        panels[newPanel.id] = newPanel
+        panelTitles[newPanel.id] = newPanel.displayTitle
+        if remoteTerminalStartupCommand != nil {
+            trackRemoteTerminalSurface(newPanel.id)
+        }
+        seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
+
+        let newPaneId = layoutController.addPane(width: paneWidth, afterPaneId: afterPaneId)
+
+        guard let newTabId = layoutController.createTab(
+            title: newPanel.displayTitle,
+            icon: newPanel.displayIcon,
+            kind: SurfaceKind.terminal,
+            isDirty: newPanel.isDirty,
+            isPinned: false,
+            inPane: newPaneId
+        ) else {
+            panels.removeValue(forKey: newPanel.id)
+            panelTitles.removeValue(forKey: newPanel.id)
+            return nil
+        }
+
+        surfaceIdToPanelId[newTabId] = newPanel.id
+        layoutController.focusPane(newPaneId)
+
+        // Animate viewport to show the new pane
+        withAnimation(.easeInOut(duration: 0.175)) {
+            layoutController.scrollToRevealFocusedPane(comingFrom: .left)
+        }
+
+        focusPanel(newPanel.id)
+
+        return newPanel
+    }
+
     /// Create a new surface (nested tab) in the specified pane with a terminal panel.
     /// - Parameter focus: nil = focus only if the target pane is already focused (default UI behavior),
     ///                    true = force focus/selection of the new surface,

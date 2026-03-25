@@ -26,13 +26,16 @@ struct PaperLayoutView<Content: View, EmptyContent: View>: View {
                 // Canvas: all panes laid out horizontally
                 HStack(spacing: 0) {
                     ForEach(controller.panes) { pane in
+                        let resolvedWidth = (pane.width <= 0 || pane.width == .infinity)
+                            ? viewportWidth
+                            : pane.width
                         PaperPaneContainerView(
                             pane: pane,
                             controller: controller,
                             contentBuilder: contentBuilder,
                             emptyPaneBuilder: emptyPaneBuilder
                         )
-                        .frame(width: pane.width, height: viewportHeight)
+                        .frame(width: resolvedWidth, height: viewportHeight)
                     }
                 }
                 .offset(x: -controller.viewportOffset)
