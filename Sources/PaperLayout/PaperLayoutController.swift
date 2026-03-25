@@ -158,24 +158,20 @@ public final class PaperLayoutController {
     private var targetViewportOffset: CGFloat = 0
     private var animationStartOffset: CGFloat = 0
     private var animationStartTime: CFTimeInterval = 0
-    private var animationTimer: DispatchSourceTimer?
-
-    // Note: viewport offset compensation in the portal system is NOT needed.
-    // SwiftUI's .offset() on macOS DOES update NSView.convert(_:to:nil) correctly
-    // (unlike SwiftUI ScrollView which uses CALayer transforms).
+    private var animationDisplayLink: CADisplayLink?
 
     /// Animate the viewport offset to a target value over the configured duration.
+    /// Uses CADisplayLink for frame-perfect synchronization with the display refresh.
     func animateViewportOffset(to target: CGFloat) {
         let duration = configuration.appearance.enableAnimations
             ? configuration.appearance.animationDuration
             : 0
 
-        // Cancel any in-progress animation
-        animationTimer?.cancel()
-        animationTimer = nil
+        stopAnimation()
 
         if duration <= 0 || abs(target - viewportOffset) < 1 {
             viewportOffset = target
+            notifyGeometryChange()
             return
         }
 
@@ -183,17 +179,17 @@ public final class PaperLayoutController {
         animationStartOffset = viewportOffset
         animationStartTime = CACurrentMediaTime()
 
-        // ~120fps timer on the main queue
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(8))
-        timer.setEventHandler { [weak self] in
-            self?.animationTick()
-        }
-        animationTimer = timer
-        timer.resume()
+        let link = NSScreen.main?.displayLink(target: self, selector: #selector(animationTick))
+        link?.add(to: .main, forMode: .common)
+        animationDisplayLink = link
     }
 
-    private func animationTick() {
+    private func stopAnimation() {
+        animationDisplayLink?.invalidate()
+        animationDisplayLink = nil
+    }
+
+    @objc private func animationTick(_ displayLink: CADisplayLink) {
         let elapsed = CACurrentMediaTime() - animationStartTime
         let duration = configuration.appearance.animationDuration
         let progress = min(elapsed / duration, 1.0)
@@ -211,10 +207,7 @@ public final class PaperLayoutController {
 
         if progress >= 1.0 {
             viewportOffset = targetViewportOffset
-            animationTimer?.cancel()
-            animationTimer = nil
-            // Fire geometry notification only on animation completion
-            // to avoid per-frame terminal resize during scrolling.
+            stopAnimation()
             notifyGeometryChange()
         }
     }

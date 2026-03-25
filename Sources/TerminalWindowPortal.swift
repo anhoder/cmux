@@ -1471,24 +1471,28 @@ final class WindowTerminalPortal: NSObject {
         }
 
         if hasFiniteFrame {
-            // Use the full unclamped frame for the hosted view. The host
-            // view's masksToBounds clips visually. This prevents terminal
-            // resize during viewport scrolling.
-            let unclampedFrame = unclampedFrameInHost
-            let sizeChanged = abs(oldFrame.width - unclampedFrame.width) > 1 ||
-                              abs(oldFrame.height - unclampedFrame.height) > 1
-            let positionChanged = !Self.rectApproximatelyEqual(oldFrame, unclampedFrame)
+            // Hybrid frame: use the clamped X from ancestor intersection
+            // (prevents sidebar overlap) but the unclamped width/height
+            // (prevents terminal resize during viewport scrolling).
+            let stableFrame = NSRect(
+                x: targetFrame.origin.x,
+                y: unclampedFrameInHost.origin.y,
+                width: unclampedFrameInHost.width,
+                height: unclampedFrameInHost.height
+            )
+            let sizeChanged = abs(oldFrame.width - stableFrame.width) > 1 ||
+                              abs(oldFrame.height - stableFrame.height) > 1
+            let positionChanged = abs(oldFrame.origin.x - stableFrame.origin.x) > 0.5 ||
+                                  abs(oldFrame.origin.y - stableFrame.origin.y) > 0.5
 
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if positionChanged {
-                hostedView.frame = unclampedFrame
-            }
             if sizeChanged {
-                let expectedBounds = NSRect(origin: .zero, size: unclampedFrame.size)
-                if !Self.rectApproximatelyEqual(hostedView.bounds, expectedBounds) {
-                    hostedView.bounds = expectedBounds
-                }
+                hostedView.frame = stableFrame
+                let expectedBounds = NSRect(origin: .zero, size: stableFrame.size)
+                hostedView.bounds = expectedBounds
+            } else if positionChanged {
+                hostedView.setFrameOrigin(stableFrame.origin)
             }
             CATransaction.commit()
             if sizeChanged {
