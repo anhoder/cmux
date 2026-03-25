@@ -1436,7 +1436,7 @@ final class GhosttyMouseFocusTests: XCTestCase {
             .write(to: included, atomically: true, encoding: .utf8)
 
         let main = dir.appendingPathComponent("config")
-        try "config-file = \(included.path)?\n"
+        try "config-file = ?\(included.path)\n"
             .write(to: main, atomically: true, encoding: .utf8)
 
         XCTAssertTrue(GhosttyApp.userConfigContainsCJKCodepointMap(configPaths: [main.path]))
@@ -1457,6 +1457,17 @@ final class GhosttyMouseFocusTests: XCTestCase {
 
         // Should not hang; should return false since neither file has font-codepoint-map
         XCTAssertFalse(GhosttyApp.userConfigContainsCJKCodepointMap(configPaths: [fileA.path]))
+    }
+
+    func testUserConfigContainsCJKCodepointMapRespectsReset() throws {
+        try withTempConfig("""
+        font-codepoint-map = U+4E00-U+9FFF=Hiragino Sans
+        font-codepoint-map =
+        """) { path in
+            XCTAssertFalse(
+                GhosttyApp.userConfigContainsCJKCodepointMap(configPaths: [path])
+            )
+        }
     }
 
     // MARK: userConfigHasExplicitFontFamilyFallbackChain
@@ -1540,6 +1551,31 @@ final class GhosttyMouseFocusTests: XCTestCase {
 
         let reset = dir.appendingPathComponent("config.ghostty")
         try "font-family =\n"
+            .write(to: reset, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(
+            GhosttyApp.userConfigHasExplicitFontFamilyFallbackChain(
+                configPaths: [main.path, reset.path]
+            )
+        )
+    }
+
+    func testUserConfigHasExplicitFontFamilyFallbackChainRespectsConfigFileReset() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-test-cjk-font-family-config-file-reset-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let included = dir.appendingPathComponent("fonts.conf")
+        try "font-family = LXGW WenKai Mono TC\n"
+            .write(to: included, atomically: true, encoding: .utf8)
+
+        let main = dir.appendingPathComponent("config")
+        try "font-family = JetBrains Mono\nconfig-file = \(included.path)\n"
+            .write(to: main, atomically: true, encoding: .utf8)
+
+        let reset = dir.appendingPathComponent("config.ghostty")
+        try "config-file =\n"
             .write(to: reset, atomically: true, encoding: .utf8)
 
         XCTAssertFalse(

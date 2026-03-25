@@ -1099,6 +1099,19 @@ class GhosttyApp {
             effectiveFontFamilies.count > 1
         }
 
+        mutating func applyFontCodepointMap(_ value: String) {
+            if value.isEmpty {
+                containsCodepointMap = false
+                return
+            }
+
+            guard value.contains("=") else {
+                return
+            }
+
+            containsCodepointMap = true
+        }
+
         mutating func recordFontFamily(_ value: String) {
             if value.isEmpty {
                 effectiveFontFamilies.removeAll()
@@ -1185,18 +1198,30 @@ class GhosttyApp {
         configPaths: [String] = loadedCJKScanPaths()
     ) -> UserFontConfigSummary {
         var summary = UserFontConfigSummary()
-        var visited = Set<String>()
-        var pendingPaths = configPaths.map { NSString(string: $0).expandingTildeInPath }
-        var index = 0
+        var recursiveConfigPaths: [String] = []
 
-        while index < pendingPaths.count {
-            let includePaths = scanFontConfigFile(
-                atPath: pendingPaths[index],
-                visited: &visited,
-                summary: &summary
+        for path in configPaths.map({ NSString(string: $0).expandingTildeInPath }) {
+            scanFontConfigFile(
+                atPath: path,
+                summary: &summary,
+                recursiveConfigPaths: &recursiveConfigPaths
             )
-            pendingPaths.append(contentsOf: includePaths)
+        }
+
+        var loadedRecursivePaths = Set<String>()
+        var index = 0
+        while index < recursiveConfigPaths.count {
+            let path = recursiveConfigPaths[index]
             index += 1
+            let resolved = (path as NSString).standardizingPath
+            guard !loadedRecursivePaths.contains(resolved) else { continue }
+            loadedRecursivePaths.insert(resolved)
+
+            scanFontConfigFile(
+                atPath: path,
+                summary: &summary,
+                recursiveConfigPaths: &recursiveConfigPaths
+            )
         }
 
         return summary
@@ -1266,61 +1291,93 @@ class GhosttyApp {
         return size.intValue
     }
 
-    /// Scans a single config file (and any files it includes) for
-    /// font settings relevant to cmux's injected CJK fallback. Tracks visited
-    /// paths to prevent infinite recursion on cyclic includes.
+    /// Scans a single config file for font settings relevant to cmux's
+    /// injected CJK fallback and updates the pending recursive config-file
+    /// queue using Ghostty's repeatable path semantics.
     private static func scanFontConfigFile(
         atPath path: String,
-        visited: inout Set<String>,
-        summary: inout UserFontConfigSummary
-    ) -> [String] {
+        summary: inout UserFontConfigSummary,
+        recursiveConfigPaths: inout [String]
+    ) {
         let resolved = (path as NSString).standardizingPath
-        guard !visited.contains(resolved) else { return [] }
-        visited.insert(resolved)
-
         guard let contents = try? String(contentsOfFile: resolved, encoding: .utf8) else {
-            return []
+            return
         }
         let parentDir = (resolved as NSString).deletingLastPathComponent
-        var includePaths: [String] = []
 
         for line in contents.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            if trimmed.hasPrefix("font-codepoint-map") {
-                summary.containsCodepointMap = true
-            }
-            if let fontFamily = configValue(for: "font-family", in: trimmed) {
-                summary.recordFontFamily(fontFamily)
-            }
-            if let includePath = configIncludePath(from: trimmed, parentDir: parentDir) {
-                includePaths.append(includePath)
+            guard let entry = parsedConfigEntry(from: line) else { continue }
+
+            switch entry.key {
+            case "font-codepoint-map":
+                guard let value = entry.value else { continue }
+                summary.applyFontCodepointMap(value)
+            case "font-family":
+                guard let value = entry.value else { continue }
+                summary.recordFontFamily(value)
+            case "config-file":
+                guard let value = entry.value else { continue }
+                applyConfigFileDirective(
+                    value,
+                    parentDir: parentDir,
+                    recursiveConfigPaths: &recursiveConfigPaths
+                )
+            default:
+                continue
             }
         }
-
-        return includePaths
     }
 
-    private static func configValue(for key: String, in line: String) -> String? {
-        guard let separatorIndex = line.firstIndex(of: "=") else { return nil }
+    private static func parsedConfigEntry(
+        from rawLine: String
+    ) -> (key: String, value: String?)? {
+        var trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("\u{FEFF}") {
+            trimmed.removeFirst()
+        }
+        if trimmed.isEmpty || trimmed.hasPrefix("#") { return nil }
 
-        let parsedKey = line[..<separatorIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard parsedKey == key else { return nil }
+        guard let separatorIndex = trimmed.firstIndex(of: "=") else {
+            return (trimmed.trimmingCharacters(in: .whitespacesAndNewlines), nil)
+        }
 
-        return line[line.index(after: separatorIndex)...]
+        let key = trimmed[..<separatorIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = trimmed[trimmed.index(after: separatorIndex)...]
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+
+        if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
+            value.removeFirst()
+            value.removeLast()
+        }
+
+        return (String(key), String(value))
     }
 
-    private static func configIncludePath(from line: String, parentDir: String) -> String? {
-        guard var includePath = configValue(for: "config-file", in: line) else { return nil }
-        if includePath.hasSuffix("?") {
+    private static func applyConfigFileDirective(
+        _ value: String,
+        parentDir: String,
+        recursiveConfigPaths: inout [String]
+    ) {
+        if value.isEmpty {
+            recursiveConfigPaths.removeAll()
+            return
+        }
+
+        var includePath = value
+        if includePath.hasPrefix("?") {
+            includePath.removeFirst()
+        }
+        if includePath.count >= 2, includePath.hasPrefix("\""), includePath.hasSuffix("\"") {
+            includePath.removeFirst()
             includePath.removeLast()
         }
+        guard !includePath.isEmpty else { return }
+
         let expanded = NSString(string: includePath).expandingTildeInPath
-        return (expanded as NSString).isAbsolutePath
+        let absolute = (expanded as NSString).isAbsolutePath
             ? expanded
             : (parentDir as NSString).appendingPathComponent(expanded)
+        recursiveConfigPaths.append(absolute)
     }
 
     static func shouldLoadLegacyGhosttyConfig(
