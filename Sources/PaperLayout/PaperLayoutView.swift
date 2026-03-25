@@ -17,67 +17,37 @@ struct PaperLayoutView<Content: View, EmptyContent: View>: View {
         self.emptyPaneBuilder = emptyPane
     }
 
-    @State private var scrollTarget: PaneID?
-    @State private var scrollAnchor: UnitPoint = .leading
-
     var body: some View {
         GeometryReader { geometry in
             let viewportWidth = geometry.size.width
             let viewportHeight = geometry.size.height
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                ScrollViewReader { proxy in
-                    HStack(spacing: 0) {
-                        ForEach(controller.panes) { pane in
-                            let resolvedWidth = (pane.width <= 0 || pane.width == .infinity)
-                                ? viewportWidth
-                                : pane.width
-                            PaperPaneContainerView(
-                                pane: pane,
-                                controller: controller,
-                                contentBuilder: contentBuilder,
-                                emptyPaneBuilder: emptyPaneBuilder
-                            )
-                            .frame(width: resolvedWidth, height: viewportHeight)
-                            .id(pane.id)
-                        }
-                    }
-                    .onChange(of: scrollTarget) { _, target in
-                        guard let target else { return }
-                        if controller.configuration.appearance.enableAnimations {
-                            withAnimation(.easeInOut(duration: controller.configuration.appearance.animationDuration)) {
-                                proxy.scrollTo(target, anchor: scrollAnchor)
-                            }
-                        } else {
-                            proxy.scrollTo(target, anchor: scrollAnchor)
-                        }
-                    }
-                    .onChange(of: controller.focusedPaneIndex) { oldIdx, newIdx in
-                        guard let newIdx, let id = controller.focusedPaneId else { return }
-                        // Only scroll if the total canvas is wider than the viewport
-                        let totalWidth = controller.panes.reduce(CGFloat(0)) { $0 + $1.width }
-                        guard totalWidth > viewportWidth else { return }
-
-                        // Determine scroll anchor based on navigation direction
-                        if let oldIdx, newIdx > oldIdx {
-                            // Navigated right: align target's trailing edge to viewport right
-                            scrollAnchor = .trailing
-                        } else {
-                            // Navigated left: align target's leading edge to viewport left
-                            scrollAnchor = .leading
-                        }
-                        scrollTarget = id
-                    }
-                    .onChange(of: controller.panes.count) { oldCount, newCount in
-                        // When a new pane is added, scroll to it
-                        if newCount > oldCount, let id = controller.focusedPaneId {
-                            scrollAnchor = .trailing
-                            scrollTarget = id
-                        }
+            PaperScrollView(
+                contentWidth: controller.totalCanvasWidth,
+                scrollOffset: controller.viewportOffset,
+                animationDuration: controller.configuration.appearance.enableAnimations
+                    ? controller.configuration.appearance.animationDuration
+                    : 0,
+                onScrollComplete: {
+                    controller.notifyGeometryChange()
+                }
+            ) {
+                HStack(spacing: 0) {
+                    ForEach(controller.panes) { pane in
+                        let resolvedWidth = (pane.width <= 0 || pane.width == .infinity)
+                            ? viewportWidth
+                            : pane.width
+                        PaperPaneContainerView(
+                            pane: pane,
+                            controller: controller,
+                            contentBuilder: contentBuilder,
+                            emptyPaneBuilder: emptyPaneBuilder
+                        )
+                        .frame(width: resolvedWidth, height: viewportHeight)
                     }
                 }
+                .frame(height: viewportHeight)
             }
-            .scrollDisabled(true)
             .onAppear {
                 controller.viewportWidth = viewportWidth
                 controller.viewportHeight = viewportHeight

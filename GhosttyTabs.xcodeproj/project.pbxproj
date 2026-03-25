@@ -130,6 +130,7 @@
 		PL000004 /* PaperLayoutController.swift in Sources */ = {isa = PBXBuildFile; fileRef = PL000014 /* PaperLayoutController.swift */; };
 		PL000005 /* PaperLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PL000015 /* PaperLayoutView.swift */; };
 		PL000006 /* PaperTabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PL000016 /* PaperTabBarView.swift */; };
+		PL000007 /* PaperScrollView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PL000017 /* PaperScrollView.swift */; };
 		/* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -306,6 +307,7 @@
 		PL000014 /* PaperLayoutController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperLayout/PaperLayoutController.swift; sourceTree = "<group>"; };
 		PL000015 /* PaperLayoutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperLayout/PaperLayoutView.swift; sourceTree = "<group>"; };
 		PL000016 /* PaperTabBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperLayout/PaperTabBarView.swift; sourceTree = "<group>"; };
+		PL000017 /* PaperScrollView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperLayout/PaperScrollView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -479,6 +481,7 @@
 				PL000014 /* PaperLayoutController.swift */,
 				PL000015 /* PaperLayoutView.swift */,
 				PL000016 /* PaperTabBarView.swift */,
+				PL000017 /* PaperScrollView.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -779,6 +782,7 @@
 				PL000004 /* PaperLayoutController.swift in Sources */,
 				PL000005 /* PaperLayoutView.swift in Sources */,
 				PL000006 /* PaperTabBarView.swift in Sources */,
+				PL000007 /* PaperScrollView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

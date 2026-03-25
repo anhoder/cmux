@@ -1397,6 +1397,16 @@ final class WindowTerminalPortal: NSObject {
 
         let oldFrame = hostedView.frame
 #if DEBUG
+        // Paper layout debug: log anchor frame every sync to trace X position
+        let anchorFrameInWindow = anchorView.convert(anchorView.bounds, to: nil)
+        dlog(
+            "portal.paper.sync hosted=\(portalDebugToken(hostedView)) " +
+            "anchorInWin=\(portalDebugFrame(anchorFrameInWindow)) " +
+            "frameInHost=\(portalDebugFrame(frameInHost)) " +
+            "target=\(portalDebugFrame(targetFrame)) " +
+            "hide=\(shouldHide ? 1 : 0) outside=\(outsideHostBounds ? 1 : 0) " +
+            "visibleInUI=\(entry.visibleInUI ? 1 : 0)"
+        )
         let frameWasClamped = hasFiniteFrame && !Self.rectApproximatelyEqual(frameInHost, targetFrame)
         if frameWasClamped {
             dlog(
