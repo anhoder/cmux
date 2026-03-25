@@ -1803,7 +1803,25 @@ func shouldReserveHorizontalCommandArrowForFocusedTerminal(
     shortcut: StoredShortcut,
     terminalIsFocused: Bool
 ) -> Bool {
-    false
+    // Keep bare Cmd+Left/Right on focused terminals reserved for Ghostty/macOS text
+    // navigation. Ghostty's own goto_split bindings still execute inside terminals via
+    // Ghostty action callbacks; the app-level shortcut path is only needed elsewhere.
+    guard terminalIsFocused else { return false }
+    guard shortcut.key == "←" || shortcut.key == "→" else { return false }
+
+    let normalizedEventFlags = event.modifierFlags
+        .intersection(.deviceIndependentFlagsMask)
+        .subtracting([.numericPad, .function, .capsLock])
+    guard normalizedEventFlags == [.command], shortcut.modifierFlags == [.command] else {
+        return false
+    }
+
+    switch (shortcut.key, event.keyCode) {
+    case ("←", 123), ("→", 124):
+        return true
+    default:
+        return false
+    }
 }
 
 func cmuxOwningGhosttyView(for responder: NSResponder?) -> GhosttyNSView? {
@@ -9517,25 +9535,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        let shortcutTargetWindow = mainWindowForShortcutEvent(event)
+        let terminalShouldKeepBareCommandHorizontalArrow =
+            focusedTerminalShortcutContext(preferredWindow: shortcutTargetWindow) != nil
+        func shouldBypassDirectionalShortcutForFocusedTerminal(_ shortcut: StoredShortcut?) -> Bool {
+            guard let shortcut else { return false }
+            return shouldReserveHorizontalCommandArrowForFocusedTerminal(
+                event: event,
+                shortcut: shortcut,
+                terminalIsFocused: terminalShouldKeepBareCommandHorizontalArrow
+            )
+        }
+
         // Pane focus navigation (defaults to Cmd+Option+Arrow, but can be customized to letter/number keys).
+        let focusLeftShortcut = KeyboardShortcutSettings.shortcut(for: .focusLeft)
+        let ghosttyFocusLeftShortcut = ghosttyGotoSplitLeftShortcut
         if matchDirectionalShortcut(
             event: event,
-            shortcut: KeyboardShortcutSettings.shortcut(for: .focusLeft),
+            shortcut: focusLeftShortcut,
             arrowGlyph: "←",
             arrowKeyCode: 123
-        ) || (ghosttyGotoSplitLeftShortcut.map { matchDirectionalShortcut(event: event, shortcut: $0, arrowGlyph: "←", arrowKeyCode: 123) } ?? false) {
+        ) || (ghosttyFocusLeftShortcut.map { matchDirectionalShortcut(event: event, shortcut: $0, arrowGlyph: "←", arrowKeyCode: 123) } ?? false) {
+            if shouldBypassDirectionalShortcutForFocusedTerminal(focusLeftShortcut)
+                || shouldBypassDirectionalShortcutForFocusedTerminal(ghosttyFocusLeftShortcut) {
+                return false
+            }
             tabManager?.movePaneFocus(direction: .left)
 #if DEBUG
             recordGotoSplitMoveIfNeeded(direction: .left)
 #endif
             return true
         }
+        let focusRightShortcut = KeyboardShortcutSettings.shortcut(for: .focusRight)
+        let ghosttyFocusRightShortcut = ghosttyGotoSplitRightShortcut
         if matchDirectionalShortcut(
             event: event,
-            shortcut: KeyboardShortcutSettings.shortcut(for: .focusRight),
+            shortcut: focusRightShortcut,
             arrowGlyph: "→",
             arrowKeyCode: 124
-        ) || (ghosttyGotoSplitRightShortcut.map { matchDirectionalShortcut(event: event, shortcut: $0, arrowGlyph: "→", arrowKeyCode: 124) } ?? false) {
+        ) || (ghosttyFocusRightShortcut.map { matchDirectionalShortcut(event: event, shortcut: $0, arrowGlyph: "→", arrowKeyCode: 124) } ?? false) {
+            if shouldBypassDirectionalShortcutForFocusedTerminal(focusRightShortcut)
+                || shouldBypassDirectionalShortcutForFocusedTerminal(ghosttyFocusRightShortcut) {
+                return false
+            }
             tabManager?.movePaneFocus(direction: .right)
 #if DEBUG
             recordGotoSplitMoveIfNeeded(direction: .right)
