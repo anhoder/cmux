@@ -1295,6 +1295,15 @@ struct BrowserPanelView: View {
     }
 
     private func setAddressBarFocused(_ focused: Bool, reason: String) {
+        // For Chromium panels, never auto-focus the address bar.
+        // Only allow explicit user actions (omnibar tap, Cmd+L).
+        if focused, panel.engineType == .chromium,
+           reason != "omnibar.tap" {
+#if DEBUG
+            dlog("cef.focus.blocked reason=\(reason) — suppressing address bar focus for Chromium panel")
+#endif
+            return
+        }
 #if DEBUG
         if addressBarFocused == focused {
             logBrowserFocusState(
