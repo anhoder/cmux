@@ -16,6 +16,7 @@
 #include "include/cef_load_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_keyboard_handler.h"
+#include "include/cef_context_menu_handler.h"
 #include "include/cef_focus_handler.h"
 #include "include/cef_request_context.h"
 #include "include/wrapper/cef_helpers.h"
@@ -33,7 +34,8 @@ class BridgeClient : public CefClient,
                      public CefLoadHandler,
                      public CefDisplayHandler,
                      public CefKeyboardHandler,
-                     public CefFocusHandler {
+                     public CefFocusHandler,
+                     public CefContextMenuHandler {
 public:
     explicit BridgeClient(const cef_bridge_client_callbacks* cbs)
         : callbacks_(*cbs) {}
@@ -43,6 +45,7 @@ public:
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
     CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
     CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+    CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
     CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
 
     // -- CefRenderHandler (OSR) --
@@ -180,6 +183,17 @@ public:
 
     void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
         cef_browser_ = nullptr;
+    }
+
+    // -- CefContextMenuHandler (OSR: suppress native menu) --
+
+    void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
+                             CefRefPtr<CefFrame> frame,
+                             CefRefPtr<CefContextMenuParams> params,
+                             CefRefPtr<CefMenuModel> model) override {
+        // Clear the default context menu. In OSR mode, CEF can't display
+        // a native menu (no NSWindow). Clearing prevents a crash.
+        model->Clear();
     }
 
     // -- CefKeyboardHandler --
