@@ -86,6 +86,24 @@ final class WindowToolbarController: NSObject, NSToolbarDelegate {
                 attach(to: window)
             }
         }
+        // After toolbar changes, force titlebar accessories to recalculate.
+        // Toolbar removal/re-addition changes the titlebar geometry, and
+        // accessories hidden via isHidden need a layout pass to reappear.
+        if !isMinimal {
+            DispatchQueue.main.async {
+                for window in NSApp.windows {
+                    for accessory in window.titlebarAccessoryViewControllers {
+                        if !accessory.isHidden {
+                            accessory.view.needsLayout = true
+                            accessory.view.superview?.needsLayout = true
+                        }
+                    }
+                    window.contentView?.needsLayout = true
+                    window.contentView?.superview?.needsLayout = true
+                    window.invalidateShadow()
+                }
+            }
+        }
     }
 
     private func attachToExistingWindows() {
