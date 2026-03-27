@@ -384,19 +384,6 @@ struct WorkspaceContentView: View {
                 bonsplitView
             }
         }
-        .onAppear {
-            syncSplitButtonsOnHover()
-        }
-        .onChange(of: isMinimalMode) { _, _ in
-            syncSplitButtonsOnHover()
-        }
-    }
-
-    private func syncSplitButtonsOnHover() {
-        let onHover = isMinimalMode
-        if workspace.bonsplitController.configuration.appearance.splitButtonsOnHover != onHover {
-            workspace.bonsplitController.configuration.appearance.splitButtonsOnHover = onHover
-        }
     }
 
     private func syncBonsplitNotificationBadges() {
