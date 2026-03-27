@@ -147,6 +147,19 @@ doneFlags:
 		return runBrowserRelay(socketPath, cmdArgs, jsonOutput, refreshAddr)
 	}
 
+	// Agent launch commands
+	if cmdName == "claude-teams" {
+		return runClaudeTeamsRelay(socketPath, cmdArgs, refreshAddr)
+	}
+	if cmdName == "omo" {
+		return runOMORelay(socketPath, cmdArgs, refreshAddr)
+	}
+
+	// Tmux compatibility layer (used by agent shims)
+	if cmdName == "__tmux-compat" {
+		return runTmuxCompat(socketPath, cmdArgs, refreshAddr)
+	}
+
 	spec, ok := commandIndex[cmdName]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "cmux: unknown command %q\n", cmdName)
@@ -754,5 +767,7 @@ func cliUsage() {
 	fmt.Fprintln(os.Stderr, "  send-key                  Send a key to a surface")
 	fmt.Fprintln(os.Stderr, "  notify                    Create a notification")
 	fmt.Fprintln(os.Stderr, "  browser <sub>             Browser commands (open, navigate, back, forward, reload, get-url)")
+	fmt.Fprintln(os.Stderr, "  claude-teams [args...]     Launch Claude Code in teammate mode")
+	fmt.Fprintln(os.Stderr, "  omo [args...]              Launch OpenCode with cmux integration")
 	fmt.Fprintln(os.Stderr, "  rpc <method> [json-params] Send arbitrary JSON-RPC")
 }
