@@ -6356,7 +6356,44 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         dlog("terminal.mouseUp surface=\(terminalSurface?.id.uuidString.prefix(5) ?? "nil") mods=[\(debugModifierString(event.modifierFlags))]")
         #endif
         guard let surface = surface else { return }
-        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, modsFromEvent(event))
+        let consumed = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, modsFromEvent(event))
+
+        // Fallback: if Cmd was held and ghostty didn't handle the click as a link,
+        // check if the word under cursor is a valid file/directory in the terminal's CWD.
+        // This enables cmd-click on bare filenames from commands like `ls`.
+        if !consumed && event.modifierFlags.contains(.command) {
+            tryOpenWordAsPath()
+        }
+    }
+
+    /// Attempt to open the word under the mouse cursor as a file path, resolved
+    /// against the terminal panel's current working directory.
+    private func tryOpenWordAsPath() {
+        guard let surface = surface else { return }
+
+        var text = ghostty_text_s()
+        guard ghostty_surface_quicklook_word(surface, &text) else { return }
+        defer { ghostty_surface_free_text(surface, &text) }
+
+        guard text.text_len > 0, let ptr = text.text else { return }
+        let wordData = Data(bytes: ptr, count: Int(text.text_len))
+        let word = String(decoding: wordData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty else { return }
+
+        // Get the CWD for this terminal panel
+        guard let termSurface = terminalSurface,
+              let workspace = termSurface.owningWorkspace(),
+              let cwd = workspace.panelDirectories[termSurface.id] else { return }
+
+        let resolvedPath = (cwd as NSString).appendingPathComponent(word)
+        guard FileManager.default.fileExists(atPath: resolvedPath) else { return }
+
+        #if DEBUG
+        dlog("link.wordFallback word=\(word) resolved=\(resolvedPath)")
+        #endif
+
+        NSWorkspace.shared.open(URL(fileURLWithPath: resolvedPath))
     }
 
     override func rightMouseDown(with event: NSEvent) {
