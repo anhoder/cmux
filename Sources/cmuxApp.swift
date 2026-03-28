@@ -474,14 +474,12 @@ struct cmuxApp: App {
 
                 Divider()
                 Menu("Debug Windows") {
-                    Button("Debug Window Controls…") {
-                        DebugWindowControlsWindowController.shared.show()
+                    Button("Background Debug…") {
+                        BackgroundDebugWindowController.shared.show()
                     }
-
                     Button("Browser Import Hint Debug…") {
                         BrowserImportHintDebugWindowController.shared.show()
                     }
-
                     Button(
                         String(
                             localized: "debug.menu.browserProfilePopoverDebug",
@@ -490,30 +488,18 @@ struct cmuxApp: App {
                     ) {
                         BrowserProfilePopoverDebugWindowController.shared.show()
                     }
-
-                    Button("Settings/About Titlebar Debug…") {
-                        SettingsAboutTitlebarDebugWindowController.shared.show()
+                    Button("Debug Window Controls…") {
+                        DebugWindowControlsWindowController.shared.show()
                     }
-
-                    Divider()
-                    Button("Sidebar Debug…") {
-                        SidebarDebugWindowController.shared.show()
-                    }
-
-                    Button("Background Debug…") {
-                        BackgroundDebugWindowController.shared.show()
-                    }
-
                     Button("Menu Bar Extra Debug…") {
                         MenuBarExtraDebugWindowController.shared.show()
                     }
-
-                    Button("Split Button Style Debug…") {
-                        SplitButtonStyleDebugWindowController.shared.show()
+                    Button("Settings/About Titlebar Debug…") {
+                        SettingsAboutTitlebarDebugWindowController.shared.show()
                     }
-
-                    Divider()
-
+                    Button("Sidebar Debug…") {
+                        SidebarDebugWindowController.shared.show()
+                    }
                     Button("Open All Debug Windows") {
                         openAllDebugWindows()
                     }
@@ -3335,78 +3321,6 @@ private struct MenuBarExtraDebugView: View {
 
     private func applyLiveUpdate() {
         AppDelegate.shared?.refreshMenuBarExtraForDebug()
-    }
-}
-
-// MARK: - Split Button Style Debug Window
-
-private final class SplitButtonStyleDebugWindowController: NSWindowController, NSWindowDelegate {
-    static let shared = SplitButtonStyleDebugWindowController()
-
-    private init() {
-        let window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
-            styleMask: [.titled, .closable, .utilityWindow],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Split Button Style"
-        window.titleVisibility = .visible
-        window.titlebarAppearsTransparent = false
-        window.isMovableByWindowBackground = true
-        window.isReleasedWhenClosed = false
-        window.identifier = NSUserInterfaceItemIdentifier("cmux.splitButtonStyleDebug")
-        window.center()
-        window.contentView = NSHostingView(rootView: SplitButtonStyleDebugView())
-        AppDelegate.shared?.applyWindowDecorations(to: window)
-        super.init(window: window)
-        window.delegate = self
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func show() {
-        window?.center()
-        window?.makeKeyAndOrderFront(nil)
-    }
-}
-
-private struct SplitButtonStyleDebugView: View {
-    @AppStorage("debugSplitButtonBgStyle") private var style = 0
-
-    private let styles = [
-        (0, "No background"),
-        (1, "Solid barFill"),
-        (2, "Fade gradient + barFill"),
-        (3, "ultraThinMaterial"),
-        (4, "windowBackgroundColor + fade"),
-    ]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Split Button Background")
-                .font(.headline)
-
-            ForEach(styles, id: \.0) { id, label in
-                HStack {
-                    Image(systemName: style == id ? "checkmark.circle.fill" : "circle")
-                        .foregroundColor(style == id ? .accentColor : .secondary)
-                    Text("\(id): \(label)")
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { style = id }
-            }
-
-            Divider()
-            Text("Changes apply live.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
