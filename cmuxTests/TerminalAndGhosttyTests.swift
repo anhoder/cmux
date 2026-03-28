@@ -3171,7 +3171,8 @@ final class TerminalWindowPortalLifecycleTests: XCTestCase {
         )
     }
 
-    func testCoalescedWindowScopedDragSyncKeepsImmediateFollowUpAfterDragEnds() {
+    func testCoalescedWindowScopedDragSyncKeepsImmediateFollowUpAfterDragEnds() throws {
+#if DEBUG
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 760, height: 420),
             styleMask: [.titled, .closable],
@@ -3213,24 +3214,19 @@ final class TerminalWindowPortalLifecycleTests: XCTestCase {
 
         let originalAnchorFrameInWindow = anchor.convert(anchor.bounds, to: nil)
 
-#if DEBUG
         TerminalWindowPortalRegistry.isPointerDragActiveForTesting = true
         defer {
             TerminalWindowPortalRegistry.isPointerDragActiveForTesting = false
         }
-#endif
 
         TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
         TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
         DispatchQueue.main.async {
             shiftedContainer.frame.origin.x += 72
-            shiftedContainer.frame.size.width -= 72
             contentView.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
         }
-#if DEBUG
         TerminalWindowPortalRegistry.isPointerDragActiveForTesting = false
-#endif
 
         drainMainQueue()
 
@@ -3263,6 +3259,9 @@ final class TerminalWindowPortalLifecycleTests: XCTestCase {
             TerminalWindowPortalRegistry.terminalViewAtWindowPoint(shiftedWindowPoint, in: window),
             "The coalesced follow-up should move the hosted terminal on the next queue turn"
         )
+#else
+        throw XCTSkip("Debug-only regression test")
+#endif
     }
 
     func testWindowScopedExternalGeometrySyncDoesNotRefreshOtherWindows() {

@@ -165,6 +165,10 @@ final class WindowTerminalHostView: NSView {
             if let kind = splitDividerCursorKind(at: point) {
                 activeDividerCursorKind = kind
                 kind.cursor.set()
+                TerminalWindowPortalRegistry.noteSplitDividerInteraction(
+                    in: window,
+                    eventType: currentEvent?.type
+                )
                 return nil
             }
 
@@ -1807,12 +1811,21 @@ enum TerminalWindowPortalRegistry {
     private static func isCurrentEventSplitDividerDrag() -> Bool {
         // Bonsplit divider drags do not participate in the explicit resize counter used by
         // sidebar drags, but they should still get immediate portal geometry synchronization.
-        guard let event = NSApp.currentEvent else { return false }
         let isLeftButtonDown = (NSEvent.pressedMouseButtons & 1) != 0
         guard isLeftButtonDown else {
             activeSplitDividerDragWindowId = nil
             return false
         }
+
+        if let activeSplitDividerDragWindowId {
+            let hasActiveWindow = NSApp.windows.contains { ObjectIdentifier($0) == activeSplitDividerDragWindowId }
+            if hasActiveWindow {
+                return true
+            }
+            Self.activeSplitDividerDragWindowId = nil
+        }
+
+        guard let event = NSApp.currentEvent else { return false }
 
         switch event.type {
         case .leftMouseUp:
@@ -1844,6 +1857,18 @@ enum TerminalWindowPortalRegistry {
         }
 
         return false
+    }
+
+    fileprivate static func noteSplitDividerInteraction(in window: NSWindow?, eventType: NSEvent.EventType?) {
+        guard let window else { return }
+        guard (NSEvent.pressedMouseButtons & 1) != 0 else { return }
+
+        switch eventType {
+        case .leftMouseDown, .leftMouseDragged:
+            activeSplitDividerDragWindowId = ObjectIdentifier(window)
+        default:
+            break
+        }
     }
 
     private static func currentSplitDividerDragCandidateWindows(for event: NSEvent) -> [NSWindow] {
