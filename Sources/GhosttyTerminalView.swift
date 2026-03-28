@@ -4455,6 +4455,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private var isFindEscapeSuppressionArmed = false
 #if DEBUG
     private var lastSizeSkipSignature: String?
+    private var lastSurfaceSizeApplySignature: String?
 #endif
 
     private var hasUsableFocusGeometry: Bool {
@@ -4826,6 +4827,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                     "reason=nonPositive size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
                     "inWindow=\(window != nil ? 1 : 0)"
                 )
+                dlog(
+                    "sizing.surface.defer surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                    "reason=nonPositive size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                    "inWindow=\(window != nil ? 1 : 0)"
+                )
                 lastSizeSkipSignature = signature
             }
 #endif
@@ -4842,6 +4848,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                     "size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
                     "inWindow=\(window != nil ? 1 : 0)"
                 )
+                dlog(
+                    "sizing.surface.defer surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                    "reason=\(deferralReason) size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                    "inWindow=\(window != nil ? 1 : 0)"
+                )
                 lastSizeSkipSignature = signature
             }
 #endif
@@ -4855,6 +4866,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 dlog(
                     "surface.size.defer surface=\(terminalSurface.id.uuidString.prefix(5)) reason=noWindow " +
                     "size=\(String(format: "%.1fx%.1f", size.width, size.height))"
+                )
+                dlog(
+                    "sizing.surface.defer surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                    "reason=noWindow size=\(String(format: "%.1fx%.1f", size.width, size.height))"
                 )
                 lastSizeSkipSignature = signature
             }
@@ -4874,6 +4889,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                     "size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
                     "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height))"
                 )
+                dlog(
+                    "sizing.surface.defer surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                    "reason=zeroBacking size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                    "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height))"
+                )
                 lastSizeSkipSignature = signature
             }
 #endif
@@ -4883,6 +4903,11 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         if lastSizeSkipSignature != nil {
             dlog(
                 "surface.size.resume surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                "size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height))"
+            )
+            dlog(
+                "sizing.surface.resume surface=\(terminalSurface.id.uuidString.prefix(5)) " +
                 "size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
                 "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height))"
             )
@@ -4926,6 +4951,25 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             layerScale: layerScale,
             backingSize: backingSize
         )
+#if DEBUG
+        let applySignature =
+            "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))-" +
+            "\(Int(backingSize.width.rounded()))x\(Int(backingSize.height.rounded()))-" +
+            "\(Int(drawablePixelSize.width.rounded()))x\(Int(drawablePixelSize.height.rounded()))-" +
+            String(format: "%.2f", layerScale)
+        if lastSurfaceSizeApplySignature != applySignature || didChange || surfaceSizeChanged {
+            dlog(
+                "sizing.surface.apply surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                "window=\(window.windowNumber) size=\(String(format: "%.1fx%.1f", size.width, size.height)) " +
+                "backing=\(String(format: "%.1fx%.1f", backingSize.width, backingSize.height)) " +
+                "drawable=\(String(format: "%.1fx%.1f", drawablePixelSize.width, drawablePixelSize.height)) " +
+                "layerScale=\(String(format: "%.2f", layerScale)) " +
+                "surfaceChanged=\(surfaceSizeChanged ? 1 : 0) drawableChanged=\(didChange ? 1 : 0) " +
+                "liveResize=\(window.inLiveResize ? 1 : 0)"
+            )
+            lastSurfaceSizeApplySignature = applySignature
+        }
+#endif
         return didChange || surfaceSizeChanged
     }
 
@@ -7656,6 +7700,18 @@ final class GhosttySurfaceScrollView: NSView {
         synchronizeScrollView()
         synchronizeSurfaceView()
         let didCoreSurfaceChange = synchronizeCoreSurface()
+#if DEBUG
+        if !sizeApproximatelyEqual(previousSurfaceSize, targetSize) || didCoreSurfaceChange {
+            let surfaceId = surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil"
+            dlog(
+                "sizing.surface.geometry surface=\(surfaceId) " +
+                "bounds=\(String(format: "%.1fx%.1f", bounds.width, bounds.height)) " +
+                "previous=\(String(format: "%.1fx%.1f", previousSurfaceSize.width, previousSurfaceSize.height)) " +
+                "target=\(String(format: "%.1fx%.1f", targetSize.width, targetSize.height)) " +
+                "coreChanged=\(didCoreSurfaceChange ? 1 : 0)"
+            )
+        }
+#endif
         return !sizeApproximatelyEqual(previousSurfaceSize, targetSize) || didCoreSurfaceChange
     }
 
@@ -10040,7 +10096,10 @@ struct GhosttyTerminalView: NSViewRepresentable {
         // the current layout turn. Re-entrant syncs here can wedge window resize
         // handling and leave the app spinning on the wait cursor.
         guard let window else { return }
-        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: window)
+        TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(
+            for: window,
+            reason: "ghostty.hostGeometry"
+        )
     }
 
     func makeNSView(context: Context) -> NSView {
