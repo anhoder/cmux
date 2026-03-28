@@ -155,9 +155,6 @@ final class TerminalPanel: Panel, ObservableObject {
 
     func close() {
         // The surface will be cleaned up by its deinit
-        // Detach from the window portal on real close so stale hosted views
-        // cannot remain above browser panes after split close.
-        surface.beginPortalCloseLifecycle(reason: "panel.close")
 #if DEBUG
         let frame = String(format: "%.1fx%.1f", hostedView.frame.width, hostedView.frame.height)
         let bounds = String(format: "%.1fx%.1f", hostedView.bounds.width, hostedView.bounds.height)
@@ -170,6 +167,7 @@ final class TerminalPanel: Panel, ObservableObject {
 #endif
         unfocus()
         hostedView.setVisibleInUI(false)
+        hostedView.removeFromSuperview()
         TerminalWindowPortalRegistry.detach(hostedView: hostedView)
 #if DEBUG
         dlog(

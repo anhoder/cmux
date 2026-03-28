@@ -9919,6 +9919,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
     private final class HostContainerView: NSView {
         private static var nextInstanceSerial: UInt64 = 0
 
+        weak var directHostedView: GhosttySurfaceScrollView?
         var onDidMoveToWindow: (() -> Void)?
         var onGeometryChanged: (() -> Void)?
         let instanceSerial: UInt64
@@ -9972,6 +9973,7 @@ struct GhosttyTerminalView: NSViewRepresentable {
 
         override func layout() {
             super.layout()
+            directHostedView?.frame = bounds
             notifyGeometryChangedIfNeeded()
         }
 
@@ -10091,6 +10093,50 @@ struct GhosttyTerminalView: NSViewRepresentable {
             }
         }
 #endif
+
+        if let hostContainer = nsView as? HostContainerView {
+            let forwardedDropZone = isVisibleInUI ? paneDropZone : nil
+
+            hostContainer.directHostedView = hostedView
+            hostedView.attachSurface(terminalSurface)
+            hostedView.setFocusHandler { onFocus?(terminalSurface.id) }
+            hostedView.setTriggerFlashHandler(onTriggerFlash)
+            hostedView.setInactiveOverlay(
+                color: inactiveOverlayColor,
+                opacity: CGFloat(inactiveOverlayOpacity),
+                visible: showsInactiveOverlay
+            )
+            hostedView.setNotificationRing(visible: showsUnreadNotificationRing)
+            hostedView.setSearchOverlay(searchState: searchState)
+            hostedView.syncKeyStateIndicator(text: terminalSurface.currentKeyStateIndicatorText)
+
+            if coordinator.lastPaneDropZone != forwardedDropZone {
+                coordinator.lastPaneDropZone = forwardedDropZone
+                hostedView.setDropZoneOverlay(zone: forwardedDropZone)
+            }
+
+            if hostedView.superview !== hostContainer {
+#if DEBUG
+                dlog(
+                    "ws.directHost.attach surface=\(terminalSurface.id.uuidString.prefix(5)) " +
+                    "pane=\(paneId.id.uuidString.prefix(5)) " +
+                    "hostWindow=\(hostContainer.window != nil ? 1 : 0) " +
+                    "hostedWindow=\(hostedView.window != nil ? 1 : 0) " +
+                    "hasSuperview=\(hostedView.superview != nil ? 1 : 0)"
+                )
+#endif
+                hostedView.removeFromSuperview()
+                hostedView.frame = hostContainer.bounds
+                hostedView.autoresizingMask = [.width, .height]
+                hostContainer.addSubview(hostedView)
+            }
+
+            hostedView.setVisibleInUI(isVisibleInUI)
+            hostedView.setActive(isActive)
+            _ = portalZPriority
+            _ = reattachToken
+            return
+        }
 
         let hostContainer = nsView as? HostContainerView
         let hostOwnsPortalNow = hostContainer.map { host in
@@ -10312,6 +10358,20 @@ struct GhosttyTerminalView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let host = nsView as? HostContainerView,
+           let hostedView = coordinator.hostedView,
+           host.directHostedView === hostedView {
+            hostedView.setFocusHandler(nil)
+            hostedView.setTriggerFlashHandler(nil)
+            hostedView.setDropZoneOverlay(zone: nil)
+            if hostedView.superview === host {
+                hostedView.removeFromSuperview()
+            }
+            host.directHostedView = nil
+            coordinator.hostedView = nil
+            return
+        }
+
         coordinator.attachGeneration += 1
         coordinator.desiredIsActive = false
         coordinator.desiredIsVisibleInUI = false
