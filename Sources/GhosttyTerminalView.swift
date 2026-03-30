@@ -3394,6 +3394,10 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
 
+    private func allowsRuntimeSurfaceCreation() -> Bool {
+        portalLifecycleState == .live
+    }
+
     func beginPortalCloseLifecycle(reason: String) {
         guard portalLifecycleState != .closed else { return }
         guard portalLifecycleState != .closing else { return }
@@ -3568,6 +3572,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
         // If surface doesn't exist yet, create it once the view is in a real window so
         // content scale and pixel geometry are derived from the actual backing context.
         if surface == nil {
+            guard allowsRuntimeSurfaceCreation() else {
+#if DEBUG
+                dlog(
+                    "surface.attach.skip surface=\(id.uuidString.prefix(5)) " +
+                    "reason=lifecycle.\(portalLifecycleState.rawValue)"
+                )
+#endif
+                return
+            }
             guard view.window != nil else {
 #if DEBUG
                 dlog(
@@ -3597,6 +3610,18 @@ final class TerminalSurface: Identifiable, ObservableObject {
     }
 
     private func createSurface(for view: GhosttyNSView) {
+        guard allowsRuntimeSurfaceCreation() else {
+#if DEBUG
+            dlog(
+                "surface.create.skip surface=\(id.uuidString.prefix(5)) " +
+                "reason=lifecycle.\(portalLifecycleState.rawValue)"
+            )
+            Self.surfaceLog(
+                "createSurface SKIPPED surface=\(id.uuidString) tab=\(tabId.uuidString) lifecycle=\(portalLifecycleState.rawValue)"
+            )
+#endif
+            return
+        }
         #if DEBUG
         let resourcesDir = getenv("GHOSTTY_RESOURCES_DIR").flatMap { String(cString: $0) } ?? "(unset)"
         let terminfo = getenv("TERMINFO").flatMap { String(cString: $0) } ?? "(unset)"
@@ -4144,6 +4169,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
             return
         }
 
+        guard allowsRuntimeSurfaceCreation() else { return }
         guard surface == nil, attachedView != nil else { return }
         guard !backgroundSurfaceStartQueued else { return }
         backgroundSurfaceStartQueued = true
@@ -4151,6 +4177,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.backgroundSurfaceStartQueued = false
+            guard self.allowsRuntimeSurfaceCreation() else { return }
             guard self.surface == nil, let view = self.attachedView else { return }
             #if DEBUG
             let startedAt = ProcessInfo.processInfo.systemUptime
@@ -5035,8 +5062,6 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     }
 
     private func requestInputRecoveryAfterSurfaceMiss(reason: String) {
-        desiredFocus = true
-        terminalSurface?.recordExternalFocusState(true)
         terminalSurface?.requestBackgroundSurfaceStartIfNeeded()
 #if DEBUG
         dlog(
@@ -5476,12 +5501,12 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         let result = super.resignFirstResponder()
         if result {
             desiredFocus = false
+            terminalSurface?.recordExternalFocusState(false)
         }
         if result, let surface = surface {
             let now = CACurrentMediaTime()
             let deltaMs = (now - lastScrollEventTime) * 1000
             Self.focusLog("resignFirstResponder: surface=\(terminalSurface?.id.uuidString ?? "nil") deltaSinceScrollMs=\(String(format: "%.2f", deltaMs))")
-            terminalSurface?.recordExternalFocusState(false)
             ghostty_surface_set_focus(surface, false)
         }
         return result
