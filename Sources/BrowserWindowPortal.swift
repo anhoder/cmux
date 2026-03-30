@@ -827,9 +827,9 @@ final class WindowBrowserHostView: NSView {
         case .cursorUpdate, .mouseEntered, .mouseExited, .mouseMoved:
             // Browser-side tab drags can surface as hover events with a mixed
             // pasteboard payload (tabtransfer plus promised-file UTIs). Prefer
-            // the explicit Bonsplit drag types so WKWebView cannot steal the
+            // the explicit WorkspaceSplit drag types so WKWebView cannot steal the
             // session as a file upload.
-            return DragOverlayRoutingPolicy.hasBonsplitTabTransfer(pasteboardTypes)
+            return DragOverlayRoutingPolicy.hasSplitTabTransfer(pasteboardTypes)
                 || DragOverlayRoutingPolicy.hasSidebarTabReorder(pasteboardTypes)
         default:
             return false
@@ -1224,10 +1224,10 @@ struct BrowserPaneDragTransfer: Equatable {
     }
 
     static func decode(from pasteboard: NSPasteboard) -> BrowserPaneDragTransfer? {
-        if let data = pasteboard.data(forType: DragOverlayRoutingPolicy.bonsplitTabTransferType) {
+        if let data = pasteboard.data(forType: DragOverlayRoutingPolicy.splitTabTransferType) {
             return decode(from: data)
         }
-        if let raw = pasteboard.string(forType: DragOverlayRoutingPolicy.bonsplitTabTransferType) {
+        if let raw = pasteboard.string(forType: DragOverlayRoutingPolicy.splitTabTransferType) {
             return decode(from: Data(raw.utf8))
         }
         return nil
@@ -1378,7 +1378,7 @@ final class BrowserPaneDropTargetView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        registerForDraggedTypes([DragOverlayRoutingPolicy.bonsplitTabTransferType])
+        registerForDraggedTypes([DragOverlayRoutingPolicy.splitTabTransferType])
     }
 
     @available(*, unavailable)
@@ -1390,7 +1390,7 @@ final class BrowserPaneDropTargetView: NSView {
         pasteboardTypes: [NSPasteboard.PasteboardType]?,
         eventType: NSEvent.EventType?
     ) -> Bool {
-        guard DragOverlayRoutingPolicy.hasBonsplitTabTransfer(pasteboardTypes) else { return false }
+        guard DragOverlayRoutingPolicy.hasSplitTabTransfer(pasteboardTypes) else { return false }
         guard let eventType else { return false }
 
         switch eventType {
@@ -1482,7 +1482,7 @@ final class BrowserPaneDropTargetView: NSView {
 #endif
             return true
         case .move(let tabId, let workspaceId, let targetPane, let splitTarget):
-            let moved = AppDelegate.shared?.moveBonsplitTab(
+            let moved = AppDelegate.shared?.moveSplitTab(
                 tabId: tabId,
                 toWorkspace: workspaceId,
                 targetPane: targetPane,
@@ -1548,7 +1548,7 @@ final class BrowserPaneDropTargetView: NSView {
         pasteboardTypes: [NSPasteboard.PasteboardType]?,
         eventType: NSEvent.EventType?
     ) {
-        let hasTransferType = DragOverlayRoutingPolicy.hasBonsplitTabTransfer(pasteboardTypes)
+        let hasTransferType = DragOverlayRoutingPolicy.hasSplitTabTransfer(pasteboardTypes)
         guard hasTransferType || capture else { return }
 
         let signature = [

@@ -2261,7 +2261,7 @@ class GhosttyApp {
     private func focusDirection(from direction: ghostty_action_goto_split_e) -> NavigationDirection? {
         switch direction {
         // For previous/next, we use left/right as a reasonable default
-        // Bonsplit doesn't have cycle-based navigation
+        // WorkspaceSplit doesn't have cycle-based navigation
         case GHOSTTY_GOTO_SPLIT_PREVIOUS: return .left
         case GHOSTTY_GOTO_SPLIT_NEXT: return .right
         case GHOSTTY_GOTO_SPLIT_UP: return .up
@@ -5374,9 +5374,9 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 return result
             }
 
-            // Always notify the host app that this pane became the first responder so bonsplit
+            // Always notify the host app that this pane became the first responder so WorkspaceSplit
             // focus/selection can converge. Previously this was gated on `surface != nil`, which
-            // allowed a mismatch where AppKit focus moved but the UI focus indicator (bonsplit)
+            // allowed a mismatch where AppKit focus moved but the UI focus indicator (WorkspaceSplit)
             // stayed behind.
             let hiddenInHierarchy = isHiddenOrHasHiddenAncestor
             if isVisibleInUI && hasUsableFocusGeometry && !hiddenInHierarchy {
@@ -7083,7 +7083,7 @@ final class GhosttySurfaceScrollView: NSView {
     private var pendingDropZone: DropZone?
     private var dropZoneOverlayAnimationGeneration: UInt64 = 0
     private var pendingAutomaticFirstResponderApply = false
-    // Intentionally no focus retry loops: rely on AppKit first-responder and bonsplit selection.
+    // Intentionally no focus retry loops: rely on AppKit first-responder and WorkspaceSplit selection.
 
     /// Tracks whether keyboard focus should go to the search field or the terminal
     /// when the window becomes key while the find bar is open.
@@ -8754,15 +8754,15 @@ final class GhosttySurfaceScrollView: NSView {
 
         guard let tab = tabManager.tabs.first(where: { $0.id == tabId }),
               let tabIdForSurface = tab.surfaceIdFromPanelId(surfaceId),
-              let paneId = tab.bonsplitController.allPaneIds.first(where: { paneId in
-                  tab.bonsplitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
+              let paneId = tab.splitController.allPaneIds.first(where: { paneId in
+                  tab.splitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
               }) else {
             scheduleAutomaticFirstResponderApply(reason: "ensureFocus.missingPane")
             return
         }
 
-        guard tab.bonsplitController.selectedTab(inPane: paneId)?.id == tabIdForSurface,
-              tab.bonsplitController.focusedPaneId == paneId else {
+        guard tab.splitController.selectedTab(inPane: paneId)?.id == tabIdForSurface,
+              tab.splitController.focusedPaneId == paneId else {
             scheduleAutomaticFirstResponderApply(reason: "ensureFocus.unfocusedPane")
             return
         }
@@ -8820,14 +8820,14 @@ final class GhosttySurfaceScrollView: NSView {
               tabManager.selectedTabId == tabId,
               let tab = tabManager.tabs.first(where: { $0.id == tabId }),
               let tabIdForSurface = tab.surfaceIdFromPanelId(surfaceId),
-              let paneId = tab.bonsplitController.allPaneIds.first(where: { paneId in
-                  tab.bonsplitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
+              let paneId = tab.splitController.allPaneIds.first(where: { paneId in
+                  tab.splitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
               }) else {
             return false
         }
 
-        return tab.bonsplitController.selectedTab(inPane: paneId)?.id == tabIdForSurface &&
-            tab.bonsplitController.focusedPaneId == paneId
+        return tab.splitController.selectedTab(inPane: paneId)?.id == tabIdForSurface &&
+            tab.splitController.focusedPaneId == paneId
     }
 
     /// Suppress the surface view's onFocus callback and ghostty_surface_set_focus during

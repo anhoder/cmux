@@ -378,7 +378,7 @@ final class WindowTerminalHostView: NSView {
         pasteboardTypes: [NSPasteboard.PasteboardType]?,
         hitView: NSView?
     ) {
-        let hasRelevantTypes = DragOverlayRoutingPolicy.hasBonsplitTabTransfer(pasteboardTypes)
+        let hasRelevantTypes = DragOverlayRoutingPolicy.hasSplitTabTransfer(pasteboardTypes)
             || DragOverlayRoutingPolicy.hasSidebarTabReorder(pasteboardTypes)
         guard passThrough || hasRelevantTypes else { return }
 
@@ -589,7 +589,7 @@ final class WindowTerminalPortal: NSObject {
     private var hasExternalGeometrySyncScheduled = false
     private var geometryObservers: [NSObjectProtocol] = []
 #if DEBUG
-    private var lastLoggedBonsplitContainerSignature: String?
+    private var lastLoggedsplitContainerSignature: String?
 #endif
 
     private struct Entry {
@@ -895,11 +895,11 @@ final class WindowTerminalPortal: NSObject {
     }
 
 #if DEBUG
-    private func nearestBonsplitContainer(from anchorView: NSView) -> NSView? {
+    private func nearestsplitContainer(from anchorView: NSView) -> NSView? {
         var current: NSView? = anchorView
         while let view = current {
             let className = NSStringFromClass(type(of: view))
-            if className.contains("PaneDragContainerView") || className.contains("Bonsplit") {
+            if className.contains("PaneDragContainerView") || className.contains("WorkspaceSplit") {
                 return view
             }
             current = view.superview
@@ -907,16 +907,16 @@ final class WindowTerminalPortal: NSObject {
         return installedReferenceView
     }
 
-    private func logBonsplitContainerFrameIfNeeded(anchorView: NSView, hostedView: GhosttySurfaceScrollView) {
-        guard let container = nearestBonsplitContainer(from: anchorView) else { return }
+    private func logsplitContainerFrameIfNeeded(anchorView: NSView, hostedView: GhosttySurfaceScrollView) {
+        guard let container = nearestsplitContainer(from: anchorView) else { return }
         let containerFrame = container.convert(container.bounds, to: nil)
         let signature = "\(ObjectIdentifier(container)):\(portalDebugFrame(containerFrame))"
-        guard signature != lastLoggedBonsplitContainerSignature else { return }
-        lastLoggedBonsplitContainerSignature = signature
+        guard signature != lastLoggedsplitContainerSignature else { return }
+        lastLoggedsplitContainerSignature = signature
 
         let containerClass = NSStringFromClass(type(of: container))
         dlog(
-            "portal.bonsplit.container hosted=\(portalDebugToken(hostedView)) " +
+            "portal.WorkspaceSplit.container hosted=\(portalDebugToken(hostedView)) " +
             "class=\(containerClass) frame=\(portalDebugFrame(containerFrame)) " +
             "host=\(portalDebugFrameInWindow(hostView)) anchor=\(portalDebugFrameInWindow(anchorView))"
         )
@@ -994,7 +994,7 @@ final class WindowTerminalPortal: NSObject {
 
     /// Hide a portal entry without detaching it. Updates visibleInUI to false and
     /// sets isHidden = true so subsequent synchronizeHostedView calls keep it hidden.
-    /// Used when a workspace is permanently unmounted (vs. transient bonsplit dismantles).
+    /// Used when a workspace is permanently unmounted (vs. transient WorkspaceSplit dismantles).
     func hideEntry(forHostedId hostedId: ObjectIdentifier) {
         guard var entry = entriesByHostedId[hostedId] else { return }
         guard entry.visibleInUI else { return }
@@ -1292,7 +1292,7 @@ final class WindowTerminalPortal: NSObject {
         let frameInHostRaw = hostView.convert(frameInWindow, from: nil)
         let frameInHost = Self.pixelSnappedRect(frameInHostRaw, in: hostView)
 #if DEBUG
-        logBonsplitContainerFrameIfNeeded(anchorView: anchorView, hostedView: hostedView)
+        logsplitContainerFrameIfNeeded(anchorView: anchorView, hostedView: hostedView)
 #endif
         let hostBounds = hostView.bounds
         let hasFiniteHostBounds =

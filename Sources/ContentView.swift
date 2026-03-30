@@ -355,12 +355,12 @@ enum SidebarResizeInteraction {
 // MARK: - File Drop Overlay
 
 enum DragOverlayRoutingPolicy {
-    static let bonsplitTabTransferType = NSPasteboard.PasteboardType("com.splittabbar.tabtransfer")
+    static let splitTabTransferType = NSPasteboard.PasteboardType("com.splittabbar.tabtransfer")
     static let sidebarTabReorderType = NSPasteboard.PasteboardType(SidebarTabDragPayload.typeIdentifier)
 
-    static func hasBonsplitTabTransfer(_ pasteboardTypes: [NSPasteboard.PasteboardType]?) -> Bool {
+    static func hasSplitTabTransfer(_ pasteboardTypes: [NSPasteboard.PasteboardType]?) -> Bool {
         guard let pasteboardTypes else { return false }
-        return pasteboardTypes.contains(bonsplitTabTransferType)
+        return pasteboardTypes.contains(splitTabTransferType)
     }
 
     static func hasSidebarTabReorder(_ pasteboardTypes: [NSPasteboard.PasteboardType]?) -> Bool {
@@ -379,13 +379,13 @@ enum DragOverlayRoutingPolicy {
     ) -> Bool {
         // Local file drags (e.g. in-app draggable folder views) are valid drop
         // inputs; rely on explicit non-file drag types below to avoid hijacking
-        // Bonsplit/sidebar drags.
+        // WorkspaceSplit/sidebar drags.
         _ = hasLocalDraggingSource
         guard hasFileURL(pasteboardTypes) else { return false }
 
         // Prefer explicit non-file drag types so stale fileURL entries cannot hijack
-        // Bonsplit tab drags or sidebar tab reorder drags.
-        if hasBonsplitTabTransfer(pasteboardTypes) { return false }
+        // WorkspaceSplit tab drags or sidebar tab reorder drags.
+        if hasSplitTabTransfer(pasteboardTypes) { return false }
         if hasSidebarTabReorder(pasteboardTypes) { return false }
         return true
     }
@@ -431,7 +431,7 @@ enum DragOverlayRoutingPolicy {
         eventType: NSEvent.EventType?
     ) -> Bool {
         guard isPortalDragEvent(eventType) else { return false }
-        return hasBonsplitTabTransfer(pasteboardTypes) || hasSidebarTabReorder(pasteboardTypes)
+        return hasSplitTabTransfer(pasteboardTypes) || hasSidebarTabReorder(pasteboardTypes)
     }
 
     private static func isDragMouseEvent(_ eventType: NSEvent.EventType?) -> Bool {
@@ -454,7 +454,7 @@ enum DragOverlayRoutingPolicy {
 }
 
 /// Transparent NSView installed on the window's theme frame (above the NSHostingView) to
-/// handle file/URL drags from Finder. Nested NSHostingController layers (created by bonsplit's
+/// handle file/URL drags from Finder. Nested NSHostingController layers (created by WorkspaceSplit's
 /// SinglePaneWrapper) prevent AppKit's NSDraggingDestination routing from reaching deeply
 /// embedded terminal views. This overlay sits above the entire content view hierarchy and
 /// intercepts file drags, forwarding drops to the GhosttyNSView under the cursor.
@@ -523,7 +523,7 @@ final class FileDropOverlayView: NSView {
     }
 
     // MARK: Hit-testing — participation is routed by DragOverlayRoutingPolicy so
-    // file-drop, bonsplit tab drags, and sidebar tab reorder drags cannot conflict.
+    // file-drop, WorkspaceSplit tab drags, and sidebar tab reorder drags cannot conflict.
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let pb = NSPasteboard(name: .drag)
@@ -820,7 +820,7 @@ final class FileDropOverlayView: NSView {
         let interestingTypes = types.filter { type in
             let raw = type.rawValue
             return raw == NSPasteboard.PasteboardType.fileURL.rawValue
-                || raw == DragOverlayRoutingPolicy.bonsplitTabTransferType.rawValue
+                || raw == DragOverlayRoutingPolicy.splitTabTransferType.rawValue
                 || raw == DragOverlayRoutingPolicy.sidebarTabReorderType.rawValue
                 || raw.contains("public.text")
                 || raw.contains("public.url")
@@ -837,7 +837,7 @@ final class FileDropOverlayView: NSView {
     private func hasRelevantDragTypes(_ types: [NSPasteboard.PasteboardType]?) -> Bool {
         guard let types else { return false }
         return types.contains(.fileURL)
-            || types.contains(DragOverlayRoutingPolicy.bonsplitTabTransferType)
+            || types.contains(DragOverlayRoutingPolicy.splitTabTransferType)
             || types.contains(DragOverlayRoutingPolicy.sidebarTabReorderType)
     }
 
@@ -1509,7 +1509,7 @@ enum MountedWorkspacePresentationPolicy {
             if shouldPrimeInBackground {
                 // Keep the workspace mounted long enough to warm the terminal surface, but do
                 // not mark it panel-visible. Visible portal entries intentionally survive
-                // transient anchor loss during bonsplit drag/reparent churn.
+                // transient anchor loss during WorkspaceSplit drag/reparent churn.
                 return 0.001
             }
             return 0
@@ -1798,7 +1798,7 @@ struct ContentView: View {
               let workspace = tabManager.selectedWorkspace else { return nil }
         let layoutSnapshot = WorkspaceContentView.effectiveTmuxLayoutSnapshot(
             cachedSnapshot: workspace.tmuxLayoutSnapshot,
-            liveSnapshot: workspace.bonsplitController.layoutSnapshot()
+            liveSnapshot: workspace.splitController.layoutSnapshot()
         )
         let contentView = window.contentView
 
@@ -2337,7 +2337,7 @@ struct ContentView: View {
     }
 
     /// Space at top of content area for the titlebar. This must be at least the actual titlebar
-    /// height; otherwise controls like Bonsplit tab dragging can be interpreted as window drags.
+    /// height; otherwise controls like WorkspaceSplit tab dragging can be interpreted as window drags.
     @State private var titlebarPadding: CGFloat = 32
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
@@ -2494,7 +2494,7 @@ struct ContentView: View {
         .contentShape(Rectangle())
         .background(TitlebarDoubleClickMonitorView())
         .background({
-            // The terminal area has two stacked semi-transparent layers: the Bonsplit
+            // The terminal area has two stacked semi-transparent layers: the WorkspaceSplit
             // container chrome background plus Ghostty's own Metal-rendered background.
             // Compute the effective composited opacity so the titlebar matches visually.
             let alpha = CGFloat(GhosttyApp.shared.defaultBackgroundOpacity)
@@ -2514,8 +2514,8 @@ struct ContentView: View {
     private func syncTrafficLightInset() {
         let inset: CGFloat = (isMinimalMode && !sidebarState.isVisible) ? 80 : 0
         for tab in tabManager.tabs {
-            if tab.bonsplitController.configuration.appearance.tabBarLeadingInset != inset {
-                tab.bonsplitController.configuration.appearance.tabBarLeadingInset = inset
+            if tab.splitController.configuration.appearance.tabBarLeadingInset != inset {
+                tab.splitController.configuration.appearance.tabBarLeadingInset = inset
             }
         }
     }
@@ -3144,7 +3144,7 @@ struct ContentView: View {
                 }
             }
 
-            // Keep content below the titlebar so drags on Bonsplit's tab bar don't
+            // Keep content below the titlebar so drags on WorkspaceSplit's tab bar don't
             // get interpreted as window drags.
             let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
             let nextPadding = max(28, min(72, computedTitlebarHeight))
@@ -5227,7 +5227,7 @@ struct ContentView: View {
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceHasSplits,
-                workspace.bonsplitController.allPaneIds.count > 1
+                workspace.splitController.allPaneIds.count > 1
             )
             let workspaceIndex = tabManager.tabs.firstIndex { $0.id == workspace.id }
             snapshot.setBool(CommandPaletteContextKeys.workspaceHasPeers, tabManager.tabs.count > 1)
@@ -11612,7 +11612,7 @@ private struct TabItemView: View, Equatable {
             dragAutoScrollController: dragAutoScrollController,
             dropIndicator: $dropIndicator
         ))
-        .onDrop(of: BonsplitTabDragPayload.dropContentTypes, delegate: SidebarBonsplitTabDropDelegate(
+        .onDrop(of: WorkspaceSplitTabDragPayload.dropContentTypes, delegate: SidebarWorkspaceSplitTabDropDelegate(
             targetWorkspaceId: tab.id,
             tabManager: tabManager,
             selectedTabIds: $selectedTabIds,
@@ -13047,7 +13047,7 @@ private enum SidebarTabDragPayload {
     }
 }
 
-private enum BonsplitTabDragPayload {
+private enum WorkspaceSplitTabDragPayload {
     static let typeIdentifier = "com.splittabbar.tabtransfer"
     static let dropContentType = UTType(exportedAs: typeIdentifier)
     static let dropContentTypes: [UTType] = [dropContentType]
@@ -13102,15 +13102,15 @@ private enum BonsplitTabDragPayload {
     }
 }
 
-private struct SidebarBonsplitTabDropDelegate: DropDelegate {
+private struct SidebarWorkspaceSplitTabDropDelegate: DropDelegate {
     let targetWorkspaceId: UUID
     let tabManager: TabManager
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
 
     func validateDrop(info: DropInfo) -> Bool {
-        guard info.hasItemsConforming(to: [BonsplitTabDragPayload.typeIdentifier]) else { return false }
-        return BonsplitTabDragPayload.currentTransfer() != nil
+        guard info.hasItemsConforming(to: [WorkspaceSplitTabDragPayload.typeIdentifier]) else { return false }
+        return WorkspaceSplitTabDragPayload.currentTransfer() != nil
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -13120,18 +13120,18 @@ private struct SidebarBonsplitTabDropDelegate: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         guard validateDrop(info: info),
-              let transfer = BonsplitTabDragPayload.currentTransfer(),
+              let transfer = WorkspaceSplitTabDragPayload.currentTransfer(),
               let app = AppDelegate.shared else {
             return false
         }
 
-        if let source = app.locateBonsplitSurface(tabId: transfer.tab.id),
+        if let source = app.locateSplitSurface(tabId: transfer.tab.id),
            source.workspaceId == targetWorkspaceId {
             syncSidebarSelection()
             return true
         }
 
-        guard app.moveBonsplitTab(
+        guard app.moveSplitTab(
             tabId: transfer.tab.id,
             toWorkspace: targetWorkspaceId,
             focus: true,
