@@ -12222,6 +12222,27 @@ private struct TabItemView: View, Equatable {
         let wasSelected = tabManager.selectedTabId == tab.id
         let isCommand = modifiers.contains(.command)
         let isShift = modifiers.contains(.shift)
+        #if DEBUG
+        let debugWorkspaceId: (UUID?) -> String = { workspaceId in
+            guard let workspaceId else { return "nil" }
+            return String(workspaceId.uuidString.prefix(5))
+        }
+        let debugSelectedWorkspaceIds: (Set<UUID>) -> String = { workspaceIds in
+            let orderedIds = tabManager.tabs.enumerated().compactMap { tabIndex, workspace in
+                workspaceIds.contains(workspace.id) ? "\(tabIndex):\(workspace.id.uuidString.prefix(5))" : nil
+            }
+            return orderedIds.isEmpty ? "[]" : "[\(orderedIds.joined(separator: ", "))]"
+        }
+        let debugPivot = lastSidebarSelectionIndex.map { anchorIndex -> String in
+            guard tabManager.tabs.indices.contains(anchorIndex) else { return "\(anchorIndex):invalid" }
+            return "\(anchorIndex):\(tabManager.tabs[anchorIndex].id.uuidString.prefix(5))"
+        } ?? "nil"
+        if isShift {
+            dlog(
+                "sidebar.select shift before clicked=\(index):\(tab.id.uuidString.prefix(5)) active=\(debugWorkspaceId(tabManager.selectedTabId)) pivot=\(debugPivot) selected=\(debugSelectedWorkspaceIds(selectedTabIds)) command=\(isCommand)"
+            )
+        }
+        #endif
         guard let update = SidebarWorkspaceSelectionPolicy.update(
             workspaceIds: tabManager.tabs.map(\.id),
             selectedWorkspaceIds: selectedTabIds,
@@ -12232,6 +12253,16 @@ private struct TabItemView: View, Equatable {
         ) else {
             return
         }
+        #if DEBUG
+        if isShift {
+            let debugNextPivot = tabManager.tabs.indices.contains(update.nextAnchorIndex)
+                ? "\(update.nextAnchorIndex):\(tabManager.tabs[update.nextAnchorIndex].id.uuidString.prefix(5))"
+                : "\(update.nextAnchorIndex):invalid"
+            dlog(
+                "sidebar.select shift after clicked=\(index):\(tab.id.uuidString.prefix(5)) active=\(debugWorkspaceId(update.nextActiveWorkspaceId)) pivot=\(debugNextPivot) selected=\(debugSelectedWorkspaceIds(update.selectedWorkspaceIds)) command=\(isCommand)"
+            )
+        }
+        #endif
 
         selectedTabIds = update.selectedWorkspaceIds
         lastSidebarSelectionIndex = update.nextAnchorIndex
