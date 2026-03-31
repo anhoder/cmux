@@ -278,9 +278,9 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
     private var surfaceTitle: String?
     private let snapshotFallbackView: UITextView = {
         let view = UITextView()
-        view.backgroundColor = .black
-        view.textColor = .white
-        view.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        view.backgroundColor = UIColor(red: 0x27/255.0, green: 0x28/255.0, blue: 0x22/255.0, alpha: 1)
+        view.textColor = UIColor(red: 0xfd/255.0, green: 0xff/255.0, blue: 0xf1/255.0, alpha: 1)
+        view.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         view.textContainerInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         view.textContainer.lineFragmentPadding = 0
         view.isEditable = false
@@ -552,15 +552,18 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
     }
 
     private func applyBackgroundColorFromConfig(_ config: ghostty_config_t) {
-        var color = ghostty_config_color_s()
-        let key = "background"
-        guard ghostty_config_get(config, &color, key, UInt(key.lengthOfBytes(using: .utf8))) else { return }
-        backgroundColor = UIColor(
-            red: CGFloat(color.r) / 255.0,
-            green: CGFloat(color.g) / 255.0,
-            blue: CGFloat(color.b) / 255.0,
-            alpha: 1.0
-        )
+        var bgColor = ghostty_config_color_s()
+        let bgKey = "background"
+        if ghostty_config_get(config, &bgColor, bgKey, UInt(bgKey.lengthOfBytes(using: .utf8))) {
+            let bg = UIColor(red: CGFloat(bgColor.r) / 255.0, green: CGFloat(bgColor.g) / 255.0, blue: CGFloat(bgColor.b) / 255.0, alpha: 1.0)
+            backgroundColor = bg
+            snapshotFallbackView.backgroundColor = bg
+        }
+        var fgColor = ghostty_config_color_s()
+        let fgKey = "foreground"
+        if ghostty_config_get(config, &fgColor, fgKey, UInt(fgKey.lengthOfBytes(using: .utf8))) {
+            snapshotFallbackView.textColor = UIColor(red: CGFloat(fgColor.r) / 255.0, green: CGFloat(fgColor.g) / 255.0, blue: CGFloat(fgColor.b) / 255.0, alpha: 1.0)
+        }
     }
 
     private func setFocus(_ focused: Bool) {
@@ -709,7 +712,6 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
             lastSnapshotFallbackHTML = nil
             snapshotFallbackView.attributedText = nil
             snapshotFallbackView.text = snapshot
-            snapshotFallbackView.backgroundColor = .black
         }
 
         if snapshotFallbackView.text != snapshot && snapshotFallbackView.attributedText == nil {
