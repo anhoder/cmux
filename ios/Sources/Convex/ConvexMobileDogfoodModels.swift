@@ -36,7 +36,8 @@ struct MobileMachineRow: Codable, Equatable, Sendable, Identifiable {
             serverID: preferredServerID,
             allowsSSHFallback: true,
             wsPort: wsPort,
-            wsSecret: wsSecret
+            wsSecret: wsSecret,
+            machineStatus: status
         )
         return host
     }

@@ -23,6 +23,7 @@ struct UnifiedInboxItem: Identifiable, Equatable, Codable, Sendable {
     let lastReadEventSeq: Int?
     let tailscaleHostname: String?
     let tailscaleIPs: [String]
+    let machineStatus: MobileMachineStatus?
 
     init(
         kind: UnifiedInboxKind,
@@ -40,7 +41,8 @@ struct UnifiedInboxItem: Identifiable, Equatable, Codable, Sendable {
         latestEventSeq: Int? = nil,
         lastReadEventSeq: Int? = nil,
         tailscaleHostname: String? = nil,
-        tailscaleIPs: [String] = []
+        tailscaleIPs: [String] = [],
+        machineStatus: MobileMachineStatus? = nil
     ) {
         self.kind = kind
         self.conversationID = conversationID
@@ -58,6 +60,7 @@ struct UnifiedInboxItem: Identifiable, Equatable, Codable, Sendable {
         self.lastReadEventSeq = lastReadEventSeq
         self.tailscaleHostname = tailscaleHostname
         self.tailscaleIPs = tailscaleIPs
+        self.machineStatus = machineStatus
 
         switch kind {
         case .conversation:
@@ -133,7 +136,8 @@ extension UnifiedInboxItem {
             latestEventSeq: workspaceRow.latestEventSeq,
             lastReadEventSeq: workspaceRow.lastReadEventSeq,
             tailscaleHostname: workspaceRow.tailscaleHostname,
-            tailscaleIPs: workspaceRow.tailscaleIPs
+            tailscaleIPs: workspaceRow.tailscaleIPs,
+            machineStatus: workspaceRow.machineStatus
         )
     }
 }

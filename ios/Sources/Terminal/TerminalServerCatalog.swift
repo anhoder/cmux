@@ -53,7 +53,8 @@ struct TerminalServerCatalog {
                     allowsSSHFallback: host.allowsSSHFallback,
                     directTLSPins: host.directTLSPins,
                     wsPort: host.wsPort,
-                    wsSecret: host.wsSecret
+                    wsSecret: host.wsSecret,
+                    machineStatus: host.machineStatus
                 )
             }
 
@@ -78,7 +79,8 @@ struct TerminalServerCatalog {
                 allowsSSHFallback: existing.allowsSSHFallback,
                 directTLSPins: host.directTLSPins,
                 wsPort: host.wsPort,
-                wsSecret: host.wsSecret
+                wsSecret: host.wsSecret,
+                machineStatus: host.machineStatus
             )
         }
 

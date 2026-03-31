@@ -761,6 +761,7 @@ final class TerminalSidebarStore: ObservableObject {
             hosts[existingIndex].transportPreference = .remoteDaemon
             hosts[existingIndex].teamID = item.teamID
             hosts[existingIndex].serverID = serverID
+            hosts[existingIndex].machineStatus = item.machineStatus
             applyDebugWebSocketConfig(&hosts[existingIndex])
             return hosts[existingIndex]
         }
@@ -777,7 +778,8 @@ final class TerminalSidebarStore: ObservableObject {
             transportPreference: .remoteDaemon,
             teamID: item.teamID,
             serverID: serverID,
-            allowsSSHFallback: true
+            allowsSSHFallback: true,
+            machineStatus: item.machineStatus
         )
         applyDebugWebSocketConfig(&host)
         hosts.append(host)
