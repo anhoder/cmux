@@ -104,7 +104,11 @@ final class BonsplitTabDragUITests: XCTestCase {
             return
         }
 
-        let sourceWorkspaceId = ready["workspaceId"] ?? ""
+        guard let sourceWorkspaceId = ready["workspaceId"], !sourceWorkspaceId.isEmpty else {
+            XCTFail("Expected setup to provide a source workspace id. data=\(ready)")
+            return
+        }
+        let alphaTitle = ready["alphaTitle"] ?? "UITest Alpha"
         let betaTitle = ready["betaTitle"] ?? "UITest Beta"
         let betaTab = app.buttons[betaTitle]
         let sidebar = app.descendants(matching: .any).matching(identifier: "Sidebar").firstMatch
@@ -117,8 +121,8 @@ final class BonsplitTabDragUITests: XCTestCase {
 
         let start = CGPoint(x: betaTab.frame.midX, y: betaTab.frame.midY)
         let destination = CGPoint(
-            x: min(sidebar.frame.maxX - 24, workspaceRow.frame.midX),
-            y: workspaceRow.frame.maxY - max(6, min(14, workspaceRow.frame.height * 0.25))
+            x: min(sidebar.frame.maxX - 24.0, workspaceRow.frame.midX),
+            y: workspaceRow.frame.maxY - max(6.0, min(14.0, workspaceRow.frame.height * 0.25))
         )
         guard let dragSession = beginMouseDrag(
             fromAccessibilityPoint: start,
@@ -140,6 +144,7 @@ final class BonsplitTabDragUITests: XCTestCase {
             return
         }
 
+        XCTAssertEqual(updated["hasSelectedWorkspace"], "1", "Expected a selected workspace after extraction. data=\(updated)")
         XCTAssertEqual(updated["trackedPaneTabCount"], "1", "Expected the source pane to keep only one tab after extraction. data=\(updated)")
         XCTAssertEqual(updated["trackedPaneTabTitles"], alphaTitle, "Expected the source pane to retain only the alpha tab after extraction. data=\(updated)")
         XCTAssertNotEqual(updated["selectedWorkspaceId"], sourceWorkspaceId, "Expected the extracted pane tab to land in a newly selected workspace. data=\(updated)")

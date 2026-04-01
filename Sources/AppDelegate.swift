@@ -7643,7 +7643,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         writeBonsplitTabDragUITestData([
             "workspaceCount": String(tabManager.tabs.count),
-            "selectedWorkspaceId": tabManager.selectedTabId?.uuidString ?? "",
+            "selectedWorkspaceId": tabManager.selectedTabId?.uuidString ?? "NONE",
+            "hasSelectedWorkspace": tabManager.selectedTabId != nil ? "1" : "0",
             "trackedPaneId": trackedPaneId.description,
             "trackedPaneTabTitles": titles.joined(separator: "|"),
             "trackedPaneTabCount": String(titles.count),

@@ -8671,6 +8671,7 @@ struct VerticalTabsSidebar: View {
     @StateObject private var tabItemSettingsStore = SidebarTabItemSettingsStore()
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
+    @State private var dropIndicatorOwnerKey: String?
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
     @AppStorage(KeyboardShortcutSettings.Action.selectWorkspaceByNumber.defaultsKey)
@@ -8777,6 +8778,7 @@ struct VerticalTabsSidebar: View {
                                     dragAutoScrollController: dragAutoScrollController,
                                     draggedTabId: $draggedTabId,
                                     dropIndicator: $dropIndicator,
+                                    dropIndicatorOwnerKey: $dropIndicatorOwnerKey,
                                     contextMenuWorkspaceIds: contextMenuWorkspaceIds,
                                     remoteContextMenuWorkspaceIds: remoteContextMenuWorkspaceIds,
                                     allRemoteContextMenuTargetsConnecting: allRemoteContextMenuTargetsConnecting,
@@ -8795,7 +8797,8 @@ struct VerticalTabsSidebar: View {
                             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                             dragAutoScrollController: dragAutoScrollController,
                             draggedTabId: $draggedTabId,
-                            dropIndicator: $dropIndicator
+                            dropIndicator: $dropIndicator,
+                            dropIndicatorOwnerKey: $dropIndicatorOwnerKey
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -8847,6 +8850,7 @@ struct VerticalTabsSidebar: View {
             modifierKeyMonitor.start()
             draggedTabId = nil
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
             SidebarDragLifecycleNotification.postStateDidChange(
                 tabId: nil,
                 reason: "sidebar_appear"
@@ -8858,6 +8862,7 @@ struct VerticalTabsSidebar: View {
             dragFailsafeMonitor.stop()
             draggedTabId = nil
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
             SidebarDragLifecycleNotification.postStateDidChange(
                 tabId: nil,
                 reason: "sidebar_disappear"
@@ -8880,6 +8885,7 @@ struct VerticalTabsSidebar: View {
             dragFailsafeMonitor.stop()
             dragAutoScrollController.stop()
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
         }
         .onReceive(NotificationCenter.default.publisher(for: SidebarDragLifecycleNotification.requestClear)) { notification in
             guard draggedTabId != nil else { return }
@@ -11016,6 +11022,7 @@ private struct SidebarEmptyArea: View {
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var draggedTabId: UUID?
     @Binding var dropIndicator: SidebarDropIndicator?
+    @Binding var dropIndicatorOwnerKey: String?
 
     var body: some View {
         Color.clear
@@ -11037,7 +11044,8 @@ private struct SidebarEmptyArea: View {
                 lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                 targetRowHeight: nil,
                 dragAutoScrollController: dragAutoScrollController,
-                dropIndicator: $dropIndicator
+                dropIndicator: $dropIndicator,
+                dropIndicatorOwnerKey: $dropIndicatorOwnerKey
             ))
             .onDrop(of: BonsplitTabDragPayload.dropContentTypes, delegate: SidebarBonsplitWorkspaceDropDelegate(
                 targetTabId: nil,
@@ -11046,7 +11054,8 @@ private struct SidebarEmptyArea: View {
                 lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                 targetRowHeight: nil,
                 dragAutoScrollController: dragAutoScrollController,
-                dropIndicator: $dropIndicator
+                dropIndicator: $dropIndicator,
+                dropIndicatorOwnerKey: $dropIndicatorOwnerKey
             ))
             .overlay(alignment: .top) {
                 if shouldShowTopDropIndicator {
@@ -11218,6 +11227,7 @@ private struct TabItemView: View, Equatable {
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var draggedTabId: UUID?
     @Binding var dropIndicator: SidebarDropIndicator?
+    @Binding var dropIndicatorOwnerKey: String?
     let contextMenuWorkspaceIds: [UUID]
     let remoteContextMenuWorkspaceIds: [UUID]
     let allRemoteContextMenuTargetsConnecting: Bool
@@ -11815,6 +11825,7 @@ private struct TabItemView: View, Equatable {
             #endif
             draggedTabId = tab.id
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
             return SidebarTabDragPayload.provider(for: tab.id)
         }
         .internalOnlyTabDrag()
@@ -11826,7 +11837,8 @@ private struct TabItemView: View, Equatable {
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
             targetRowHeight: rowHeight,
             dragAutoScrollController: dragAutoScrollController,
-            dropIndicator: $dropIndicator
+            dropIndicator: $dropIndicator,
+            dropIndicatorOwnerKey: $dropIndicatorOwnerKey
         ))
         .onDrop(of: BonsplitTabDragPayload.dropContentTypes, delegate: SidebarBonsplitWorkspaceDropDelegate(
             targetTabId: tab.id,
@@ -11835,7 +11847,8 @@ private struct TabItemView: View, Equatable {
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
             targetRowHeight: rowHeight,
             dragAutoScrollController: dragAutoScrollController,
-            dropIndicator: $dropIndicator
+            dropIndicator: $dropIndicator,
+            dropIndicatorOwnerKey: $dropIndicatorOwnerKey
         ))
         .onTapGesture {
             updateSelection()
@@ -13436,6 +13449,7 @@ private struct SidebarBonsplitWorkspaceDropDelegate: DropDelegate {
     let targetRowHeight: CGFloat?
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var dropIndicator: SidebarDropIndicator?
+    @Binding var dropIndicatorOwnerKey: String?
 
     func validateDrop(info: DropInfo) -> Bool {
         guard info.hasItemsConforming(to: [BonsplitTabDragPayload.typeIdentifier]) else { return false }
@@ -13449,14 +13463,9 @@ private struct SidebarBonsplitWorkspaceDropDelegate: DropDelegate {
     }
 
     func dropExited(info: DropInfo) {
-        if targetTabId == nil {
-            if dropIndicator?.tabId == nil {
-                dropIndicator = nil
-            }
-            return
-        }
-        if dropIndicator?.tabId == targetTabId {
+        if dropIndicatorOwnerKey == dropIndicatorSourceKey {
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
         }
     }
 
@@ -13470,6 +13479,7 @@ private struct SidebarBonsplitWorkspaceDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         defer {
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
             dragAutoScrollController.stop()
         }
         guard validateDrop(info: info),
@@ -13492,7 +13502,16 @@ private struct SidebarBonsplitWorkspaceDropDelegate: DropDelegate {
     }
 
     private func updateDropIndicator(for info: DropInfo) {
-        dropIndicator = proposedIndicator(for: info)
+        if let indicator = proposedIndicator(for: info) {
+            dropIndicator = indicator
+            dropIndicatorOwnerKey = dropIndicatorSourceKey
+            return
+        }
+
+        if dropIndicatorOwnerKey == dropIndicatorSourceKey {
+            dropIndicator = nil
+            dropIndicatorOwnerKey = nil
+        }
     }
 
     private func proposedIndicator(for info: DropInfo) -> SidebarDropIndicator? {
@@ -13528,6 +13547,10 @@ private struct SidebarBonsplitWorkspaceDropDelegate: DropDelegate {
             lastSidebarSelectionIndex = nil
         }
     }
+
+    private var dropIndicatorSourceKey: String {
+        "bonsplit:\(targetTabId?.uuidString ?? "end")"
+    }
 }
 
 private struct SidebarTabDropDelegate: DropDelegate {
@@ -13539,6 +13562,7 @@ private struct SidebarTabDropDelegate: DropDelegate {
     let targetRowHeight: CGFloat?
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var dropIndicator: SidebarDropIndicator?
+    @Binding var dropIndicatorOwnerKey: String?
 
     func validateDrop(info: DropInfo) -> Bool {
         let hasType = info.hasItemsConforming(to: [SidebarTabDragPayload.typeIdentifier])
@@ -13561,8 +13585,9 @@ private struct SidebarTabDropDelegate: DropDelegate {
 #if DEBUG
         dlog("sidebar.dropExited target=\(targetTabId?.uuidString.prefix(5) ?? "end")")
 #endif
-        if dropIndicator?.tabId == targetTabId {
+        if dropIndicatorOwnerKey == dropIndicatorSourceKey {
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
         }
     }
 
@@ -13582,6 +13607,7 @@ private struct SidebarTabDropDelegate: DropDelegate {
         defer {
             draggedTabId = nil
             dropIndicator = nil
+            dropIndicatorOwnerKey = nil
             dragAutoScrollController.stop()
         }
         #if DEBUG
@@ -13641,14 +13667,23 @@ private struct SidebarTabDropDelegate: DropDelegate {
     private func updateDropIndicator(for info: DropInfo) {
         let tabIds = tabManager.tabs.map(\.id)
         let pinnedTabIds = Set(tabManager.tabs.filter(\.isPinned).map(\.id))
-        dropIndicator = SidebarDropPlanner.indicator(
+        if let indicator = SidebarDropPlanner.indicator(
             draggedTabId: draggedTabId,
             targetTabId: targetTabId,
             tabIds: tabIds,
             pinnedTabIds: pinnedTabIds,
             pointerY: targetTabId == nil ? nil : info.location.y,
             targetHeight: targetRowHeight
-        )
+        ) {
+            dropIndicator = indicator
+            dropIndicatorOwnerKey = dropIndicatorSourceKey
+            return
+        }
+
+        if dropIndicatorOwnerKey == dropIndicatorSourceKey {
+            dropIndicator = nil
+            dropIndicatorOwnerKey = nil
+        }
     }
 
     private func syncSidebarSelection(preferredSelectedTabId: UUID? = nil) {
@@ -13664,6 +13699,10 @@ private struct SidebarTabDropDelegate: DropDelegate {
         guard let indicator else { return "nil" }
         let tabText = indicator.tabId.map { String($0.uuidString.prefix(5)) } ?? "end"
         return "\(tabText):\(indicator.edge == .top ? "top" : "bottom")"
+    }
+
+    private var dropIndicatorSourceKey: String {
+        "sidebar:\(targetTabId?.uuidString ?? "end")"
     }
 }
 
