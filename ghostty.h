@@ -621,6 +621,20 @@ typedef enum {
   GHOSTTY_READONLY_ON,
 } ghostty_action_readonly_e;
 
+// apprt.action.TmuxState
+typedef enum {
+  GHOSTTY_TMUX_STATE_ENTERED,
+  GHOSTTY_TMUX_STATE_EXITED,
+  GHOSTTY_TMUX_STATE_WINDOWS_CHANGED,
+} ghostty_action_tmux_state_e;
+
+// Tmux window info returned by ghostty_surface_tmux_window_info
+typedef struct {
+  uintptr_t id;
+  uintptr_t width;
+  uintptr_t height;
+} ghostty_tmux_window_s;
+
 // apprt.action.DesktopNotification.C
 typedef struct {
   const char* title;
@@ -910,6 +924,8 @@ typedef enum {
   GHOSTTY_ACTION_SEARCH_TOTAL,
   GHOSTTY_ACTION_SEARCH_SELECTED,
   GHOSTTY_ACTION_READONLY,
+  GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
+  GHOSTTY_ACTION_TMUX_STATE,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -950,6 +966,7 @@ typedef union {
   ghostty_action_search_total_s search_total;
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
+  ghostty_action_tmux_state_e tmux_state;
 } ghostty_action_u;
 
 typedef struct {
@@ -1153,6 +1170,18 @@ bool ghostty_inspector_metal_init(ghostty_inspector_t, void*);
 void ghostty_inspector_metal_render(ghostty_inspector_t, void*, void*);
 bool ghostty_inspector_metal_shutdown(ghostty_inspector_t);
 #endif
+
+// Tmux control mode API
+bool ghostty_surface_tmux_active(ghostty_surface_t);
+uintptr_t ghostty_surface_tmux_window_count(ghostty_surface_t);
+uintptr_t ghostty_surface_tmux_window_info(ghostty_surface_t,
+                                           ghostty_tmux_window_s*,
+                                           uintptr_t);
+uintptr_t ghostty_surface_tmux_pane_count(ghostty_surface_t);
+uintptr_t ghostty_surface_tmux_pane_ids(ghostty_surface_t,
+                                       uintptr_t*,
+                                       uintptr_t);
+bool ghostty_surface_tmux_set_active_pane(ghostty_surface_t, uintptr_t);
 
 // APIs I'd like to get rid of eventually but are still needed for now.
 // Don't use these unless you know what you're doing.

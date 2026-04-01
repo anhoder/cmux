@@ -24,6 +24,9 @@ final class TerminalPanel: Panel, ObservableObject {
 
     @Published private(set) var tmuxLayoutReport: TmuxPaneLayoutReport?
 
+    /// Whether the terminal is in tmux control mode (tmux -CC)
+    @Published private(set) var tmuxActive: Bool = false
+
     /// Search state for find functionality
     @Published var searchState: TerminalSurface.SearchState? {
         didSet {
@@ -82,6 +85,14 @@ final class TerminalPanel: Panel, ObservableObject {
                 if self?.searchState !== state {
                     self?.searchState = state
                 }
+            }
+            .store(in: &cancellables)
+
+        // Subscribe to tmux control mode state changes
+        surface.$tmuxActive
+            .removeDuplicates()
+            .sink { [weak self] active in
+                self?.tmuxActive = active
             }
             .store(in: &cancellables)
     }

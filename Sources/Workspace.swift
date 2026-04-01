@@ -5539,6 +5539,9 @@ final class Workspace: Identifiable, ObservableObject {
     @Published private(set) var tmuxWorkspaceFlashPanelId: UUID?
     @Published private(set) var tmuxWorkspaceFlashReason: WorkspaceAttentionFlashReason?
     @Published private(set) var tmuxWorkspaceFlashToken: UInt64 = 0
+    /// Whether any terminal panel in this workspace is in tmux control mode.
+    @Published private(set) var tmuxControlModeActive: Bool = false
+    private var tmuxControlModeSubscription: AnyCancellable?
     private var manualUnreadMarkedAt: [UUID: Date] = [:]
     nonisolated private static let manualUnreadFocusGraceInterval: TimeInterval = 0.2
     nonisolated private static let manualUnreadClearDelayAfterFocusFlash: TimeInterval = 0.2
@@ -6043,6 +6046,16 @@ final class Workspace: Identifiable, ObservableObject {
             guard let self, let terminalPanel else { return }
             self.triggerWorkspacePaneFlash(panelId: terminalPanel.id, reason: reason)
         }
+
+        // Subscribe to tmux control mode state changes
+        let subscription = terminalPanel.$tmuxActive
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                self?.tmuxControlModeActive = active
+            }
+        // Store the subscription (replacing any prior one)
+        tmuxControlModeSubscription = subscription
     }
 
     private func triggerWorkspacePaneFlash(panelId: UUID, reason: WorkspaceAttentionFlashReason) {

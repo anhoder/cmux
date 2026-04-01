@@ -2860,6 +2860,46 @@ class GhosttyApp {
                     }
                 }
             }
+        case GHOSTTY_ACTION_TMUX_STATE:
+            guard let terminalSurface = surfaceView.terminalSurface else { return true }
+            let tmuxState = action.action.tmux_state
+            DispatchQueue.main.async {
+                switch tmuxState {
+                case GHOSTTY_TMUX_STATE_ENTERED:
+                    terminalSurface.tmuxActive = true
+                    #if DEBUG
+                    dlog("tmux.entered tab=\(surfaceView.tabId?.uuidString.prefix(5) ?? "nil") surface=\(terminalSurface.id.uuidString.prefix(5))")
+                    #endif
+                case GHOSTTY_TMUX_STATE_EXITED:
+                    terminalSurface.tmuxActive = false
+                    #if DEBUG
+                    dlog("tmux.exited tab=\(surfaceView.tabId?.uuidString.prefix(5) ?? "nil") surface=\(terminalSurface.id.uuidString.prefix(5))")
+                    #endif
+                case GHOSTTY_TMUX_STATE_WINDOWS_CHANGED:
+                    // Auto-set the renderer to the first pane so we can see tmux output
+                    if let surface = terminalSurface.surface {
+                        let paneCount = ghostty_surface_tmux_pane_count(surface)
+                        if paneCount > 0 {
+                            var paneId: UInt = 0
+                            let idCount = ghostty_surface_tmux_pane_ids(surface, &paneId, 1)
+                            if idCount > 0 {
+                                let success = ghostty_surface_tmux_set_active_pane(surface, paneId)
+                                #if DEBUG
+                                dlog("tmux.windowsChanged panes=\(paneCount) activePaneId=\(paneId) setActive=\(success)")
+                                #endif
+                            }
+                        }
+                    }
+                default:
+                    break
+                }
+                NotificationCenter.default.post(
+                    name: .ghosttyTmuxStateChanged,
+                    object: terminalSurface,
+                    userInfo: ["state": tmuxState]
+                )
+            }
+            return true
         default:
             return false
         }
@@ -3130,6 +3170,8 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
     }
     @Published private(set) var keyboardCopyModeActive: Bool = false
+    /// Whether this surface is currently in tmux control mode (DCS 1000p).
+    @Published var tmuxActive: Bool = false
     private var searchNeedleCancellable: AnyCancellable?
     var currentKeyStateIndicatorText: String? { surfaceView.currentKeyStateIndicatorText }
 
@@ -7185,6 +7227,7 @@ extension Notification.Name {
     static let ghosttySearchFocus = Notification.Name("ghosttySearchFocus")
     static let ghosttyConfigDidReload = Notification.Name("ghosttyConfigDidReload")
     static let ghosttyDefaultBackgroundDidChange = Notification.Name("ghosttyDefaultBackgroundDidChange")
+    static let ghosttyTmuxStateChanged = Notification.Name("ghosttyTmuxStateChanged")
     static let browserSearchFocus = Notification.Name("browserSearchFocus")
 }
 
