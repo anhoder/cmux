@@ -8702,6 +8702,8 @@ struct VerticalTabsSidebar: View {
     private let tabRowSpacing: CGFloat = 2
     private let hiddenTitlebarControlsLeadingInset: CGFloat = 72
     private static let scrollViewportCoordinateSpace = "VerticalTabsSidebar.ScrollViewport"
+    private static let topRevealSentinelId = "VerticalTabsSidebar.TopRevealSentinel"
+    private static let bottomRevealSentinelId = "VerticalTabsSidebar.BottomRevealSentinel"
 
     private var sidebarTopOverlayHeight: CGFloat {
         trafficLightPadding + 20
@@ -8753,6 +8755,10 @@ struct VerticalTabsSidebar: View {
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         VStack(spacing: 0) {
+                            Color.clear
+                                .frame(height: 0)
+                                .id(Self.topRevealSentinelId)
+
                             // Space for traffic lights / fullscreen controls
                             Spacer()
                                 .frame(height: trafficLightPadding)
@@ -8844,6 +8850,10 @@ struct VerticalTabsSidebar: View {
                                 dropIndicator: $dropIndicator
                             )
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                            Color.clear
+                                .frame(height: 0)
+                                .id(Self.bottomRevealSentinelId)
                         }
                         .frame(minHeight: proxy.size.height, alignment: .top)
                     }
@@ -8973,13 +8983,23 @@ struct VerticalTabsSidebar: View {
         animated: Bool = true
     ) {
         guard let selectedWorkspaceId = tabManager.selectedTabId,
-              let rowFrame = workspaceRowFrames[selectedWorkspaceId] else { return }
+              let rowFrame = workspaceRowFrames[selectedWorkspaceId],
+              let selectedIndex = tabManager.tabs.firstIndex(where: { $0.id == selectedWorkspaceId })
+        else { return }
         DispatchQueue.main.async {
             let scrollAction: () -> Void = {
                 if rowFrame.minY < sidebarTopOverlayHeight {
-                    scrollProxy.scrollTo(revealAnchorId(for: selectedWorkspaceId), anchor: .top)
+                    if selectedIndex == 0 {
+                        scrollProxy.scrollTo(Self.topRevealSentinelId, anchor: .top)
+                    } else {
+                        scrollProxy.scrollTo(revealAnchorId(for: selectedWorkspaceId), anchor: .top)
+                    }
                 } else if rowFrame.maxY > viewportHeight {
-                    scrollProxy.scrollTo(selectedWorkspaceId, anchor: .bottom)
+                    if selectedIndex == tabManager.tabs.count - 1 {
+                        scrollProxy.scrollTo(Self.bottomRevealSentinelId, anchor: .bottom)
+                    } else {
+                        scrollProxy.scrollTo(selectedWorkspaceId, anchor: .bottom)
+                    }
                 }
             }
 
