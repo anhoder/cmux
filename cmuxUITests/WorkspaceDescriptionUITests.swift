@@ -27,15 +27,15 @@ final class WorkspaceDescriptionUITests: XCTestCase {
     }
 
     private var dataPath = ""
-    private var socketTag = ""
     private var socketPath = ""
+    private var launchTag = ""
 
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
         dataPath = "/tmp/cmux-ui-test-workspace-description-\(UUID().uuidString).json"
-        socketTag = "ui-tests-workspace-description-\(UUID().uuidString.lowercased())"
-        socketPath = "/tmp/cmux-debug-\(socketTag).sock"
+        launchTag = "ui-tests-workspace-description-\(UUID().uuidString.lowercased())"
+        socketPath = "/tmp/cmux-ui-test-workspace-description-\(UUID().uuidString).sock"
         try? FileManager.default.removeItem(atPath: dataPath)
         try? FileManager.default.removeItem(atPath: socketPath)
     }
@@ -97,12 +97,13 @@ final class WorkspaceDescriptionUITests: XCTestCase {
 
     private func configuredApp() -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments += ["-socketControlMode", "cmuxOnly"]
+        app.launchArguments += ["-socketControlMode", "allowAll"]
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_SETUP"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_PATH"] = dataPath
         app.launchEnvironment["CMUX_UI_TEST_FOCUS_SHORTCUTS"] = "1"
-        app.launchEnvironment["CMUX_TAG"] = socketTag
+        app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
+        app.launchEnvironment["CMUX_TAG"] = launchTag
         return app
     }
 
@@ -124,7 +125,11 @@ final class WorkspaceDescriptionUITests: XCTestCase {
             return nil
         }
 
-        XCTAssertTrue(waitForSocketReady(timeout: 5.0), "Expected control socket to become ready")
+        guard let resolvedSocketPath = resolveSocketPath(timeout: 8.0) else {
+            XCTFail("Expected control socket to become ready")
+            return nil
+        }
+        socketPath = resolvedSocketPath
 
         app.typeKey("h", modifierFlags: [.command, .control])
         XCTAssertTrue(
@@ -219,10 +224,68 @@ final class WorkspaceDescriptionUITests: XCTestCase {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
     }
 
-    private func waitForSocketReady(timeout: TimeInterval) -> Bool {
-        workspaceDescriptionPollUntil(timeout: timeout) {
-            self.socketCommand("ping") == "PONG"
+    private func resolveSocketPath(timeout: TimeInterval) -> String? {
+        let primaryCandidates = expectedSocketCandidates(includeGlobalFallback: false)
+        let fallbackCandidates = expectedSocketCandidates(includeGlobalFallback: true)
+            .filter { !primaryCandidates.contains($0) }
+
+        var resolvedPath: String?
+        _ = workspaceDescriptionPollUntil(timeout: timeout) {
+            for candidate in primaryCandidates where self.socketRespondsToPing(at: candidate) {
+                resolvedPath = candidate
+                return true
+            }
+            for candidate in fallbackCandidates where self.socketRespondsToPing(at: candidate) {
+                resolvedPath = candidate
+                return true
+            }
+            return false
         }
+        return resolvedPath
+    }
+
+    private func expectedSocketCandidates(includeGlobalFallback: Bool) -> [String] {
+        var candidates = [socketPath, "/tmp/cmux-debug-\(launchTag).sock"]
+        if includeGlobalFallback {
+            candidates.append(contentsOf: discoverTmpSocketCandidates(limit: 12))
+            candidates.append("/tmp/cmux-debug.sock")
+        }
+
+        var unique: [String] = []
+        var seen = Set<String>()
+        for candidate in candidates {
+            if seen.insert(candidate).inserted {
+                unique.append(candidate)
+            }
+        }
+        return unique
+    }
+
+    private func discoverTmpSocketCandidates(limit: Int) -> [String] {
+        let tmpPath = "/tmp"
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: tmpPath) else {
+            return []
+        }
+
+        let matches = entries.filter { $0.hasPrefix("cmux") && $0.hasSuffix(".sock") }
+        let sorted = matches.compactMap { entry -> (path: String, mtime: Date)? in
+            let fullPath = (tmpPath as NSString).appendingPathComponent(entry)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: fullPath) else {
+                return nil
+            }
+            let mtime = (attrs[.modificationDate] as? Date) ?? .distantPast
+            return (fullPath, mtime)
+        }
+        .sorted { $0.mtime > $1.mtime }
+
+        return Array(sorted.prefix(limit)).map(\.path)
+    }
+
+    private func socketRespondsToPing(at path: String) -> Bool {
+        let originalPath = socketPath
+        socketPath = path
+        defer { socketPath = originalPath }
+        return socketCommand("ping") == "PONG"
     }
 
     private func currentWorkspaceContext() -> WorkspaceContext? {
