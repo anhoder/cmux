@@ -4516,6 +4516,16 @@ struct ContentView: View {
         var onHandleKeyEvent: ((NSEvent, NSTextView?) -> Bool)?
         var onDidBecomeFirstResponder: (() -> Void)?
 
+        override func flagsChanged(with event: NSEvent) {
+#if DEBUG
+            dlog(
+                "palette.wsDescription.editor.flagsChanged " +
+                "\(debugCommandPaletteKeyEventSummary(event))"
+            )
+#endif
+            super.flagsChanged(with: event)
+        }
+
         override func becomeFirstResponder() -> Bool {
             let becameFirstResponder = super.becomeFirstResponder()
 #if DEBUG
@@ -4583,6 +4593,50 @@ struct ContentView: View {
             )
 #endif
             return result
+        }
+
+        override func doCommand(by commandSelector: Selector) {
+#if DEBUG
+            dlog(
+                "palette.wsDescription.editor.doCommand selector=\(NSStringFromSelector(commandSelector)) " +
+                "len=\((string as NSString).length) " +
+                "sel=\(selectedRange().location):\(selectedRange().length)"
+            )
+#endif
+            super.doCommand(by: commandSelector)
+        }
+
+        override func insertNewline(_ sender: Any?) {
+#if DEBUG
+            dlog(
+                "palette.wsDescription.editor.insertNewline " +
+                "len=\((string as NSString).length) " +
+                "sel=\(selectedRange().location):\(selectedRange().length)"
+            )
+#endif
+            super.insertNewline(sender)
+        }
+
+        override func insertLineBreak(_ sender: Any?) {
+#if DEBUG
+            dlog(
+                "palette.wsDescription.editor.insertLineBreak " +
+                "len=\((string as NSString).length) " +
+                "sel=\(selectedRange().location):\(selectedRange().length)"
+            )
+#endif
+            super.insertLineBreak(sender)
+        }
+
+        override func insertNewlineIgnoringFieldEditor(_ sender: Any?) {
+#if DEBUG
+            dlog(
+                "palette.wsDescription.editor.insertNewlineIgnoringFieldEditor " +
+                "len=\((string as NSString).length) " +
+                "sel=\(selectedRange().location):\(selectedRange().length)"
+            )
+#endif
+            super.insertNewlineIgnoringFieldEditor(sender)
         }
     }
 

@@ -9520,6 +9520,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             commandPaletteInteractiveInTargetWindow
             || commandPalettePendingOpenInTargetWindow
 
+#if DEBUG
+        if event.keyCode == 36 || event.keyCode == 76 {
+            dlog(
+                "shortcut.return.raw " +
+                "interactive=\(commandPaletteInteractiveInTargetWindow ? 1 : 0) " +
+                "effective=\(commandPaletteEffectiveInTargetWindow ? 1 : 0) " +
+                "target={\(debugWindowToken(commandPaletteTargetWindow))} " +
+                "shortcutWindow={\(debugWindowToken(commandPaletteShortcutWindow))} " +
+                "responderTarget=\(commandPaletteResponderActiveInTargetWindow ? 1 : 0) " +
+                "overlayTarget=\(commandPaletteOverlayVisibleInTargetWindow ? 1 : 0) " +
+                "pendingTarget=\(commandPalettePendingOpenInTargetWindow ? 1 : 0) " +
+                "\(debugShortcutRouteSnapshot(event: event))"
+            )
+        }
+#endif
+
         if normalizedFlags.isEmpty, event.keyCode == 53 {
             let activePaletteWindow = activeCommandPaletteWindow()
             let escapePaletteWindow: NSWindow? = {
