@@ -998,10 +998,18 @@ class TabManager: ObservableObject {
     ) -> Set<UUID> {
         var candidatePanelIds = Set(workspace.panelGitBranches.keys)
         candidatePanelIds.formUnion(workspace.panelPullRequests.keys)
+        // Keep retrying panels that have a probeable directory even if their first
+        // branch lookup returned nil or raced startup; otherwise blank sidebar rows
+        // never re-enter the background refresh set.
+        candidatePanelIds.formUnion(
+            workspace.panels.keys.compactMap { panelId in
+                gitProbeDirectory(for: workspace, panelId: panelId) == nil ? nil : panelId
+            }
+        )
 
         if candidatePanelIds.isEmpty,
            let focusedPanelId = workspace.focusedPanelId,
-           workspace.gitBranch != nil || workspace.pullRequest != nil {
+           gitProbeDirectory(for: workspace, panelId: focusedPanelId) != nil {
             candidatePanelIds.insert(focusedPanelId)
         }
 
@@ -1040,9 +1048,25 @@ class TabManager: ObservableObject {
     }
 
     private func gitProbeDirectory(for workspace: Workspace, panelId: UUID) -> String? {
+        // Match the sidebar directory fallback chain so hidden/background panels can
+        // still probe git metadata before OSC 7 has reported a live cwd.
         let rawDirectory = workspace.panelDirectories[panelId]
+            ?? workspace.terminalPanel(for: panelId)?.requestedWorkingDirectory
             ?? (workspace.focusedPanelId == panelId ? workspace.currentDirectory : nil)
         return rawDirectory.flatMap(normalizedWorkingDirectory)
+    }
+
+    func scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
+        workspaceId: UUID,
+        panelId: UUID,
+        reason: String = "initial"
+    ) {
+        scheduleWorkspaceGitMetadataRefreshIfPossible(
+            workspaceId: workspaceId,
+            panelId: panelId,
+            reason: reason,
+            delays: Self.initialWorkspaceGitProbeDelays
+        )
     }
 
     private func scheduleWorkspaceGitMetadataRefreshIfPossible(
@@ -1292,12 +1316,10 @@ class TabManager: ObservableObject {
                 updatedTabs.append(newWorkspace)
             }
             tabs = updatedTabs
-            if let explicitWorkingDirectory,
-               let terminalPanel = newWorkspace.focusedTerminalPanel {
-                scheduleInitialWorkspaceGitMetadataRefresh(
+            if let terminalPanel = newWorkspace.focusedTerminalPanel {
+                scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
                     workspaceId: newWorkspace.id,
-                    panelId: terminalPanel.id,
-                    directory: explicitWorkingDirectory
+                    panelId: terminalPanel.id
                 )
             }
             if eagerLoadTerminal {
@@ -1392,20 +1414,6 @@ class TabManager: ObservableObject {
                 }
             }
         }
-    }
-
-    private func scheduleInitialWorkspaceGitMetadataRefresh(
-        workspaceId: UUID,
-        panelId: UUID,
-        directory: String
-    ) {
-        scheduleWorkspaceGitMetadataRefresh(
-            workspaceId: workspaceId,
-            panelId: panelId,
-            directory: directory,
-            delays: Self.initialWorkspaceGitProbeDelays,
-            reason: "initial"
-        )
     }
 
     private func scheduleWorkspaceGitMetadataRefresh(
@@ -5623,13 +5631,9 @@ extension TabManager {
         for workspace in newTabs {
             let terminalPanels = workspace.panels.values.compactMap { $0 as? TerminalPanel }
             for terminalPanel in terminalPanels {
-                guard let directory = gitProbeDirectory(for: workspace, panelId: terminalPanel.id) else {
-                    continue
-                }
-                scheduleInitialWorkspaceGitMetadataRefresh(
+                scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
                     workspaceId: workspace.id,
-                    panelId: terminalPanel.id,
-                    directory: directory
+                    panelId: terminalPanel.id
                 )
             }
         }

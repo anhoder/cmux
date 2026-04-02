@@ -460,6 +460,79 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         )
     }
 
+    func testTrackedWorkspaceGitMetadataPollCandidatesIncludeProbeableDirectoriesWithoutExistingBranchState() throws {
+        let fileManager = FileManager.default
+        let directoryURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "cmux-git-candidate-dir-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+
+        workspace.currentDirectory = directoryURL.path
+        guard let splitPanel = workspace.newTerminalSplit(from: panelId, orientation: .horizontal, focus: false) else {
+            XCTFail("Expected split terminal panel to be created")
+            return
+        }
+
+        let expectedCandidates: Set<UUID> = [panelId, splitPanel.id]
+        XCTAssertTrue(
+            waitForCondition {
+                manager.trackedWorkspaceGitMetadataPollCandidatePanelIdsForTesting(workspaceId: workspace.id)
+                    == expectedCandidates
+            }
+        )
+    }
+
+    func testInheritedBackgroundWorkspaceFetchesGitBranchWithoutSelection() throws {
+        let fileManager = FileManager.default
+        let repoURL = fileManager.temporaryDirectory.appendingPathComponent(
+            "cmux-git-inherited-background-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: repoURL, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: repoURL) }
+
+        try runGit(["init", "-b", "main"], in: repoURL)
+        try runGit(["config", "user.name", "cmux tests"], in: repoURL)
+        try runGit(["config", "user.email", "cmux@example.invalid"], in: repoURL)
+        try "seed\n".write(
+            to: repoURL.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try runGit(["add", "README.md"], in: repoURL)
+        try runGit(["commit", "-m", "Initial commit"], in: repoURL)
+
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace else {
+            XCTFail("Expected selected workspace")
+            return
+        }
+        workspace.currentDirectory = repoURL.path
+
+        let backgroundWorkspace = manager.addWorkspace(select: false)
+        guard let backgroundPanelId = backgroundWorkspace.focusedPanelId else {
+            XCTFail("Expected background workspace with focused panel")
+            return
+        }
+
+        XCTAssertNotEqual(manager.selectedTabId, backgroundWorkspace.id)
+        XCTAssertTrue(
+            waitForCondition {
+                backgroundWorkspace.panelGitBranches[backgroundPanelId]?.branch == "main"
+            }
+        )
+        XCTAssertEqual(backgroundWorkspace.sidebarGitBranchesInDisplayOrder().map(\.branch), ["main"])
+    }
+
     func testPeriodicWorkspaceGitMetadataRefreshUpdatesMainWorkspaceAfterCheckoutToFeatureBranch() throws {
         let fileManager = FileManager.default
         let repoURL = fileManager.temporaryDirectory.appendingPathComponent("cmux-git-main-refresh-\(UUID().uuidString)")
