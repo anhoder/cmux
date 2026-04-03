@@ -7,6 +7,12 @@
 	objects = {
 
 		/* Begin PBXBuildFile section */
+		5YNCA00201000001 /* Sync/MachineIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000001 /* Sync/MachineIdentityStore.swift */; };
+		5YNCA00201000002 /* Sync/MachineSessionClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000002 /* Sync/MachineSessionClient.swift */; };
+		5YNCA00201000003 /* Sync/TailscaleStatusProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000003 /* Sync/TailscaleStatusProvider.swift */; };
+		5YNCA00201000004 /* Sync/WorkspaceSnapshotBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000004 /* Sync/WorkspaceSnapshotBuilder.swift */; };
+		5YNCA00201000005 /* Sync/MobileHeartbeatPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000005 /* Sync/MobileHeartbeatPublisher.swift */; };
+		5YNCA00201000006 /* Sync/MobilePresenceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5YNCA00101000006 /* Sync/MobilePresenceCoordinator.swift */; };
 			A5001001 /* cmuxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001011 /* cmuxApp.swift */; };
 			A5001002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001012 /* ContentView.swift */; };
 			E62155868BB29FEB5DAAAF25 /* SidebarSelectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AD52285508B1D6A9875E7B3 /* SidebarSelectionState.swift */; };
@@ -145,6 +151,12 @@
 /* End PBXContainerItemProxy section */
 
 		/* Begin PBXFileReference section */
+		5YNCA00101000001 /* Sync/MachineIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/MachineIdentityStore.swift; sourceTree = "<group>"; };
+		5YNCA00101000002 /* Sync/MachineSessionClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/MachineSessionClient.swift; sourceTree = "<group>"; };
+		5YNCA00101000003 /* Sync/TailscaleStatusProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/TailscaleStatusProvider.swift; sourceTree = "<group>"; };
+		5YNCA00101000004 /* Sync/WorkspaceSnapshotBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/WorkspaceSnapshotBuilder.swift; sourceTree = "<group>"; };
+		5YNCA00101000005 /* Sync/MobileHeartbeatPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/MobileHeartbeatPublisher.swift; sourceTree = "<group>"; };
+		5YNCA00101000006 /* Sync/MobilePresenceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/MobilePresenceCoordinator.swift; sourceTree = "<group>"; };
 			A5001000 /* cmux.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = cmux.app; sourceTree = BUILT_PRODUCTS_DIR; };
 			F1000002A1B2C3D4E5F60718 /* cmuxTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = cmuxTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 			7E7E6EF344A568AC7FEE3715 /* cmuxUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = cmuxUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -392,6 +404,12 @@
 				A5001614 /* SessionPersistence.swift */,
 				A5001616 /* TerminalImageTransfer.swift */,
 				A5001618 /* TerminalSSHSessionDetector.swift */,
+				5YNCA00101000001 /* Sync/MachineIdentityStore.swift */,
+				5YNCA00101000002 /* Sync/MachineSessionClient.swift */,
+				5YNCA00101000003 /* Sync/TailscaleStatusProvider.swift */,
+				5YNCA00101000004 /* Sync/WorkspaceSnapshotBuilder.swift */,
+				5YNCA00101000005 /* Sync/MobileHeartbeatPublisher.swift */,
+				5YNCA00101000006 /* Sync/MobilePresenceCoordinator.swift */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -637,6 +655,12 @@
 				A5001615 /* SessionPersistence.swift in Sources */,
 				A5001617 /* TerminalImageTransfer.swift in Sources */,
 				A5001619 /* TerminalSSHSessionDetector.swift in Sources */,
+				5YNCA00201000001 /* Sync/MachineIdentityStore.swift in Sources */,
+				5YNCA00201000002 /* Sync/MachineSessionClient.swift in Sources */,
+				5YNCA00201000003 /* Sync/TailscaleStatusProvider.swift in Sources */,
+				5YNCA00201000004 /* Sync/WorkspaceSnapshotBuilder.swift in Sources */,
+				5YNCA00201000005 /* Sync/MobileHeartbeatPublisher.swift in Sources */,
+				5YNCA00201000006 /* Sync/MobilePresenceCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

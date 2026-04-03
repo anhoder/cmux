@@ -2022,6 +2022,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var browserAddressBarFocusObserver: NSObjectProtocol?
     private var browserAddressBarBlurObserver: NSObjectProtocol?
     private let updateController = UpdateController()
+    private let mobilePresenceCoordinator = MobilePresenceCoordinator()
     private lazy var titlebarAccessoryController = UpdateTitlebarAccessoryController(viewModel: updateViewModel)
     private let windowDecorationsController = WindowDecorationsController()
     private var menuBarExtraController: MenuBarExtraController?
@@ -2651,6 +2652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         isTerminatingApp = true
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         stopSessionAutosaveTimer()
+        mobilePresenceCoordinator.stop()
         TerminalController.shared.stop()
         VSCodeServeWebController.shared.stop()
         BrowserProfileStore.shared.flushPendingSaves()
@@ -2675,6 +2677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         self.tabManager = tabManager
         self.notificationStore = notificationStore
         self.sidebarState = sidebarState
+        mobilePresenceCoordinator.start(tabManager: tabManager)
         disableSuddenTerminationIfNeeded()
         installLifecycleSnapshotObserversIfNeeded()
         prepareStartupSessionSnapshotIfNeeded()
