@@ -1310,16 +1310,12 @@ private final class WindowTmuxWorkspacePaneOverlayController: NSObject {
     private let model = TmuxWorkspacePaneOverlayModel()
     private let hostingView: NSHostingView<TmuxWorkspacePaneOverlayView>
     private var installConstraints: [NSLayoutConstraint] = []
+    private var modelVisibilityCancellable: AnyCancellable?
 
     init(window: NSWindow) {
         self.window = window
         self.hostingView = NSHostingView(
-            rootView: TmuxWorkspacePaneOverlayView(
-                unreadRects: [],
-                flashRect: nil,
-                flashStartedAt: nil,
-                flashReason: nil
-            )
+            rootView: TmuxWorkspacePaneOverlayView(model: model)
         )
         super.init()
         containerView.translatesAutoresizingMaskIntoConstraints = false
@@ -1338,6 +1334,18 @@ private final class WindowTmuxWorkspacePaneOverlayController: NSObject {
             hostingView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
             hostingView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
         ])
+        modelVisibilityCancellable = Publishers.CombineLatest3(
+            model.$unreadRects,
+            model.$flashRect,
+            model.$flashStartedAt
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] unreadRects, flashRect, flashStartedAt in
+            guard let self else { return }
+            let hasVisibleContent = !unreadRects.isEmpty || (flashRect != nil && flashStartedAt != nil)
+            self.containerView.alphaValue = hasVisibleContent ? 1 : 0
+            self.containerView.isHidden = !hasVisibleContent
+        }
         _ = ensureInstalled()
     }
 
@@ -1368,24 +1376,8 @@ private final class WindowTmuxWorkspacePaneOverlayController: NSObject {
         guard ensureInstalled() else { return }
         if let state {
             model.apply(state)
-            hostingView.rootView = TmuxWorkspacePaneOverlayView(
-                unreadRects: model.unreadRects,
-                flashRect: model.flashRect,
-                flashStartedAt: model.flashStartedAt,
-                flashReason: model.flashReason
-            )
-            containerView.alphaValue = 1
-            containerView.isHidden = false
         } else {
             model.clear()
-            hostingView.rootView = TmuxWorkspacePaneOverlayView(
-                unreadRects: [],
-                flashRect: nil,
-                flashStartedAt: nil,
-                flashReason: nil
-            )
-            containerView.alphaValue = 0
-            containerView.isHidden = true
         }
     }
 }
