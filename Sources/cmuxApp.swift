@@ -3844,6 +3844,13 @@ enum PreferredEditorSettings {
 
     /// Open a file path with the user's preferred editor, falling back to system default.
     static func open(_ url: URL) {
+        if CmuxUITestCapture.appendLineIfConfigured(
+            envKey: "CMUX_UI_TEST_CAPTURE_OPEN_PATH",
+            line: url.path
+        ) {
+            return
+        }
+
         guard let command = resolvedCommand() else {
             NSWorkspace.shared.open(url)
             return
@@ -3871,6 +3878,74 @@ enum PreferredEditorSettings {
 
     private static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+enum CmuxUITestCapture {
+    static func appendLineIfConfigured(envKey: String, line: String) -> Bool {
+        guard let url = configuredURL(for: envKey) else { return false }
+        appendLine(line, to: url)
+        return true
+    }
+
+    static func mutateJSONObjectIfConfigured(
+        envKey: String,
+        _ update: (inout [String: Any]) -> Void
+    ) -> Bool {
+        guard let url = configuredURL(for: envKey) else { return false }
+        mutateJSONObject(at: url, update)
+        return true
+    }
+
+    private static func configuredURL(for envKey: String) -> URL? {
+        let env = ProcessInfo.processInfo.environment
+        guard let rawPath = env[envKey]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawPath.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: rawPath)
+    }
+
+    private static func appendLine(_ line: String, to url: URL) {
+        ensureParentDirectory(for: url)
+        let payload = (line + "\n").data(using: .utf8) ?? Data()
+
+        if FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: payload)
+            } catch {
+                try? payload.write(to: url, options: .atomic)
+            }
+            return
+        }
+
+        try? payload.write(to: url, options: .atomic)
+    }
+
+    private static func mutateJSONObject(
+        at url: URL,
+        _ update: (inout [String: Any]) -> Void
+    ) {
+        ensureParentDirectory(for: url)
+        var payload: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            payload = object
+        }
+        update(&payload)
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return
+        }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private static func ensureParentDirectory(for url: URL) {
+        let directory = url.deletingLastPathComponent()
+        guard !directory.path.isEmpty else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 }
 

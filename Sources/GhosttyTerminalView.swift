@@ -469,6 +469,7 @@ func cmuxPasteboardImageFileURLForTesting(_ pasteboard: NSPasteboard) -> URL? {
 func cmuxPasteboardImagePathForTesting(_ pasteboard: NSPasteboard) -> String? {
     GhosttyPasteboardHelper.saveClipboardImageIfNeeded(from: pasteboard)
 }
+
 #endif
 
 enum TerminalOpenURLTarget: Equatable {
@@ -6545,6 +6546,18 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         suppressCommandPathHover: Bool
     ) -> ghostty_input_mods_e {
         let effectiveFlags = suppressCommandPathHover ? flags.subtracting(.command) : flags
+#if DEBUG
+        if suppressCommandPathHover, flags.contains(.command) {
+            _ = CmuxUITestCapture.mutateJSONObjectIfConfigured(
+                envKey: "CMUX_UI_TEST_CMD_HOVER_DIAGNOSTICS_PATH"
+            ) { payload in
+                payload["suppressed_command_hover_count"] = (payload["suppressed_command_hover_count"] as? Int ?? 0) + 1
+                if effectiveFlags.contains(.command) {
+                    payload["forwarded_command_hover_count"] = (payload["forwarded_command_hover_count"] as? Int ?? 0) + 1
+                }
+            }
+        }
+#endif
         return modsFromFlags(effectiveFlags)
     }
 
