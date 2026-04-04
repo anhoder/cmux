@@ -583,6 +583,58 @@ private func cmuxUnescapeShellToken(_ token: String) -> String {
     return String(output)
 }
 
+private func cmuxVisibleTerminalLines(from text: String, rows: Int) -> [String] {
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    if lines.count > rows {
+        return Array(lines.suffix(rows))
+    }
+    return lines
+}
+
+private func cmuxShellEscapedTokenContainingColumn(
+    in line: String,
+    column: Int
+) -> String? {
+    let characters = Array(line)
+    guard !characters.isEmpty, column >= 0, column < characters.count else { return nil }
+
+    var index = 0
+    while index < characters.count {
+        while index < characters.count, characters[index].isWhitespace {
+            index += 1
+        }
+        let start = index
+
+        while index < characters.count {
+            let character = characters[index]
+            guard character.isWhitespace else {
+                index += 1
+                continue
+            }
+
+            var backslashCount = 0
+            var lookbehind = index - 1
+            while lookbehind >= start, characters[lookbehind] == "\\" {
+                backslashCount += 1
+                lookbehind -= 1
+            }
+
+            if backslashCount % 2 == 1 {
+                index += 1
+                continue
+            }
+
+            break
+        }
+
+        if start < index, column >= start, column < index {
+            return String(characters[start..<index])
+        }
+    }
+
+    return nil
+}
+
 enum TerminalOpenURLTarget: Equatable {
     case embeddedBrowser(URL)
     case external(URL)
@@ -4802,6 +4854,17 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
     private static let tabTransferPasteboardType = NSPasteboard.PasteboardType("com.splittabbar.tabtransfer")
     private static let sidebarTabReorderPasteboardType = NSPasteboard.PasteboardType("com.cmux.sidebar-tab-reorder")
 
+    private enum WordPathResolutionSource: String {
+        case quicklook
+        case snapshot
+    }
+
+    private struct WordPathResolution {
+        let path: String
+        let source: WordPathResolutionSource
+        let rawToken: String
+    }
+
     fileprivate static func focusLog(_ message: String) {
         guard focusDebugEnabled else { return }
         FocusLogStore.shared.append(message)
@@ -6642,6 +6705,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             )
         )
         updateWordPathHover(
+            at: point,
             cmdHeld: event.modifierFlags.contains(.command),
             suppressPathHover: suppressCommandPathHover
         )
@@ -6913,70 +6977,67 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         dlog("terminal.mouseUp surface=\(terminalSurface?.id.uuidString.prefix(5) ?? "nil") mods=[\(debugModifierString(event.modifierFlags))]")
         #endif
         guard let surface = surface else { return }
+        let point = convert(event.locationInWindow, from: nil)
         let consumed = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, modsFromEvent(event))
-
-        // Fallback: if Cmd was held and ghostty didn't handle the click as a link,
-        // check if the word under cursor is a valid file/directory in the terminal's CWD.
-        // This enables cmd-click on bare filenames from commands like `ls`.
-        let suppressCommandPathHover = shouldSuppressCommandPathHover(for: event.modifierFlags)
-        if !consumed,
-           event.modifierFlags.contains(.command),
-           !suppressCommandPathHover {
-            // Refresh ghostty's cached mouse position so quicklook_word reads
-            // up-to-date coordinates (mouseDown skips pos update on double-click).
-            let point = convert(event.locationInWindow, from: nil)
-            ghostty_surface_mouse_pos(surface, point.x, bounds.height - point.y, modsFromEvent(event))
-            tryOpenWordAsPath()
-        }
+        _ = handleCommandClickRelease(at: point, modifierFlags: event.modifierFlags, ghosttyConsumed: consumed)
     }
 
     /// Attempt to open the word under the mouse cursor as a file path, resolved
     /// against the terminal panel's current working directory.
-    private func tryOpenWordAsPath() {
-        guard let resolvedPath = resolveWordUnderCursorAsPath() else { return }
+    private func tryOpenWordAsPath(at point: NSPoint? = nil) {
+        guard let resolution = resolveWordUnderCursorPath(at: point) else { return }
 
         #if DEBUG
-        dlog("link.wordFallback resolved=\(resolvedPath)")
+        dlog("link.wordFallback resolved=\(resolution.path) source=\(resolution.source.rawValue)")
         #endif
 
-        PreferredEditorSettings.open(URL(fileURLWithPath: resolvedPath))
+        PreferredEditorSettings.open(URL(fileURLWithPath: resolution.path))
     }
 
     /// Check if the word under the mouse cursor resolves to an existing file/directory
     /// in the terminal panel's CWD. Returns the resolved absolute path, or nil.
-    private func resolveWordUnderCursorAsPath() -> String? {
+    private func resolveWordUnderCursorAsPath(at point: NSPoint? = nil) -> String? {
+        resolveWordUnderCursorPath(at: point)?.path
+    }
+
+    private func resolveWordUnderCursorPath(at point: NSPoint? = nil) -> WordPathResolution? {
         guard let surface = surface else { return nil }
-
-        var text = ghostty_text_s()
-        guard ghostty_surface_quicklook_word(surface, &text) else { return nil }
-        defer { ghostty_surface_free_text(surface, &text) }
-
-        guard text.text_len > 0, let ptr = text.text else { return nil }
-        let wordData = Data(bytes: ptr, count: Int(text.text_len))
-        guard let decodedWord = String(bytes: wordData, encoding: .utf8) else { return nil }
 
         guard let termSurface = terminalSurface,
               let workspace = termSurface.owningWorkspace(),
               !workspace.isRemoteTerminalSurface(termSurface.id) else { return nil }
 
-        // Use the same CWD fallback chain as Workspace split creation:
-        // panelDirectories (live OSC 7) → requestedWorkingDirectory → workspace currentDirectory
-        let cwd: String? = {
-            if let dir = workspace.panelDirectories[termSurface.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !dir.isEmpty { return dir }
-            if let dir = workspace.terminalPanel(for: termSurface.id)?
-                .requestedWorkingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !dir.isEmpty { return dir }
-            let dir = workspace.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
-            return dir.isEmpty ? nil : dir
-        }()
+        guard let cwd = resolvedWordPathWorkingDirectory(workspace: workspace, terminalSurface: termSurface) else {
+            return nil
+        }
 
-        return cmuxResolveQuicklookPath(decodedWord, cwd: cwd)
+        var text = ghostty_text_s()
+        if ghostty_surface_quicklook_word(surface, &text) {
+            defer { ghostty_surface_free_text(surface, &text) }
+            if text.text_len > 0, let ptr = text.text {
+                let wordData = Data(bytes: ptr, count: Int(text.text_len))
+                if let decodedWord = String(bytes: wordData, encoding: .utf8),
+                   let resolvedPath = cmuxResolveQuicklookPath(decodedWord, cwd: cwd) {
+                    return WordPathResolution(
+                        path: resolvedPath,
+                        source: .quicklook,
+                        rawToken: decodedWord
+                    )
+                }
+            }
+        }
+
+        guard let snapshotPoint = point ?? currentMousePointInView() else { return nil }
+        return resolveVisibleWordPath(at: snapshotPoint, cwd: cwd, workspace: workspace, terminalSurface: termSurface)
     }
 
     /// Update the pointing-hand cursor when Cmd-hovering over a bare filename
     /// that exists in the terminal's CWD.
-    private func updateWordPathHover(cmdHeld: Bool, suppressPathHover: Bool = false) {
+    private func updateWordPathHover(
+        at point: NSPoint? = nil,
+        cmdHeld: Bool,
+        suppressPathHover: Bool = false
+    ) {
         guard cmdHeld, !suppressPathHover else {
             if wordPathHoverActive {
                 wordPathHoverActive = false
@@ -6985,7 +7046,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             return
         }
 
-        if resolveWordUnderCursorAsPath() != nil {
+        if resolveWordUnderCursorAsPath(at: point) != nil {
             if !wordPathHoverActive {
                 wordPathHoverActive = true
                 NSCursor.pointingHand.push()
@@ -6995,6 +7056,199 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             NSCursor.pop()
         }
     }
+
+    private func resolvedWordPathWorkingDirectory(
+        workspace: Workspace,
+        terminalSurface: TerminalSurface
+    ) -> String? {
+        if let dir = workspace.panelDirectories[terminalSurface.id]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !dir.isEmpty {
+            return dir
+        }
+        if let dir = workspace.terminalPanel(for: terminalSurface.id)?
+            .requestedWorkingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !dir.isEmpty {
+            return dir
+        }
+        let dir = workspace.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        return dir.isEmpty ? nil : dir
+    }
+
+    private func currentMousePointInView() -> NSPoint? {
+        guard let window else { return nil }
+        return convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    }
+
+    private func resolveVisibleWordPath(
+        at point: NSPoint,
+        cwd: String,
+        workspace: Workspace,
+        terminalSurface: TerminalSurface
+    ) -> WordPathResolution? {
+        guard let panel = workspace.terminalPanel(for: terminalSurface.id),
+              let surface else {
+            return nil
+        }
+
+        let size = ghostty_surface_size(surface)
+        let rows = max(Int(size.rows), 1)
+        let cols = max(Int(size.columns), 1)
+        let resolvedCellWidth = cellSize.width > 0 ? cellSize.width : CGFloat(size.cell_width_px)
+        let resolvedCellHeight = cellSize.height > 0 ? cellSize.height : CGFloat(size.cell_height_px)
+        guard resolvedCellWidth > 0, resolvedCellHeight > 0 else { return nil }
+
+        let visibleText = TerminalController.shared.readTerminalTextForSnapshot(
+            terminalPanel: panel,
+            lineLimit: max(200, rows * 4)
+        ) ?? ""
+        let visibleLines = cmuxVisibleTerminalLines(from: visibleText, rows: rows)
+        let rowOffset = max(0, rows - visibleLines.count)
+        let xInset = max(0, (bounds.width - (CGFloat(cols) * resolvedCellWidth)) / 2)
+        let yInset = max(0, (bounds.height - (CGFloat(rows) * resolvedCellHeight)) / 2)
+
+        let yFromTop = bounds.height - point.y
+        let rowFromTop = max(0, min(rows - 1, Int((yFromTop - yInset) / resolvedCellHeight)))
+        let visibleRow = rowFromTop - rowOffset
+        guard visibleRow >= 0, visibleRow < visibleLines.count else { return nil }
+
+        let column = max(0, min(cols - 1, Int((point.x - xInset) / resolvedCellWidth)))
+        guard let rawToken = cmuxShellEscapedTokenContainingColumn(
+            in: visibleLines[visibleRow],
+            column: column
+        ) else {
+            return nil
+        }
+
+        guard let resolvedPath = cmuxResolveQuicklookPath(rawToken, cwd: cwd) else {
+            return nil
+        }
+
+        return WordPathResolution(
+            path: resolvedPath,
+            source: .snapshot,
+            rawToken: rawToken
+        )
+    }
+
+    @discardableResult
+    private func handleCommandClickRelease(
+        at point: NSPoint,
+        modifierFlags: NSEvent.ModifierFlags,
+        ghosttyConsumed: Bool
+    ) -> WordPathResolution? {
+        guard let surface else { return nil }
+        let suppressCommandPathHover = shouldSuppressCommandPathHover(for: modifierFlags)
+        guard modifierFlags.contains(.command), !suppressCommandPathHover else { return nil }
+
+        // Refresh ghostty's cached mouse position so quicklook_word reads
+        // up-to-date coordinates (mouseDown skips pos update on double-click).
+        ghostty_surface_mouse_pos(surface, point.x, bounds.height - point.y, modsFromFlags(modifierFlags))
+
+        guard let resolution = resolveWordUnderCursorPath(at: point) else { return nil }
+        guard !ghosttyConsumed || resolution.source == .snapshot else { return nil }
+
+        #if DEBUG
+        dlog(
+            "link.wordFallback resolved=\(resolution.path) source=\(resolution.source.rawValue) consumed=\(ghosttyConsumed ? 1 : 0)"
+        )
+        #endif
+
+        PreferredEditorSettings.open(URL(fileURLWithPath: resolution.path))
+        return resolution
+    }
+
+    private func clampedDebugPoint(_ point: NSPoint) -> NSPoint {
+        NSPoint(
+            x: min(max(point.x, 1), max(bounds.width - 1, 1)),
+            y: min(max(point.y, 1), max(bounds.height - 1, 1))
+        )
+    }
+
+#if DEBUG
+    func debugSimulateSelection(from startPoint: NSPoint, to endPoint: NSPoint) -> Bool {
+        guard let surface else { return false }
+        let start = clampedDebugPoint(startPoint)
+        let end = clampedDebugPoint(endPoint)
+        let mods = GHOSTTY_MODS_NONE
+
+        window?.makeFirstResponder(self)
+        ghostty_surface_mouse_pos(surface, start.x, bounds.height - start.y, mods)
+        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+
+        let steps = max(4, Int(max(abs(end.x - start.x), abs(end.y - start.y)) / max(cellSize.width, 1)))
+        for step in 1...steps {
+            let progress = CGFloat(step) / CGFloat(steps)
+            let intermediatePoint = NSPoint(
+                x: start.x + ((end.x - start.x) * progress),
+                y: start.y + ((end.y - start.y) * progress)
+            )
+            let clampedIntermediatePoint = clampedDebugPoint(intermediatePoint)
+            ghostty_surface_mouse_pos(
+                surface,
+                clampedIntermediatePoint.x,
+                bounds.height - clampedIntermediatePoint.y,
+                mods
+            )
+        }
+
+        _ = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
+        return ghostty_surface_has_selection(surface)
+    }
+
+    func debugSimulateCommandHover(at point: NSPoint) -> Bool {
+        guard let surface else { return false }
+        let clampedPoint = clampedDebugPoint(point)
+        let flags: NSEvent.ModifierFlags = [.command]
+        let suppressCommandPathHover = shouldSuppressCommandPathHover(for: flags)
+
+        ghostty_surface_mouse_pos(
+            surface,
+            clampedPoint.x,
+            bounds.height - clampedPoint.y,
+            hoverModsFromFlags(
+                flags,
+                suppressCommandPathHover: suppressCommandPathHover
+            )
+        )
+        updateWordPathHover(
+            at: clampedPoint,
+            cmdHeld: true,
+            suppressPathHover: suppressCommandPathHover
+        )
+        return suppressCommandPathHover
+    }
+
+    func debugSimulateCommandClick(at point: NSPoint) -> [String: Any] {
+        guard let surface else {
+            return ["error": "Missing surface"]
+        }
+
+        let clampedPoint = clampedDebugPoint(point)
+        let flags: NSEvent.ModifierFlags = [.command]
+        let mods = modsFromFlags(flags)
+
+        window?.makeFirstResponder(self)
+        ghostty_surface_mouse_pos(surface, clampedPoint.x, bounds.height - clampedPoint.y, mods)
+        let pressHandled = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+        let releaseConsumed = ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_RELEASE, GHOSTTY_MOUSE_LEFT, mods)
+        let resolution = handleCommandClickRelease(
+            at: clampedPoint,
+            modifierFlags: flags,
+            ghosttyConsumed: releaseConsumed
+        )
+
+        var payload: [String: Any] = [
+            "pressHandled": pressHandled ? "1" : "0",
+            "releaseConsumed": releaseConsumed ? "1" : "0",
+        ]
+        if let resolution {
+            payload["openedPath"] = resolution.path
+            payload["resolutionSource"] = resolution.source.rawValue
+            payload["rawToken"] = resolution.rawToken
+        }
+        return payload
+    }
+#endif
 
     override func rightMouseDown(with event: NSEvent) {
         guard let surface = surface else { return }
@@ -7169,6 +7423,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             )
         )
         updateWordPathHover(
+            at: point,
             cmdHeld: event.modifierFlags.contains(.command),
             suppressPathHover: suppressCommandPathHover
         )
@@ -7190,6 +7445,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             )
         )
         updateWordPathHover(
+            at: point,
             cmdHeld: event.modifierFlags.contains(.command),
             suppressPathHover: suppressCommandPathHover
         )
@@ -7898,6 +8154,29 @@ final class GhosttySurfaceScrollView: NSView {
 
     var debugSurfaceId: UUID? {
         surfaceView.terminalSurface?.id
+    }
+
+    var debugCellSize: CGSize {
+        surfaceView.cellSize
+    }
+
+    private func debugPointInSurface(_ point: NSPoint) -> NSPoint {
+        surfaceView.convert(point, from: self)
+    }
+
+    func debugSimulateSelection(from startPoint: NSPoint, to endPoint: NSPoint) -> Bool {
+        surfaceView.debugSimulateSelection(
+            from: debugPointInSurface(startPoint),
+            to: debugPointInSurface(endPoint)
+        )
+    }
+
+    func debugSimulateCommandHover(at point: NSPoint) -> Bool {
+        surfaceView.debugSimulateCommandHover(at: debugPointInSurface(point))
+    }
+
+    func debugSimulateCommandClick(at point: NSPoint) -> [String: Any] {
+        surfaceView.debugSimulateCommandClick(at: debugPointInSurface(point))
     }
 #endif
 
