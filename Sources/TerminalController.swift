@@ -12676,10 +12676,14 @@ class TerminalController {
 
         if let workspaceId = UUID(uuidString: tabArg),
            let panelId = UUID(uuidString: panelArg) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      let tab = self.tabForSidebarMutation(id: workspaceId),
-                      tab.panels[panelId] != nil else {
+            var result = "OK"
+            DispatchQueue.main.sync {
+                guard let tab = self.tabForSidebarMutation(id: workspaceId) else {
+                    result = "ERROR: Tab not found"
+                    return
+                }
+                guard tab.panels[panelId] != nil else {
+                    result = "ERROR: Panel not found"
                     return
                 }
                 TerminalNotificationStore.shared.addNotification(
@@ -12690,7 +12694,7 @@ class TerminalController {
                     body: body
                 )
             }
-            return "OK"
+            return result
         }
 
         var result = "OK"
@@ -14480,7 +14484,7 @@ class TerminalController {
     }
 
     private func resolveTabIdForSidebarMutation(
-        reportArgs: String,
+        reportArgs _: String,
         options: [String: String]
     ) -> (tabId: UUID?, error: String?) {
         if let rawTabArg = options["tab"] {
@@ -14489,24 +14493,25 @@ class TerminalController {
                 return (nil, "ERROR: Tab not found")
             }
             if let tabId = UUID(uuidString: tabArg) {
-                // Telemetry/socket mutations commonly pass an explicit workspace UUID.
-                // Accept it directly so the socket handler doesn't block on main-thread
-                // layout stalls before it can enqueue the mutation.
+                guard tabForSidebarMutation(id: tabId) != nil else {
+                    return (nil, "ERROR: Tab not found")
+                }
                 return (tabId, nil)
             }
+
+            guard let tabManager = self.tabManager,
+                  let tab = resolveTab(from: tabArg, tabManager: tabManager) else {
+                return (nil, "ERROR: Tab not found")
+            }
+            return (tab.id, nil)
         }
 
-        var tabId: UUID?
-        DispatchQueue.main.sync {
-            if let tab = resolveTabForReport(reportArgs) {
-                tabId = tab.id
-            }
+        guard let tabManager = self.tabManager,
+              let selectedId = tabManager.selectedTabId,
+              tabManager.tabs.contains(where: { $0.id == selectedId }) else {
+            return (nil, "ERROR: No tab selected")
         }
-        if let tabId {
-            return (tabId, nil)
-        }
-        let error = options["tab"] != nil ? "ERROR: Tab not found" : "ERROR: No tab selected"
-        return (nil, error)
+        return (selectedId, nil)
     }
 
     private func tabForSidebarMutation(id: UUID) -> Tab? {

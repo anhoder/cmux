@@ -861,10 +861,12 @@ final class SocketClient {
     private var socketFD: Int32 = -1
     private static let defaultResponseTimeoutSeconds: TimeInterval = 15.0
     private static let multilineResponseIdleTimeoutSeconds: TimeInterval = 0.12
+    private static let maxSocketTimeoutSeconds: TimeInterval = 9_007_199_254_740_991
     private static let responseTimeoutSeconds: TimeInterval = {
         let env = ProcessInfo.processInfo.environment
         if let raw = env["CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC"],
            let seconds = Double(raw),
+           seconds.isFinite,
            seconds > 0 {
             return seconds
         }
@@ -892,10 +894,16 @@ final class SocketClient {
     }
 
     private static func socketTimeval(for timeout: TimeInterval) -> timeval {
-        let clampedTimeout = max(timeout, 0.01)
+        let sanitizedTimeout = timeout.isFinite ? timeout : defaultResponseTimeoutSeconds
+        let clampedTimeout = min(max(sanitizedTimeout, 0.01), maxSocketTimeoutSeconds)
+        let seconds = floor(clampedTimeout)
+        let microseconds = min(
+            max(Int((clampedTimeout - seconds) * 1_000_000), 0),
+            999_999
+        )
         return timeval(
-            tv_sec: Int(clampedTimeout.rounded(.down)),
-            tv_usec: __darwin_suseconds_t((clampedTimeout - floor(clampedTimeout)) * 1_000_000)
+            tv_sec: Int(seconds),
+            tv_usec: __darwin_suseconds_t(microseconds)
         )
     }
 
