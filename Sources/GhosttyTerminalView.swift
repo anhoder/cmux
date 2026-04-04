@@ -7150,6 +7150,16 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             return nil
         }
 
+        let snapshotPoint = preferredPointerPoint(from: point)
+        let pointSnapshotResolution = snapshotPoint.flatMap {
+            resolveVisibleWordPath(
+                at: $0,
+                cwd: cwd,
+                workspace: workspace,
+                terminalSurface: termSurface
+            )
+        }
+
         var text = ghostty_text_s()
         if ghostty_surface_quicklook_word(surface, &text) {
             defer { ghostty_surface_free_text(surface, &text) }
@@ -7172,29 +7182,33 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 }
             }
 
-            if text.offset_len > 0,
+            var viewportResolution: WordPathResolution?
+            if text.offset_len > 0 {
 #if DEBUG
-               let expandedResolution = resolveVisibleWordPathFromViewportOffset(
-                   cmuxTerminalCmdClickViewportOffsetDelta(Int(text.offset_start)),
-                   cwd: cwd,
-                   workspace: workspace,
-                   terminalSurface: termSurface
-               ) {
+                let viewportOffsetStart = cmuxTerminalCmdClickViewportOffsetDelta(Int(text.offset_start))
 #else
-               let expandedResolution = resolveVisibleWordPathFromViewportOffset(
-                   Int(text.offset_start),
-                   cwd: cwd,
-                   workspace: workspace,
-                   terminalSurface: termSurface
+                let viewportOffsetStart = Int(text.offset_start)
 #endif
-               ) {
-                // Ghostty quicklook can return a resolvable but incomplete token for
-                // multi-word `ls` entries. Prefer the viewport-expanded path when it
-                // disagrees, and fall back to quicklook when expansion fails.
-                if let quicklookResolution, quicklookResolution.path == expandedResolution.path {
-                    return quicklookResolution
+                viewportResolution = resolveVisibleWordPathFromViewportOffset(
+                    viewportOffsetStart,
+                    cwd: cwd,
+                    workspace: workspace,
+                    terminalSurface: termSurface
+                )
+            }
+
+            if let viewportResolution {
+                // The pointer-anchored snapshot is the only source tied directly to the
+                // actual click location. Prefer it over quicklook and viewport offsets,
+                // which can lag or target a sibling entry in multi-column `ls` output.
+                if let pointSnapshotResolution {
+                    return pointSnapshotResolution
                 }
-                return expandedResolution
+                return viewportResolution
+            }
+
+            if let pointSnapshotResolution {
+                return pointSnapshotResolution
             }
 
             if let quicklookResolution {
@@ -7202,8 +7216,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             }
         }
 
-        guard let snapshotPoint = preferredPointerPoint(from: point) else { return nil }
-        return resolveVisibleWordPath(at: snapshotPoint, cwd: cwd, workspace: workspace, terminalSurface: termSurface)
+        return pointSnapshotResolution
     }
 
     #if DEBUG
