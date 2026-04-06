@@ -14,6 +14,7 @@ import UserNotifications
 #endif
 
 let lastSurfaceCloseShortcutDefaultsKey = "closeWorkspaceOnLastSurfaceShortcut"
+private let pathMutationLock = NSLock()
 
 func drainMainQueue() {
     let expectation = XCTestExpectation(description: "drain main queue")
@@ -120,6 +121,19 @@ private func runGit(
         line: line
     )
     return result.stdout
+}
+
+private func withPrependedPath<T>(
+    _ path: String,
+    _ body: () throws -> T
+) rethrows -> T {
+    pathMutationLock.lock()
+    defer { pathMutationLock.unlock() }
+
+    let originalPath = getenv("PATH").map { String(cString: $0) } ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+    setenv("PATH", "\(path):\(originalPath)", 1)
+    defer { setenv("PATH", originalPath, 1) }
+    return try body()
 }
 
 @MainActor
@@ -558,27 +572,89 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         try ghScript.write(to: ghScriptURL, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ghScriptURL.path)
 
-        let originalPath = getenv("PATH").map { String(cString: $0) } ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        setenv("PATH", "\(binURL.path):\(originalPath)", 1)
-        defer { setenv("PATH", originalPath, 1) }
+        try withPrependedPath(binURL.path) {
+            let manager = TabManager()
+            let workspace = manager.addWorkspace(workingDirectory: repoURL.path)
+            guard let panelId = workspace.focusedPanelId else {
+                XCTFail("Expected focused panel in new workspace")
+                return
+            }
 
-        let manager = TabManager()
-        let workspace = manager.addWorkspace(workingDirectory: repoURL.path)
-        guard let panelId = workspace.focusedPanelId else {
-            XCTFail("Expected focused panel in new workspace")
-            return
+            drainMainQueue()
+            drainMainQueue()
+
+            XCTAssertTrue(
+                waitForCondition(timeout: 3.0) {
+                    workspace.panelPullRequests[panelId]?.number == 42
+                }
+            )
+            XCTAssertEqual(workspace.panelGitBranches[panelId]?.branch, "feature/bootstrap-refresh")
+            XCTAssertEqual(workspace.pullRequest?.number, 42)
+        }
+    }
+
+    func testInitialWorkspaceGitMetadataRefreshAllowsSlowGitHubPullRequestProbe() throws {
+        let fileManager = FileManager.default
+        let repoURL = fileManager.temporaryDirectory.appendingPathComponent("cmux-git-slow-gh-refresh-\(UUID().uuidString)")
+        let binURL = fileManager.temporaryDirectory.appendingPathComponent("cmux-git-slow-gh-bin-\(UUID().uuidString)")
+        try fileManager.createDirectory(at: repoURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: binURL, withIntermediateDirectories: true)
+        defer {
+            try? fileManager.removeItem(at: repoURL)
+            try? fileManager.removeItem(at: binURL)
         }
 
-        drainMainQueue()
-        drainMainQueue()
-
-        XCTAssertTrue(
-            waitForCondition(timeout: 3.0) {
-                workspace.panelPullRequests[panelId]?.number == 42
-            }
+        try runGit(["init", "-b", "main"], in: repoURL)
+        try runGit(["config", "user.name", "cmux tests"], in: repoURL)
+        try runGit(["config", "user.email", "cmux@example.invalid"], in: repoURL)
+        try "seed\n".write(
+            to: repoURL.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
         )
-        XCTAssertEqual(workspace.panelGitBranches[panelId]?.branch, "feature/bootstrap-refresh")
-        XCTAssertEqual(workspace.pullRequest?.number, 42)
+        try runGit(["add", "README.md"], in: repoURL)
+        try runGit(["commit", "-m", "Initial commit"], in: repoURL)
+        try runGit(["checkout", "-b", "feature/slow-pr-probe"], in: repoURL)
+        try runGit(["remote", "add", "origin", "https://github.com/manaflow-ai/cmux.git"], in: repoURL)
+
+        let ghScriptURL = binURL.appendingPathComponent("gh")
+        let ghScript = """
+        #!/bin/sh
+        command="$1 $2"
+        if [ "$command" = "pr list" ]; then
+          sleep 3
+          printf '%s' '[{"number":43,"state":"OPEN","url":"https://github.com/manaflow-ai/cmux/pull/43","updatedAt":"2026-04-04T00:00:00Z"}]'
+          exit 0
+        fi
+        if [ "$command" = "pr checks" ]; then
+          printf '[]'
+          exit 0
+        fi
+        echo "unsupported gh invocation: $*" >&2
+        exit 1
+        """
+        try ghScript.write(to: ghScriptURL, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: ghScriptURL.path)
+
+        try withPrependedPath(binURL.path) {
+            let manager = TabManager()
+            let workspace = manager.addWorkspace(workingDirectory: repoURL.path)
+            guard let panelId = workspace.focusedPanelId else {
+                XCTFail("Expected focused panel in new workspace")
+                return
+            }
+
+            drainMainQueue()
+            drainMainQueue()
+
+            XCTAssertTrue(
+                waitForCondition(timeout: 5.5) {
+                    workspace.panelPullRequests[panelId]?.number == 43
+                }
+            )
+            XCTAssertEqual(workspace.panelGitBranches[panelId]?.branch, "feature/slow-pr-probe")
+            XCTAssertEqual(workspace.pullRequest?.number, 43)
+        }
     }
 
     func testResolvedCommandPathFallsBackOutsideAppPATH() throws {

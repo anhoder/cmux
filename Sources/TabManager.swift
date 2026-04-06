@@ -702,7 +702,10 @@ class TabManager: ObservableObject {
     // don't repeatedly spawn `gh` when nothing is changing.
     private static let workspaceGitMetadataPollInterval: TimeInterval = 5 * 60
     private static let selectedWorkspaceGitMetadataPollInterval: TimeInterval = 2 * 60
-    private nonisolated static let workspacePullRequestProbeTimeout: TimeInterval = 2.0
+    // Keep individual `gh` probes long enough for cold launches and slower
+    // VPN/GitHub Enterprise responses. The lower poll frequency already limits
+    // idle process churn, so an overly aggressive timeout hurts correctness.
+    private nonisolated static let workspacePullRequestProbeTimeout: TimeInterval = 5.0
     @Published var selectedTabId: UUID? {
         willSet {
 #if DEBUG

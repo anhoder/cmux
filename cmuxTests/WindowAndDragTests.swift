@@ -1374,6 +1374,98 @@ final class TmuxWorkspacePaneOverlayTests: XCTestCase {
         XCTAssertNil(model.flashStartedAt)
     }
 
+    func testTmuxWorkspacePaneOverlayModelPreservesFlashAcrossTransientNilRect() {
+        let startedAt = Date()
+        let workspaceId = UUID()
+        let model = TmuxWorkspacePaneOverlayModel()
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 1,
+                flashReason: .notificationArrival
+            )
+        )
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 2,
+                flashReason: .notificationArrival
+            ),
+            now: { startedAt }
+        )
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: nil,
+                flashToken: 2,
+                flashReason: .notificationArrival
+            )
+        )
+
+        XCTAssertEqual(model.flashStartedAt, startedAt)
+        XCTAssertFalse(model.showsAnimatedFlash)
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 2,
+                flashReason: .notificationArrival
+            )
+        )
+
+        XCTAssertEqual(model.flashStartedAt, startedAt)
+        XCTAssertTrue(model.showsAnimatedFlash)
+    }
+
+    func testTmuxWorkspacePaneOverlayModelStartsPendingFlashWhenRectReturns() {
+        let startedAt = Date()
+        let workspaceId = UUID()
+        let model = TmuxWorkspacePaneOverlayModel()
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: nil,
+                flashToken: 1,
+                flashReason: .notificationArrival
+            )
+        )
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: nil,
+                flashToken: 2,
+                flashReason: .notificationArrival
+            )
+        )
+
+        XCTAssertNil(model.flashStartedAt)
+
+        model.apply(
+            TmuxWorkspacePaneOverlayRenderState(
+                workspaceId: workspaceId,
+                unreadRects: [],
+                flashRect: CGRect(x: 10, y: 20, width: 300, height: 200),
+                flashToken: 2,
+                flashReason: .notificationArrival
+            ),
+            now: { startedAt }
+        )
+
+        XCTAssertEqual(model.flashStartedAt, startedAt)
+        XCTAssertTrue(model.showsAnimatedFlash)
+    }
+
     func testNavigationFlashUsesNonNotificationPresentation() {
         XCTAssertNotEqual(
             WorkspaceAttentionCoordinator.flashStyle(for: .navigation),

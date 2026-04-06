@@ -109,7 +109,8 @@ final class TmuxWorkspacePaneOverlayModel {
     private(set) var flashReason: WorkspaceAttentionFlashReason?
 
     private var lastWorkspaceId: UUID?
-    private var lastFlashToken: UInt64?
+    private var lastObservedFlashToken: UInt64?
+    private var runningFlashToken: UInt64?
     private var flashResetWorkItem: DispatchWorkItem?
     var onStateChange: (() -> Void)?
 
@@ -132,25 +133,43 @@ final class TmuxWorkspacePaneOverlayModel {
         let didChangeWorkspace = lastWorkspaceId != state.workspaceId
         if didChangeWorkspace {
             lastWorkspaceId = state.workspaceId
-            lastFlashToken = state.flashToken
+            lastObservedFlashToken = state.flashToken
+            runningFlashToken = nil
             cancelFlashReset()
             flashStartedAt = nil
             return
         }
 
-        if state.flashRect == nil {
-            cancelFlashReset()
-            flashStartedAt = nil
+        let didChangeFlashToken = lastObservedFlashToken != state.flashToken
+        if didChangeFlashToken {
+            lastObservedFlashToken = state.flashToken
+
+            if state.flashRect != nil {
+                startFlash(
+                    workspaceId: state.workspaceId,
+                    flashToken: state.flashToken,
+                    startedAt: now()
+                )
+            } else {
+                // A new token supersedes any in-flight flash even when layout churn
+                // temporarily leaves the pane without a window-space rect.
+                cancelFlashReset()
+                flashStartedAt = nil
+                runningFlashToken = nil
+            }
+            return
         }
 
-        if let lastFlashToken,
-           state.flashToken != lastFlashToken,
+        // Preserve an in-flight flash if the pane rect is temporarily missing.
+        // Once the same token has a rect again, resume from the original start time.
+        if runningFlashToken == nil,
            state.flashRect != nil {
-            let startedAt = now()
-            flashStartedAt = startedAt
-            scheduleFlashReset(workspaceId: state.workspaceId, flashToken: state.flashToken)
+            startFlash(
+                workspaceId: state.workspaceId,
+                flashToken: state.flashToken,
+                startedAt: now()
+            )
         }
-        self.lastFlashToken = state.flashToken
     }
 
     func clear() {
@@ -160,7 +179,14 @@ final class TmuxWorkspacePaneOverlayModel {
         flashStartedAt = nil
         flashReason = nil
         lastWorkspaceId = nil
-        lastFlashToken = nil
+        lastObservedFlashToken = nil
+        runningFlashToken = nil
+    }
+
+    private func startFlash(workspaceId: UUID, flashToken: UInt64, startedAt: Date) {
+        flashStartedAt = startedAt
+        runningFlashToken = flashToken
+        scheduleFlashReset(workspaceId: workspaceId, flashToken: flashToken)
     }
 
     private func scheduleFlashReset(workspaceId: UUID, flashToken: UInt64) {
@@ -169,11 +195,12 @@ final class TmuxWorkspacePaneOverlayModel {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             guard self.lastWorkspaceId == workspaceId,
-                  self.lastFlashToken == flashToken else {
+                  self.runningFlashToken == flashToken else {
                 return
             }
 
             self.flashStartedAt = nil
+            self.runningFlashToken = nil
             self.onStateChange?()
         }
         flashResetWorkItem = workItem
