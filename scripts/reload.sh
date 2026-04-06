@@ -405,6 +405,10 @@ if [[ -n "$TAG" && "$APP_NAME" != "$SEARCH_APP_NAME" ]]; then
       CMUX_DEBUG_LOG="/tmp/cmux-debug-${TAG_SLUG}.log"
       write_last_socket_path "$CMUX_SOCKET"
       echo "$CMUX_DEBUG_LOG" > /tmp/cmux-last-debug-log-path || true
+      echo "$TAG" > /tmp/cmux-last-tag || true
+      if [[ -n "${CLAUDE_SESSION_ID:-}" ]]; then
+        echo "$TAG" > "/tmp/cmux-last-tag-${CLAUDE_SESSION_ID}" || true
+      fi
       /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$INFO_PLIST" 2>/dev/null || true
       /usr/libexec/PlistBuddy -c "Set :LSEnvironment:CMUXD_UNIX_PATH \"${CMUXD_SOCKET}\"" "$INFO_PLIST" 2>/dev/null \
         || /usr/libexec/PlistBuddy -c "Add :LSEnvironment:CMUXD_UNIX_PATH string \"${CMUXD_SOCKET}\"" "$INFO_PLIST"
