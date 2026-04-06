@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 
 use crate::auth::{TicketClaims, has_session_capability, verify_ticket};
 use crate::pane::{EventCallback, PaneHandle, PaneRuntimeEvent};
@@ -108,6 +109,15 @@ impl Daemon {
         if cfg.socket_path.trim().is_empty() {
             return Err("missing daemon socket path".to_string());
         }
+        if let (Some(ws_port), Some(ws_secret)) = (cfg.ws_port, cfg.ws_secret.as_ref()) {
+            if !ws_secret.is_empty() {
+                let daemon = self.clone();
+                let ws_secret = ws_secret.clone();
+                thread::spawn(move || {
+                    let _ = daemon.serve_websocket(ws_port, &ws_secret);
+                });
+            }
+        }
         if let Some(parent) = Path::new(&cfg.socket_path).parent() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
@@ -122,6 +132,23 @@ impl Daemon {
                     let daemon = self.clone();
                     thread::spawn(move || {
                         let _ = daemon.serve_stream(stream, None);
+                    });
+                }
+                Err(err) => return Err(err.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    fn serve_websocket(&self, port: u16, secret: &str) -> Result<(), String> {
+        let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|err| err.to_string())?;
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let daemon = self.clone();
+                    let secret = secret.to_string();
+                    thread::spawn(move || {
+                        let _ = daemon.serve_websocket_stream(stream, &secret);
                     });
                 }
                 Err(err) => return Err(err.to_string()),
@@ -3481,17 +3508,336 @@ fn load_key(path: &str) -> Result<PrivateKeyDer<'static>, String> {
         .ok_or_else(|| "missing private key".to_string())
 }
 
+const MAX_HTTP_REQUEST_BYTES: usize = 8 * 1024;
+const WEBSOCKET_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+impl Daemon {
+    fn serve_websocket_stream<S: Read + Write>(
+        &self,
+        stream: S,
+        secret: &str,
+    ) -> Result<(), String> {
+        let mut reader = BufReader::new(stream);
+        let request = read_http_request(&mut reader)?;
+        if !is_websocket_upgrade(&request) {
+            return Err("missing websocket upgrade".to_string());
+        }
+        let ws_key = header_value(&request, "sec-websocket-key")
+            .ok_or_else(|| "missing websocket key".to_string())?;
+        write_websocket_upgrade(reader.get_mut(), ws_key)?;
+
+        let Some(auth_message) = read_ws_text_message(&mut reader)? else {
+            return Ok(());
+        };
+        if !websocket_secret_matches(&auth_message, secret) {
+            write_ws_json_value(
+                reader.get_mut(),
+                &json!({
+                    "ok": false,
+                    "error": {
+                        "code": "unauthorized",
+                        "message": "invalid secret",
+                    }
+                }),
+            )?;
+            return Ok(());
+        }
+        write_ws_json_value(
+            reader.get_mut(),
+            &json!({
+                "ok": true,
+                "result": {
+                    "authenticated": true,
+                }
+            }),
+        )?;
+
+        loop {
+            let Some(message) = read_ws_text_message(&mut reader)? else {
+                return Ok(());
+            };
+            if message.trim().is_empty() {
+                continue;
+            }
+            let response = self.parse_and_dispatch(message.as_bytes(), None);
+            write_ws_response(reader.get_mut(), &response)?;
+        }
+    }
+}
+
+fn read_http_request<S: Read>(reader: &mut BufReader<S>) -> Result<String, String> {
+    let mut request = String::new();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line).map_err(|err| err.to_string())?;
+        if read == 0 {
+            return Err("connection closed".to_string());
+        }
+        if request.len() + line.len() > MAX_HTTP_REQUEST_BYTES {
+            return Err("websocket HTTP request too large".to_string());
+        }
+        request.push_str(&line);
+        if line == "\r\n" || line == "\n" {
+            return Ok(request);
+        }
+    }
+}
+
+fn is_websocket_upgrade(request: &str) -> bool {
+    header_value(request, "upgrade")
+        .map(|value| value.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
+}
+
+fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request
+        .split("\r\n")
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| {
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then_some(value.trim())
+        })
+}
+
+fn write_websocket_upgrade<S: Write>(stream: &mut S, ws_key: &str) -> Result<(), String> {
+    let mut hasher = Sha1::new();
+    hasher.update(ws_key.as_bytes());
+    hasher.update(WEBSOCKET_MAGIC.as_bytes());
+    let accept = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .map_err(|err| err.to_string())?;
+    stream.flush().map_err(|err| err.to_string())
+}
+
+fn websocket_secret_matches(payload: &str, secret: &str) -> bool {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("secret")
+                .and_then(Value::as_str)
+                .map(|candidate| candidate == secret)
+        })
+        .unwrap_or(false)
+}
+
+fn read_ws_text_message<S: Read + Write>(
+    reader: &mut BufReader<S>,
+) -> Result<Option<String>, String> {
+    loop {
+        let mut header = [0u8; 2];
+        match reader.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(err) => return Err(err.to_string()),
+        }
+
+        let opcode = header[0] & 0x0F;
+        let masked = (header[1] & 0x80) != 0;
+        let payload = read_ws_payload(reader, header[1] & 0x7F, masked)?;
+
+        match opcode {
+            0x08 => return Ok(None),
+            0x09 => {
+                write_ws_frame(reader.get_mut(), 0x0A, &payload)?;
+            }
+            0x01 => {
+                let text = String::from_utf8(payload).map_err(|err| err.to_string())?;
+                return Ok(Some(text));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn read_ws_payload<S: Read + Write>(
+    reader: &mut BufReader<S>,
+    len_byte: u8,
+    masked: bool,
+) -> Result<Vec<u8>, String> {
+    let mut payload_len = len_byte as u64;
+    if len_byte == 126 {
+        let mut extended = [0u8; 2];
+        reader
+            .read_exact(&mut extended)
+            .map_err(|err| err.to_string())?;
+        payload_len = u16::from_be_bytes(extended) as u64;
+    } else if len_byte == 127 {
+        let mut extended = [0u8; 8];
+        reader
+            .read_exact(&mut extended)
+            .map_err(|err| err.to_string())?;
+        payload_len = u64::from_be_bytes(extended);
+    }
+    if payload_len > crate::rpc::MAX_FRAME_BYTES as u64 {
+        return Err("websocket frame exceeds maximum size".to_string());
+    }
+
+    let mut mask_key = [0u8; 4];
+    if masked {
+        reader
+            .read_exact(&mut mask_key)
+            .map_err(|err| err.to_string())?;
+    }
+
+    let mut payload = vec![0u8; payload_len as usize];
+    if !payload.is_empty() {
+        reader
+            .read_exact(&mut payload)
+            .map_err(|err| err.to_string())?;
+    }
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask_key[index % mask_key.len()];
+        }
+    }
+
+    Ok(payload)
+}
+
+fn write_ws_json_value<S: Write>(stream: &mut S, value: &Value) -> Result<(), String> {
+    let payload = serde_json::to_vec(value).map_err(|err| err.to_string())?;
+    write_ws_frame(stream, 0x01, &payload)
+}
+
+fn write_ws_response<S: Write>(stream: &mut S, response: &Response) -> Result<(), String> {
+    let payload = serde_json::to_vec(response).map_err(|err| err.to_string())?;
+    write_ws_frame(stream, 0x01, &payload)
+}
+
+fn write_ws_frame<S: Write>(stream: &mut S, opcode: u8, data: &[u8]) -> Result<(), String> {
+    let mut header = [0u8; 10];
+    header[0] = 0x80 | opcode;
+    let header_len = if data.len() <= 125 {
+        header[1] = data.len() as u8;
+        2
+    } else if data.len() <= u16::MAX as usize {
+        header[1] = 126;
+        header[2..4].copy_from_slice(&(data.len() as u16).to_be_bytes());
+        4
+    } else {
+        header[1] = 127;
+        header[2..10].copy_from_slice(&(data.len() as u64).to_be_bytes());
+        10
+    };
+    stream
+        .write_all(&header[..header_len])
+        .map_err(|err| err.to_string())?;
+    if !data.is_empty() {
+        stream.write_all(data).map_err(|err| err.to_string())?;
+    }
+    stream.flush().map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::{
-        io::{BufRead, BufReader, Write},
+        io::{BufRead, BufReader, Read, Write},
         net::Shutdown,
         os::unix::net::UnixStream,
         thread,
         time::Duration,
     };
+
+    fn write_masked_ws_text_frame(stream: &mut UnixStream, text: &str) {
+        let payload = text.as_bytes();
+        let mask = [0x12, 0x34, 0x56, 0x78];
+        let mut header = Vec::with_capacity(14);
+        header.push(0x81);
+        if payload.len() <= 125 {
+            header.push(0x80 | payload.len() as u8);
+        } else if payload.len() <= u16::MAX as usize {
+            header.push(0x80 | 126);
+            header.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        } else {
+            header.push(0x80 | 127);
+            header.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        }
+        header.extend_from_slice(&mask);
+        stream.write_all(&header).unwrap();
+
+        let mut masked = payload.to_vec();
+        for (index, byte) in masked.iter_mut().enumerate() {
+            *byte ^= mask[index % mask.len()];
+        }
+        stream.write_all(&masked).unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn read_ws_text_frame(reader: &mut BufReader<UnixStream>) -> String {
+        let mut header = [0u8; 2];
+        reader.read_exact(&mut header).unwrap();
+        let mut payload_len = (header[1] & 0x7F) as usize;
+        if payload_len == 126 {
+            let mut extended = [0u8; 2];
+            reader.read_exact(&mut extended).unwrap();
+            payload_len = u16::from_be_bytes(extended) as usize;
+        } else if payload_len == 127 {
+            let mut extended = [0u8; 8];
+            reader.read_exact(&mut extended).unwrap();
+            payload_len = u64::from_be_bytes(extended) as usize;
+        }
+        let mut payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            reader.read_exact(&mut payload).unwrap();
+        }
+        String::from_utf8(payload).unwrap()
+    }
+
+    #[test]
+    fn websocket_stream_authenticates_and_dispatches_requests() {
+        let daemon = Daemon::new("test");
+        let (client, server) = UnixStream::pair().unwrap();
+        let server_thread = thread::spawn(move || {
+            daemon.serve_websocket_stream(server, "secret").unwrap();
+        });
+
+        let mut client = client;
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: SGVsbG9Xb3JsZA==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .unwrap();
+        client.flush().unwrap();
+
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).unwrap();
+        assert!(status_line.starts_with("HTTP/1.1 101"));
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        write_masked_ws_text_frame(&mut client, r#"{"secret":"secret"}"#);
+        let auth_response: Value = serde_json::from_str(&read_ws_text_frame(&mut reader)).unwrap();
+        assert_eq!(auth_response["ok"].as_bool(), Some(true));
+        assert_eq!(
+            auth_response["result"]["authenticated"].as_bool(),
+            Some(true)
+        );
+
+        write_masked_ws_text_frame(&mut client, r#"{"id":1,"method":"hello","params":{}}"#);
+        let response: Value = serde_json::from_str(&read_ws_text_frame(&mut reader)).unwrap();
+        assert_eq!(response["ok"].as_bool(), Some(true));
+        assert_eq!(response["id"].as_i64(), Some(1));
+        assert_eq!(response["result"]["name"].as_str(), Some("cmuxd-remote"));
+
+        client.shutdown(Shutdown::Both).unwrap();
+        server_thread.join().unwrap();
+    }
 
     use crate::auth::{TicketClaims, sign};
 

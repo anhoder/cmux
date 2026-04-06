@@ -306,6 +306,59 @@ func startUnixDaemon(t *testing.T, bin string) string {
 	return server.SocketPath
 }
 
+func startUnixDaemonWithWS(t *testing.T, bin string, wsSecret string) (socketPath string, wsAddr string) {
+	t.Helper()
+
+	socketDir, err := os.MkdirTemp("", "cmuxd-unix-")
+	if err != nil {
+		t.Fatalf("mkdir temp socket dir: %v", err)
+	}
+	shortDir := filepath.Join(os.TempDir(), filepath.Base(socketDir))
+	if renameErr := os.Rename(socketDir, shortDir); renameErr == nil {
+		socketDir = shortDir
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(socketDir)
+	})
+
+	socketPath = filepath.Join(socketDir, "s.sock")
+	wsAddr = freeTCPAddress(t)
+	_, wsPort, err := net.SplitHostPort(wsAddr)
+	if err != nil {
+		t.Fatalf("split websocket addr %q: %v", wsAddr, err)
+	}
+
+	server := &unixDaemonServer{
+		SocketPath: socketPath,
+		stderr:     &bytes.Buffer{},
+	}
+	server.cmd = exec.Command(
+		bin,
+		"serve",
+		"--unix",
+		"--socket", server.SocketPath,
+		"--ws-port", wsPort,
+		"--ws-secret", wsSecret,
+	)
+	server.cmd.Dir = daemonRemoteRoot()
+	server.cmd.Stderr = server.stderr
+
+	if err := server.cmd.Start(); err != nil {
+		t.Fatalf("start unix daemon with websocket: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if server.cmd.Process != nil {
+			_ = server.cmd.Process.Kill()
+		}
+		_ = server.cmd.Wait()
+	})
+
+	waitForUnixSocket(t, server)
+	waitForTCPServer(t, wsAddr, server.stderr)
+	return socketPath, wsAddr
+}
+
 type unixJSONRPCClient struct {
 	conn   net.Conn
 	reader *bufio.Reader
@@ -509,6 +562,23 @@ func waitForTLSServer(t *testing.T, server *tlsDaemonServer) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("tls daemon did not start on %s: %v\nstderr:\n%s", server.Addr, err, server.stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitForTCPServer(t *testing.T, addr string, stderr *bytes.Buffer) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tcp server did not start on %s: %v\nstderr:\n%s", addr, err, stderr.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -141,6 +141,68 @@ func TestServeStdioSupportsTerminalOpenReadAndWrite(t *testing.T) {
 	}
 }
 
+func TestServeStdioRejectsDuplicateTerminalOpenWithoutCorruptingExistingSession(t *testing.T) {
+	t.Parallel()
+
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"serve", "--stdio"}, stdinR, stdoutW, io.Discard)
+	}()
+
+	reader := bufio.NewReader(stdoutR)
+	send := func(line string) map[string]any {
+		t.Helper()
+
+		if _, err := io.WriteString(stdinW, line+"\n"); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+
+		respLine, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(respLine), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return payload
+	}
+
+	firstOpen := send(`{"id":1,"method":"terminal.open","params":{"session_id":"dup-demo","command":"printf READY; stty raw -echo -onlcr; exec cat","cols":120,"rows":40}}`)
+	if ok, _ := firstOpen["ok"].(bool); !ok {
+		t.Fatalf("first terminal.open should succeed: %+v", firstOpen)
+	}
+
+	secondOpen := send(`{"id":2,"method":"terminal.open","params":{"session_id":"dup-demo","command":"printf BAD; exec cat","cols":80,"rows":24}}`)
+	if ok, _ := secondOpen["ok"].(bool); ok {
+		t.Fatalf("second terminal.open should fail: %+v", secondOpen)
+	}
+	if got := nestedString(secondOpen, "error", "code"); got != "already_exists" {
+		t.Fatalf("second terminal.open error code = %q, want %q", got, "already_exists")
+	}
+
+	read := send(`{"id":3,"method":"terminal.read","params":{"session_id":"dup-demo","offset":0,"max_bytes":1024,"timeout_ms":1000}}`)
+	if ok, _ := read["ok"].(bool); !ok {
+		t.Fatalf("terminal.read should still succeed for original session: %+v", read)
+	}
+	readResult, ok := read["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("terminal.read result missing: %+v", read)
+	}
+	if string(decodeBase64Field(t, readResult, "data")) != "READY" {
+		t.Fatalf("terminal.read data = %q, want %q", string(decodeBase64Field(t, readResult, "data")), "READY")
+	}
+
+	_ = stdinW.Close()
+	if code := <-done; code != 0 {
+		t.Fatalf("serve exit code = %d, want 0", code)
+	}
+}
+
 func decodeBase64Field(t *testing.T, payload map[string]any, key string) []byte {
 	t.Helper()
 
@@ -157,4 +219,24 @@ func decodeBase64Field(t *testing.T, payload map[string]any, key string) []byte 
 
 func jsonNumber(value float64) string {
 	return fmt.Sprintf("%.0f", value)
+}
+
+func nestedString(payload map[string]any, keys ...string) string {
+	current := payload
+	for index, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return ""
+		}
+		if index == len(keys)-1 {
+			text, _ := value.(string)
+			return text
+		}
+		next, _ := value.(map[string]any)
+		if next == nil {
+			return ""
+		}
+		current = next
+	}
+	return ""
 }

@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrSessionNotFound    = errors.New("session not found")
+	ErrSessionExists      = errors.New("session already exists")
 	ErrAttachmentNotFound = errors.New("attachment not found")
 	ErrInvalidSize        = errors.New("cols and rows must be greater than zero")
 )
@@ -59,12 +60,15 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) Open(sessionID string, cols, rows int) (resolvedSessionID, attachmentID string) {
+func (m *Manager) Open(sessionID string, cols, rows int) (resolvedSessionID, attachmentID string, err error) {
 	cols, rows = normalizeSize(cols, rows)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	resolvedSessionID, state := m.ensureLocked(sessionID)
+	resolvedSessionID, state, err := m.openLocked(sessionID)
+	if err != nil {
+		return "", "", err
+	}
 	attachmentID = m.nextAttachmentIDLocked()
 	state.attachments[attachmentID] = attachmentState{
 		cols:      cols,
@@ -73,7 +77,7 @@ func (m *Manager) Open(sessionID string, cols, rows int) (resolvedSessionID, att
 	}
 	recomputeSessionSize(state)
 
-	return resolvedSessionID, attachmentID
+	return resolvedSessionID, attachmentID, nil
 }
 
 func (m *Manager) Ensure(sessionID string) SessionStatus {
@@ -192,8 +196,13 @@ func (m *Manager) List() []SessionStatus {
 
 func (m *Manager) ensureLocked(sessionID string) (string, *sessionState) {
 	if sessionID == "" {
-		sessionID = fmt.Sprintf("sess-%d", m.nextSessionID)
-		m.nextSessionID++
+		for {
+			sessionID = fmt.Sprintf("sess-%d", m.nextSessionID)
+			m.nextSessionID++
+			if _, exists := m.sessions[sessionID]; !exists {
+				break
+			}
+		}
 	}
 
 	state, ok := m.sessions[sessionID]
@@ -205,6 +214,21 @@ func (m *Manager) ensureLocked(sessionID string) (string, *sessionState) {
 	}
 
 	return sessionID, state
+}
+
+func (m *Manager) openLocked(sessionID string) (string, *sessionState, error) {
+	if sessionID == "" {
+		resolvedSessionID, state := m.ensureLocked("")
+		return resolvedSessionID, state, nil
+	}
+	if _, exists := m.sessions[sessionID]; exists {
+		return "", nil, ErrSessionExists
+	}
+	state := &sessionState{
+		attachments: map[string]attachmentState{},
+	}
+	m.sessions[sessionID] = state
+	return sessionID, state, nil
 }
 
 func (m *Manager) nextAttachmentIDLocked() string {

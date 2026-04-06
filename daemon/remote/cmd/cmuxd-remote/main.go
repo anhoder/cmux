@@ -847,7 +847,14 @@ func (s *daemonServer) handleTerminalOpen(req rpc.Request) rpc.Response {
 	}
 
 	requestedSessionID, _ := getStringParam(req.Params, "session_id")
-	sessionID, attachmentID := s.sessions.Open(requestedSessionID, cols, rows)
+	sessionID, attachmentID, err := s.sessions.Open(requestedSessionID, cols, rows)
+	if err != nil {
+		return rpc.Response{
+			ID:    req.ID,
+			OK:    false,
+			Error: sessionError(err),
+		}
+	}
 	status, err := s.sessions.Status(sessionID)
 	if err != nil {
 		return rpc.Response{ID: req.ID, OK: false, Error: sessionError(err)}
@@ -1049,6 +1056,8 @@ func sessionError(err error) *rpc.Error {
 		return nil
 	case session.ErrSessionNotFound:
 		return &rpc.Error{Code: "not_found", Message: "session not found"}
+	case session.ErrSessionExists:
+		return &rpc.Error{Code: "already_exists", Message: err.Error()}
 	case session.ErrAttachmentNotFound:
 		return &rpc.Error{Code: "not_found", Message: "attachment not found"}
 	case session.ErrInvalidSize:
