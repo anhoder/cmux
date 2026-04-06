@@ -2977,19 +2977,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #if DEBUG
     private func setupTerminalCmdClickUITestIfNeeded() {
         guard !didSetupTerminalCmdClickUITest else { return }
-        didSetupTerminalCmdClickUITest = true
 
         let env = ProcessInfo.processInfo.environment
-        guard env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_SETUP"] == "1" else { return }
-        guard let currentTabManager = self.tabManager else { return }
+        guard env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_SETUP"] == "1" else {
+            dlog("cmdclick.ui.setup skip reason=env_missing tag=\(env["CMUX_TAG"] ?? "nil")")
+            return
+        }
         guard let manifestPath = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_PATH"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !manifestPath.isEmpty else {
+            dlog("cmdclick.ui.setup skip reason=missing_manifest_path")
             return
         }
+        didSetupTerminalCmdClickUITest = true
         guard let fixtureDirectory = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_FIXTURE_DIR"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !fixtureDirectory.isEmpty else {
+            dlog("cmdclick.ui.setup error reason=missing_fixture_dir manifest=\(manifestPath)")
             writeTerminalCmdClickUITestData(at: manifestPath, updates: [
                 "setupError": "Missing fixture directory"
             ])
@@ -2999,6 +3003,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let displayMode = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_DISPLAY_MODE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lineFormat = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_LINE_FORMAT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let linePrefix = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_LINE_PREFIX"] ?? ""
+        let extraFileNamesJSON = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_EXTRA_FILE_NAMES_JSON"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let fileName = env["CMUX_UI_TEST_TERMINAL_CMD_CLICK_FILE_NAME"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3006,26 +3015,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let fixtureDirectoryURL = URL(fileURLWithPath: fixtureDirectory, isDirectory: true)
         let expectedFileURL = fixtureDirectoryURL.appendingPathComponent(resolvedFileName)
         let siblingFileURL = fixtureDirectoryURL.appendingPathComponent("OtherFile")
+        let extraFileNames: [String]
+        if let extraFileNamesJSON,
+           let data = extraFileNamesJSON.data(using: .utf8),
+           let values = try? JSONSerialization.jsonObject(with: data) as? [String] {
+            extraFileNames = values
+        } else {
+            extraFileNames = []
+        }
         let escapedToken = resolvedFileName.replacingOccurrences(of: " ", with: "\\ ")
         let resolvedDisplayMode = (displayMode == "raw") ? "raw" : "escaped"
+        let resolvedLineFormat: String
+        switch lineFormat {
+        case "log":
+            resolvedLineFormat = "log"
+        case "alt_screen_log":
+            resolvedLineFormat = "alt_screen_log"
+        default:
+            resolvedLineFormat = "grid"
+        }
+        dlog(
+            "cmdclick.ui.setup start manifest=\(manifestPath) fixture=\(fixtureDirectory) " +
+                "command=\(commandPath ?? "nil") display=\(resolvedDisplayMode) " +
+                "lineFormat=\(resolvedLineFormat) " +
+                "file=\(resolvedFileName)"
+        )
+        func singleQuotedShellLiteral(_ text: String) -> String {
+            text.replacingOccurrences(of: "'", with: "'\"'\"'")
+        }
         let displayToken: String
         let shellCommand: String
-        switch resolvedDisplayMode {
-        case "raw":
+        switch resolvedLineFormat {
+        case "log":
             displayToken = resolvedFileName
-            let blockLine = "\(resolvedFileName)    OtherFile"
-            shellCommand = "clear\rfor i in $(seq 1 48); do printf '%s\\n' '\(blockLine)'; done\r"
+            let blockLine = "\(linePrefix)\(resolvedFileName)"
+            let shellBlockLine = singleQuotedShellLiteral(blockLine)
+            shellCommand = "clear\rfor i in $(seq 1 48); do printf '%s\\n' '\(shellBlockLine)'; done\r"
+        case "alt_screen_log":
+            displayToken = resolvedFileName
+            let blockLine = "\(linePrefix)\(resolvedFileName)"
+            let shellBlockLine = singleQuotedShellLiteral(blockLine)
+            shellCommand = "clear\rprintf '\\033[?1049h\\033[H\\033[2J'; for i in $(seq 1 48); do printf '%s\\n' '\(shellBlockLine)'; done\r"
         default:
-            displayToken = escapedToken
-            let blockLine = Array(repeating: escapedToken, count: 3).joined(separator: " ")
-            shellCommand = "clear\rfor i in $(seq 1 48); do printf '%s\\n' '\(blockLine)'; done\r"
+            switch resolvedDisplayMode {
+            case "raw":
+                displayToken = resolvedFileName
+                let blockLine = "\(resolvedFileName)    OtherFile"
+                let shellBlockLine = singleQuotedShellLiteral(blockLine)
+                shellCommand = "clear\rfor i in $(seq 1 48); do printf '%s\\n' '\(shellBlockLine)'; done\r"
+            default:
+                displayToken = escapedToken
+                let blockLine = Array(repeating: escapedToken, count: 3).joined(separator: " ")
+                let shellBlockLine = singleQuotedShellLiteral(blockLine)
+                shellCommand = "clear\rfor i in $(seq 1 48); do printf '%s\\n' '\(shellBlockLine)'; done\r"
+            }
         }
         let deadline = Date().addingTimeInterval((commandPath?.isEmpty == false) ? 60.0 : 20.0)
         var seeded = false
         var resolved = false
         var tokenPointPayload: [String: Any]?
         var observers: [NSObjectProtocol] = []
-        var panelsCancellable: AnyCancellable?
         var lastHandledCommandID: String?
 
         func rectPayload(_ rect: CGRect) -> [String: Double] {
@@ -3175,8 +3224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         func cleanup() {
             observers.forEach { NotificationCenter.default.removeObserver($0) }
             observers.removeAll()
-            panelsCancellable?.cancel()
-            panelsCancellable = nil
             terminalCmdClickUITestPoller?.cancel()
             terminalCmdClickUITestPoller = nil
         }
@@ -3192,6 +3239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "ready": ready ? "1" : "0",
                 "escapedToken": escapedToken,
                 "displayMode": resolvedDisplayMode,
+                "lineFormat": resolvedLineFormat,
                 "displayToken": displayToken,
                 "fileName": resolvedFileName,
                 "expectedPath": expectedFileURL.path,
@@ -3259,6 +3307,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             ]
 
             switch action {
+            case "hover_token":
+                guard let hitPoint = pointFromPayload("tokenHitPointInTerminal", in: terminalPanel) else {
+                    payload["lastCommandError"] = "Missing token hit point"
+                    break
+                }
+
+                let result = terminalPanel.hostedView.debugSimulateCommandHoverDetails(at: hitPoint)
+                payload["lastCommandResult"] = result
+                payload["lastCommandHoverActive"] = result["hoverActive"]
+                if let resolvedPath = result["resolvedPath"] as? String {
+                    payload["lastCommandResolvedPath"] = resolvedPath
+                    payload["lastCommandSucceeded"] = "1"
+                } else if let error = result["error"] as? String {
+                    payload["lastCommandError"] = error
+                } else {
+                    payload["lastCommandError"] = "Command hover did not resolve a path"
+                }
+
             case "cmd_click_token":
                 guard let hitPoint = pointFromPayload("tokenHitPointInTerminal", in: terminalPanel) else {
                     payload["lastCommandError"] = "Missing token hit point"
@@ -3314,27 +3380,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         @MainActor
         func evaluate() {
             guard !resolved else { return }
-            let workspace = currentTabManager.selectedWorkspace ?? currentTabManager.tabs.first
+            let currentTabManager = self.tabManager
+            let workspace = currentTabManager?.selectedWorkspace ?? currentTabManager?.tabs.first
             let terminalPanel = workspace?.focusedTerminalPanel
             let mainWindow = terminalPanel?.hostedView.window
-                ?? self.windowId(for: currentTabManager).flatMap { self.mainWindow(for: $0) }
+                ?? currentTabManager.flatMap { self.windowId(for: $0).flatMap { self.mainWindow(for: $0) } }
             if Date() >= deadline {
                 let textSnapshot = terminalPanel
                     .flatMap { TerminalController.shared.readTerminalTextForSnapshot(terminalPanel: $0, lineLimit: 200) } ?? ""
+                var timeoutPayload: [String: Any] = [:]
+                if let currentTabManager {
+                    timeoutPayload["tabManager"] = debugManagerToken(currentTabManager)
+                    timeoutPayload["workspaceCount"] = currentTabManager.tabs.count
+                }
+                let waitingFor = [
+                    workspace == nil ? "workspace" : nil,
+                    terminalPanel == nil ? "terminalPanel" : nil,
+                    mainWindow == nil ? "mainWindow" : nil
+                ]
+                    .compactMap { $0 }
+                    .joined(separator: ",")
+                if !waitingFor.isEmpty {
+                    timeoutPayload["waitingFor"] = waitingFor
+                }
                 writeState(
                     terminalPanel: terminalPanel,
                     window: mainWindow,
                     ready: false,
-                    setupError: "Timed out waiting for terminal cmd-click setup. text=\(textSnapshot)"
+                    setupError: "Timed out waiting for terminal cmd-click setup. text=\(textSnapshot)",
+                    additionalPayload: timeoutPayload
                 )
                 resolved = true
                 cleanup()
                 return
             }
 
+            if currentTabManager == nil {
+                writeTerminalCmdClickUITestData(at: manifestPath, updates: [
+                    "ready": "0",
+                    "setupError": "Waiting for tab manager"
+                ])
+                return
+            }
+
             guard let workspace,
                   let terminalPanel,
                   let mainWindow else {
+                var waitingPayload: [String: Any] = [
+                    "ready": "0",
+                    "setupError": "Waiting for terminal workspace"
+                ]
+                if let currentTabManager {
+                    waitingPayload["tabManager"] = debugManagerToken(currentTabManager)
+                    waitingPayload["workspaceCount"] = currentTabManager.tabs.count
+                }
+                let waitingFor = [
+                    workspace == nil ? "workspace" : nil,
+                    terminalPanel == nil ? "terminalPanel" : nil,
+                    mainWindow == nil ? "mainWindow" : nil
+                ]
+                    .compactMap { $0 }
+                    .joined(separator: ",")
+                if !waitingFor.isEmpty {
+                    waitingPayload["waitingFor"] = waitingFor
+                }
+                writeTerminalCmdClickUITestData(at: manifestPath, updates: waitingPayload)
                 return
             }
 
@@ -3353,6 +3463,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 }
                 if !FileManager.default.fileExists(atPath: siblingFileURL.path) {
                     try "fixture\n".write(to: siblingFileURL, atomically: true, encoding: .utf8)
+                }
+                for extraFileName in extraFileNames where !extraFileName.isEmpty {
+                    let extraFileURL = fixtureDirectoryURL.appendingPathComponent(extraFileName)
+                    if !FileManager.default.fileExists(atPath: extraFileURL.path) {
+                        try "fixture\n".write(to: extraFileURL, atomically: true, encoding: .utf8)
+                    }
                 }
             } catch {
                 writeState(
@@ -3447,18 +3563,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { _ in
             Task { @MainActor in evaluate() }
         })
-        panelsCancellable = currentTabManager.$tabs
-            .map { _ in () }
-            .sink { _ in
-                Task { @MainActor in evaluate() }
-            }
-
         let poller = DispatchSource.makeTimerSource(queue: .main)
         poller.schedule(deadline: .now(), repeating: .milliseconds(100))
         poller.setEventHandler {
             Task { @MainActor in evaluate() }
         }
         terminalCmdClickUITestPoller = poller
+        dlog("cmdclick.ui.setup poller_started manifest=\(manifestPath)")
         poller.resume()
     }
 
@@ -3473,9 +3584,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             payload[key] = value
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            dlog("cmdclick.ui.write skip reason=json path=\(path)")
             return
         }
-        try? data.write(to: url, options: .atomic)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: .atomic)
+        } catch {
+            dlog("cmdclick.ui.write error path=\(path) error=\(error.localizedDescription)")
+        }
     }
 
     private func scheduleUITestSocketSanityCheckIfNeeded() {

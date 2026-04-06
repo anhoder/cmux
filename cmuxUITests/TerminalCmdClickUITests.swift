@@ -7,6 +7,12 @@ final class TerminalCmdClickUITests: XCTestCase {
         case raw
     }
 
+    private enum LineFormat: String {
+        case grid
+        case log
+        case altScreenLog = "alt_screen_log"
+    }
+
     private struct SetupData {
         let expectedPath: String
     }
@@ -33,6 +39,13 @@ final class TerminalCmdClickUITests: XCTestCase {
         try? FileManager.default.removeItem(atPath: setupDataPath)
         try? FileManager.default.removeItem(atPath: commandPath)
         try? FileManager.default.createDirectory(at: fixtureDirectoryURL, withIntermediateDirectories: true)
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: commandPath,
+                contents: Data("{}".utf8)
+            ),
+            "Expected shared command file to be writable at \(commandPath)"
+        )
     }
 
     override func tearDown() {
@@ -265,8 +278,225 @@ final class TerminalCmdClickUITests: XCTestCase {
         )
     }
 
+    func testCmdHoverLsStylePathResolvesFullConsultantAgreementDocx() throws {
+        try assertCommandHoverResolves(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .grid,
+            linePrefix: "",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdClickLsStylePathOpensFullConsultantAgreementDocx() throws {
+        try assertCommandClickOpens(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .grid,
+            linePrefix: "",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdHoverLsStylePathResolvesFullNintendoMkv() throws {
+        try assertCommandHoverResolves(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .grid,
+            linePrefix: ""
+        )
+    }
+
+    func testCmdClickLsStylePathOpensFullNintendoMkv() throws {
+        try assertCommandClickOpens(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .grid,
+            linePrefix: ""
+        )
+    }
+
+    func testCmdHoverDashPrefixedLogPathResolvesFullConsultantAgreementDocx() throws {
+        try assertCommandHoverResolves(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .log,
+            linePrefix: "- ",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdClickDashPrefixedLogPathOpensFullConsultantAgreementDocx() throws {
+        try assertCommandClickOpens(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .log,
+            linePrefix: "- ",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdHoverDashPrefixedLogPathResolvesFullNintendoMkv() throws {
+        try assertCommandHoverResolves(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .log,
+            linePrefix: "- "
+        )
+    }
+
+    func testCmdClickDashPrefixedLogPathOpensFullNintendoMkv() throws {
+        try assertCommandClickOpens(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .log,
+            linePrefix: "- "
+        )
+    }
+
+    func testCmdHoverAltScreenDashPrefixedLogPathResolvesFullConsultantAgreementDocx() throws {
+        try assertCommandHoverResolves(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .altScreenLog,
+            linePrefix: "- ",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdClickAltScreenDashPrefixedLogPathOpensFullConsultantAgreementDocx() throws {
+        try assertCommandClickOpens(
+            fileName: "Standard - Consultant Agreement - Form of Consulting Agreement.docx",
+            lineFormat: .altScreenLog,
+            linePrefix: "- ",
+            extraFileNames: ["Agreement.docx"],
+            disallowedFileName: "Agreement.docx"
+        )
+    }
+
+    func testCmdHoverAltScreenDashPrefixedLogPathResolvesFullNintendoMkv() throws {
+        try assertCommandHoverResolves(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .altScreenLog,
+            linePrefix: "- "
+        )
+    }
+
+    func testCmdClickAltScreenDashPrefixedLogPathOpensFullNintendoMkv() throws {
+        try assertCommandClickOpens(
+            fileName: "(NINTENDO) BOTW Guardian Sound Effect.mkv",
+            lineFormat: .altScreenLog,
+            linePrefix: "- "
+        )
+    }
+
+    private func assertCommandHoverResolves(
+        fileName: String,
+        lineFormat: LineFormat,
+        linePrefix: String,
+        extraFileNames: [String] = [],
+        disallowedFileName: String? = nil
+    ) throws {
+        let app = launchApp(
+            displayMode: .raw,
+            lineFormat: lineFormat,
+            fileName: fileName,
+            linePrefix: linePrefix,
+            extraFileNames: extraFileNames,
+            captureOpenPaths: false,
+            captureHoverDiagnostics: false
+        )
+        defer { app.terminate() }
+
+        let setup = try waitForReadySetup()
+        let expectedResolvedPath = expectedPath(for: fileName)
+        XCTAssertEqual(setup.expectedPath, expectedResolvedPath)
+
+        let result = try runCommand(action: "hover_token")
+        XCTAssertEqual(
+            result["lastCommandSucceeded"] as? String,
+            "1",
+            "Expected cmd-hover to resolve the full spaced path. result=\(result)"
+        )
+        XCTAssertEqual(
+            result["lastCommandHoverActive"] as? String,
+            "1",
+            "Expected cmd-hover to activate the pointing cursor for the full spaced path. result=\(result)"
+        )
+        XCTAssertEqual(
+            result["lastCommandResolvedPath"] as? String,
+            expectedResolvedPath,
+            "Expected cmd-hover to resolve the full spaced path, not a suffix token. result=\(result)"
+        )
+
+        if let disallowedFileName {
+            XCTAssertNotEqual(
+                result["lastCommandResolvedPath"] as? String,
+                expectedPath(for: disallowedFileName),
+                "Expected cmd-hover to reject suffix-token decoys. result=\(result)"
+            )
+        }
+    }
+
+    private func assertCommandClickOpens(
+        fileName: String,
+        lineFormat: LineFormat,
+        linePrefix: String,
+        extraFileNames: [String] = [],
+        disallowedFileName: String? = nil
+    ) throws {
+        let app = launchApp(
+            displayMode: .raw,
+            lineFormat: lineFormat,
+            fileName: fileName,
+            linePrefix: linePrefix,
+            extraFileNames: extraFileNames,
+            captureOpenPaths: true,
+            captureHoverDiagnostics: false
+        )
+        defer { app.terminate() }
+
+        let setup = try waitForReadySetup()
+        let expectedResolvedPath = expectedPath(for: fileName)
+        XCTAssertEqual(setup.expectedPath, expectedResolvedPath)
+
+        let result = try runCommand(action: "cmd_click_token")
+        XCTAssertEqual(
+            result["lastCommandSucceeded"] as? String,
+            "1",
+            "Expected cmd-click to open the full spaced path. result=\(result)"
+        )
+        XCTAssertEqual(
+            result["lastCommandOpenedPath"] as? String,
+            expectedResolvedPath,
+            "Expected cmd-click to open the full spaced path, not a suffix token. result=\(result)"
+        )
+
+        guard let openedPaths = waitForCapturedOpenPaths(timeout: 5.0) else {
+            XCTFail("Expected open capture after cmd-clicking the spaced path. result=\(result)")
+            return
+        }
+
+        XCTAssertTrue(
+            openedPaths.contains(expectedResolvedPath),
+            "Expected cmd-click to open the intended spaced path. opened=\(openedPaths) expected=\(expectedResolvedPath)"
+        )
+
+        if let disallowedFileName {
+            let disallowedPath = expectedPath(for: disallowedFileName)
+            XCTAssertFalse(
+                openedPaths.contains(disallowedPath),
+                "Expected cmd-click to reject suffix-token decoys. opened=\(openedPaths) wrong=\(disallowedPath)"
+            )
+        }
+    }
+
+    private func expectedPath(for fileName: String) -> String {
+        fixtureDirectoryURL.appendingPathComponent(fileName).path
+    }
+
     private func launchApp(
         displayMode: DisplayMode = .escaped,
+        lineFormat: LineFormat = .grid,
+        fileName: String = "Cmd Click Fixture.txt",
+        linePrefix: String = "",
+        extraFileNames: [String] = [],
         captureOpenPaths: Bool,
         captureHoverDiagnostics: Bool,
         quicklookOverride: String? = nil,
@@ -279,8 +509,17 @@ final class TerminalCmdClickUITests: XCTestCase {
         app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_PATH"] = setupDataPath
         app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_COMMAND_PATH"] = commandPath
         app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_FIXTURE_DIR"] = fixtureDirectoryURL.path
-        app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_FILE_NAME"] = "Cmd Click Fixture.txt"
+        app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_FILE_NAME"] = fileName
         app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_DISPLAY_MODE"] = displayMode.rawValue
+        app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_LINE_FORMAT"] = lineFormat.rawValue
+        if !linePrefix.isEmpty {
+            app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_LINE_PREFIX"] = linePrefix
+        }
+        if !extraFileNames.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: extraFileNames, options: [.sortedKeys]),
+           let json = String(data: data, encoding: .utf8) {
+            app.launchEnvironment["CMUX_UI_TEST_TERMINAL_CMD_CLICK_EXTRA_FILE_NAMES_JSON"] = json
+        }
         if captureOpenPaths {
             app.launchEnvironment["CMUX_UI_TEST_CAPTURE_OPEN_PATH"] = openCapturePath
         }
@@ -358,7 +597,7 @@ final class TerminalCmdClickUITests: XCTestCase {
             "action": action,
         ]
         let data = try JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])
-        try data.write(to: URL(fileURLWithPath: commandPath), options: .atomic)
+        try data.write(to: URL(fileURLWithPath: commandPath))
 
         var result: [String: Any]?
         let matched = waitForCondition(timeout: timeout) {

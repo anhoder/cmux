@@ -7619,6 +7619,44 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         return suppressCommandPathHover
     }
 
+    func debugSimulateCommandHoverDetails(at point: NSPoint) -> [String: Any] {
+        guard let surface else {
+            return ["error": "Missing surface"]
+        }
+
+        let clampedPoint = clampedDebugPoint(point)
+        let flags: NSEvent.ModifierFlags = [.command]
+        let suppressCommandPathHover = shouldSuppressCommandPathHover(for: flags)
+
+        ghostty_surface_mouse_pos(
+            surface,
+            clampedPoint.x,
+            bounds.height - clampedPoint.y,
+            hoverModsFromFlags(
+                flags,
+                suppressCommandPathHover: suppressCommandPathHover
+            )
+        )
+
+        let resolution = suppressCommandPathHover ? nil : resolveWordUnderCursorPath(at: clampedPoint)
+        updateWordPathHover(
+            at: clampedPoint,
+            cmdHeld: true,
+            suppressPathHover: suppressCommandPathHover
+        )
+
+        var payload: [String: Any] = [
+            "hoverActive": wordPathHoverActive ? "1" : "0",
+            "suppressed": suppressCommandPathHover ? "1" : "0"
+        ]
+        if let resolution {
+            payload["resolvedPath"] = resolution.path
+            payload["resolutionSource"] = resolution.source.rawValue
+            payload["rawToken"] = resolution.rawToken
+        }
+        return payload
+    }
+
     func debugSimulateCommandClick(at point: NSPoint) -> [String: Any] {
         guard let surface else {
             return ["error": "Missing surface"]
@@ -8580,6 +8618,10 @@ final class GhosttySurfaceScrollView: NSView {
 
     func debugSimulateCommandHover(at point: NSPoint) -> Bool {
         surfaceView.debugSimulateCommandHover(at: debugPointInSurface(point))
+    }
+
+    func debugSimulateCommandHoverDetails(at point: NSPoint) -> [String: Any] {
+        surfaceView.debugSimulateCommandHoverDetails(at: debugPointInSurface(point))
     }
 
     func debugSimulateCommandClick(at point: NSPoint) -> [String: Any] {
