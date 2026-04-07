@@ -66,16 +66,18 @@ final class TerminalRemoteDaemonBootstrapTransport: @unchecked Sendable, Termina
         let sshSession = sshSessionFactory(host, credentials)
 
         do {
-            let daemonTransport = try await withTimeout(
+            let (daemonTransport, remotePlatform) = try await withTimeout(
                 seconds: bootstrapTimeout,
                 timeoutError: .bootstrapTimedOut
             ) {
                 let bootstrapSession = self.bootstrapSessionFactory(sshSession)
                 let launchConfig = try await bootstrapSession.prepareDaemon()
-                return try await sshSession.openDaemonTransport(
+                let transport = try await sshSession.openDaemonTransport(
                     launchCommand: launchConfig.launchCommand
                 )
+                return (transport, launchConfig.platform)
             }
+            eventHandler?(.remotePlatform(remotePlatform))
             let sessionTransport = TerminalRemoteDaemonSessionTransport(
                 client: sessionClientFactory(daemonTransport),
                 command: host.bootstrapCommand.replacingOccurrences(of: "{{session}}", with: sessionName),

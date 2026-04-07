@@ -25,9 +25,10 @@ struct TerminalSidebarRootView: View {
 
     @MainActor
     static func makeLiveStore() -> TerminalSidebarStore {
-        TerminalSidebarStore(
-            snapshotStore: Self.makeDefaultSnapshotStore(),
-            serverDiscovery: TerminalServerDiscovery()
+        let snapshotStore = Self.makeDefaultSnapshotStore()
+        return TerminalSidebarStore(
+            snapshotStore: snapshotStore,
+            serverDiscovery: TailscaleServerDiscovery()  // Uses debug auto-probing in DEBUG builds
         )
     }
 
@@ -80,9 +81,16 @@ struct TerminalSidebarRootView: View {
             return true
         }
 
-        // Pre-compute sort keys to avoid repeated store lookups during sort.
+        // Remote workspaces are already in tab order from the server.
+        // Only sort non-remote workspaces by connection status and activity.
+        let hasRemote = visible.contains { $0.remoteWorkspaceID != nil }
+        if hasRemote {
+            return visible // preserve server order
+        }
+
         let sortKeys = Dictionary(
-            uniqueKeysWithValues: visible.map { ($0.id, workspaceSortOrder($0)) }
+            visible.map { ($0.id, workspaceSortOrder($0)) },
+            uniquingKeysWith: { first, _ in first }
         )
         return visible.sorted { lhs, rhs in
             let lhsOrder = sortKeys[lhs.id] ?? 1
@@ -150,17 +158,6 @@ struct TerminalSidebarRootView: View {
                                 }
                                 .accessibilityIdentifier("terminal.server.\(host.accessibilityIdentifierSlug)")
                             }
-
-                            Button {
-                                editorDraft = TerminalHostEditorDraft(
-                                    host: store.newHostDraft(),
-                                    credentials: TerminalSSHCredentials(password: "", privateKey: "")
-                                )
-                            } label: {
-                                TerminalAddServerPinView()
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("terminal.server.add")
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -168,6 +165,24 @@ struct TerminalSidebarRootView: View {
                     .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
+                } header: {
+                    HStack {
+                        Text(TerminalHomeStrings.serversHeader)
+
+                        Spacer()
+
+                        Button {
+                            presentNewServerEditor()
+                        } label: {
+                            Label(TerminalHomeStrings.addServerLabel, systemImage: "plus")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .accessibilityIdentifier("terminal.server.add")
+                    }
+                    .textCase(nil)
                 }
 
                 Section {
@@ -227,13 +242,10 @@ struct TerminalSidebarRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: TerminalHomeStrings.searchPrompt)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                        ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button(TerminalHomeStrings.addServerLabel) {
-                            editorDraft = TerminalHostEditorDraft(
-                                host: store.newHostDraft(),
-                                credentials: TerminalSSHCredentials(password: "", privateKey: "")
-                            )
+                            presentNewServerEditor()
                         }
                         NavigationLink(destination: SettingsView()) {
                             Label(TerminalHomeStrings.settingsLabel, systemImage: "gear")
@@ -341,6 +353,13 @@ struct TerminalSidebarRootView: View {
             }
             return true
         }
+    }
+
+    private func presentNewServerEditor() {
+        editorDraft = TerminalHostEditorDraft(
+            host: store.newHostDraft(),
+            credentials: TerminalSSHCredentials(password: "", privateKey: "")
+        )
     }
 }
 
@@ -561,29 +580,6 @@ private struct TerminalServerPinView: View {
         }
         .frame(width: 92)
         .opacity(isOffline ? 0.5 : 1.0)
-    }
-}
-
-private struct TerminalAddServerPinView: View {
-    var body: some View {
-        VStack(spacing: 6) {
-            Circle()
-                .fill(Color.secondary.opacity(0.14))
-                .frame(width: 62, height: 62)
-                .overlay(
-                    Image(systemName: "plus")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.primary)
-                )
-
-            Text(TerminalHomeStrings.addServerLabel)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-            Text(String(localized: "terminal.home.ssh_label", defaultValue: "SSH"))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(width: 92)
     }
 }
 

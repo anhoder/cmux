@@ -82,7 +82,9 @@ final class TerminalDirectDaemonTransport: @unchecked Sendable, TerminalTranspor
     }
 
     func connect(initialSize: TerminalGridSize) async throws {
+        print("📱 DirectDaemon.connect: hostname=\(host.hostname) teamID=\(host.teamID ?? "nil") shouldBootstrapDirectly=\(shouldUseBootstrapTransportDirectly) sshAuthMethod=\(host.sshAuthenticationMethod) hasCredential=\(credentials.hasCredential(for: host.sshAuthenticationMethod))")
         if shouldUseBootstrapTransportDirectly {
+            print("📱 DirectDaemon.connect: → bootstrap transport directly (no teamID or has SSH creds)")
             let bootstrapTransport = fallbackTransportFactory(host, credentials, sessionName, resumeState)
             try await connect(
                 transport: bootstrapTransport,
@@ -92,12 +94,14 @@ final class TerminalDirectDaemonTransport: @unchecked Sendable, TerminalTranspor
         }
 
         do {
+            print("📱 DirectDaemon.connect: → trying direct daemon ticket")
             let transport = try await makeDirectTransport()
             try await connect(
                 transport: transport,
                 initialSize: initialSize
             )
         } catch {
+            print("📱 DirectDaemon.connect: direct failed: \(error.localizedDescription)")
             if shouldFallback(after: error) {
                 eventHandler?(
                     .notice(
@@ -180,7 +184,9 @@ final class TerminalDirectDaemonTransport: @unchecked Sendable, TerminalTranspor
     private func connectDirectClient(
         request: TerminalDaemonTicketRequest
     ) async throws -> (TerminalDaemonTicket, any TerminalRemoteDaemonTransport) {
+        print("📱 DirectDaemon.connectClient: fetching ticket for serverID=\(request.serverID) teamID=\(request.teamID)")
         let ticket = try await ticketService.fetchTicket(request: request)
+        print("📱 DirectDaemon.connectClient: got ticket, directURL=\(ticket.directURL)")
         let certificatePins = normalizedCertificatePins(from: ticket)
         do {
             let daemonTransport = try await directClient.connect(

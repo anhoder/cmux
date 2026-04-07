@@ -143,6 +143,7 @@ if [ -n "$DEVICE_ID" ]; then
 
     copy_local_config_if_present "$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/cmux DEV.app" "$LOCAL_CONFIG_SOURCE"
     rewrite_localhost_for_device "$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/cmux DEV.app/LocalConfig.plist"
+    embed_debug_relay_for_device "$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/cmux DEV.app"
 
     echo "📲 Installing on device..."
     xcrun devicectl device install app --device "$DEVICE_ID" "$DERIVED_DATA_PATH/Build/Products/Debug-iphoneos/cmux DEV.app"

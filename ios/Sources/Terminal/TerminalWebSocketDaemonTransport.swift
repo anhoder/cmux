@@ -197,11 +197,13 @@ final class TerminalWebSocketTransport: @unchecked Sendable, TerminalTransport {
         let effectiveSessionName = sessionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "cmux-\(UUID().uuidString.prefix(8).lowercased())"
             : sessionName
-        // WebSocket connects to the local daemon which manages its own PTY sessions.
-        // Use a login shell instead of the bootstrap command (tmux), which is only
-        // needed for SSH transport where the remote shell needs session persistence.
-        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let command = userShell
+        // WebSocket connects to the daemon which manages its own PTY sessions.
+        // Request a login shell. The daemon runs on the Mac, so /bin/zsh -l
+        // gives the user their normal shell environment.
+        let command = "/bin/zsh -l"
+        // WebSocket always connects to the local Mac daemon, so we know the platform.
+        eventHandler?(.remotePlatform(RemotePlatform(goOS: "darwin", goArch: "arm64")))
+
         let transport = sessionTransportFactory(daemonTransport, command, effectiveSessionName, resumeState)
         transport.eventHandler = { [weak self, weak transport] event in
             self?.handle(event: event, activeTransport: transport)

@@ -4870,9 +4870,9 @@ struct SettingsView: View {
                                 }
                             } else {
                                 Button(
-                                    String(localized: "settings.account.signIn", defaultValue: "Sign In in Browser")
+                                    String(localized: "settings.account.signIn", defaultValue: "Sign In")
                                 ) {
-                                    authManager.beginSignInInBrowser()
+                                    authManager.beginSignIn()
                                 }
                                 .controlSize(.small)
                                 .accessibilityIdentifier("settings.account.signIn")

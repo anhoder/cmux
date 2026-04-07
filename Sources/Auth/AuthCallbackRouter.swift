@@ -35,13 +35,8 @@ enum AuthCallbackRouter {
 
     private static func isAllowedScheme(_ scheme: String?) -> Bool {
         guard let normalized = scheme?.lowercased() else { return false }
-        if normalized == "cmux" || normalized == "cmux-dev" {
-            return true
-        }
-        return normalized.range(
-            of: #"^cmux-dev(?:-[a-z0-9-]+)?$"#,
-            options: .regularExpression
-        ) != nil
+        return normalized == "manaflow" || normalized == "manaflow-dev"
+            || normalized == "cmux" || normalized == "cmux-dev"
     }
 
     private static func callbackTarget(for url: URL) -> String {

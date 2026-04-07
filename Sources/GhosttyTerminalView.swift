@@ -3377,7 +3377,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private let surfaceContext: ghostty_surface_context_e
     private let configTemplate: CmuxSurfaceConfigTemplate?
     private let workingDirectory: String?
-    private var initialCommand: String?
+    private let initialCommand: String?
     private let initialEnvironmentOverrides: [String: String]
     var requestedWorkingDirectory: String? { workingDirectory }
     private var additionalEnvironment: [String: String]
@@ -3549,199 +3549,6 @@ final class TerminalSurface: Identifiable, ObservableObject {
             merged[key] = value
         }
         return merged
-    }
-
-    static func startupEnvironment(
-        tabId: UUID,
-        surfaceId: UUID,
-        portOrdinal: Int,
-        baseEnvironment: [String: String],
-        additionalEnvironment: [String: String],
-        initialEnvironmentOverrides: [String: String],
-        processEnvironment: [String: String] = cmuxCurrentProcessEnvironment(),
-        bundle: Bundle = .main
-    ) -> [String: String] {
-        var env = baseEnvironment
-        var protectedStartupEnvironmentKeys: Set<String> = []
-        let fileManager = FileManager.default
-        let bundleVersion = (bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let usesMainBundleContext = bundle.bundleURL.standardizedFileURL == Bundle.main.bundleURL.standardizedFileURL
-        let bundleIdentifier = usesMainBundleContext
-            ? (cmuxCurrentBundleIdentifier(environment: processEnvironment)
-                ?? bundle.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines))
-            : bundle.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resourceURL = usesMainBundleContext
-            ? (cmuxCurrentResourceURL(fileManager: fileManager) ?? bundle.resourceURL)
-            : bundle.resourceURL
-        let executableURL = usesMainBundleContext
-            ? (cmuxCurrentExecutableURL() ?? bundle.executableURL)
-            : bundle.executableURL
-
-        func setManagedEnvironmentValue(_ key: String, _ value: String) {
-            env[key] = value
-            protectedStartupEnvironmentKeys.insert(key)
-        }
-
-        func normalizedEnvironmentValue(_ key: String) -> String? {
-            let value = (env[key]?.isEmpty == false ? env[key] : nil)
-                ?? (processEnvironment[key]?.isEmpty == false ? processEnvironment[key] : nil)
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return trimmed.isEmpty ? nil : trimmed
-        }
-
-        setManagedEnvironmentValue("CMUX_SURFACE_ID", surfaceId.uuidString)
-        setManagedEnvironmentValue("CMUX_WORKSPACE_ID", tabId.uuidString)
-        setManagedEnvironmentValue("CMUX_PANEL_ID", surfaceId.uuidString)
-        setManagedEnvironmentValue("CMUX_TAB_ID", tabId.uuidString)
-        setManagedEnvironmentValue(
-            "CMUX_SOCKET_PATH",
-            SocketControlSettings.socketPath(
-                environment: processEnvironment,
-                bundleIdentifier: bundleIdentifier
-            )
-        )
-        if let socketPath = env["CMUX_SOCKET_PATH"], !socketPath.isEmpty {
-            setManagedEnvironmentValue("CMUX_SOCKET", socketPath)
-        }
-        if let bundledCLIURL = bundle.resourceURL?.appendingPathComponent("bin/cmux"),
-           FileManager.default.isExecutableFile(atPath: bundledCLIURL.path) {
-            setManagedEnvironmentValue("CMUX_BUNDLED_CLI_PATH", bundledCLIURL.path)
-        }
-        let ghosttyOverrides = cmuxApp.ghosttyEnvironmentOverrides(
-            processEnvironment: processEnvironment,
-            resourceURL: resourceURL,
-            executableURL: executableURL,
-            bundleIdentifier: bundleIdentifier,
-            bundleVersion: bundleVersion,
-            fileManager: fileManager
-        )
-        for key in [
-            "CMUX_BUNDLE_ID",
-            "CMUX_SHELL_INTEGRATION_DIR",
-            "GHOSTTY_BIN_DIR",
-            "GHOSTTY_RESOURCES_DIR",
-            "TERMINFO",
-            "TERM",
-            "TERM_PROGRAM",
-            "TERM_PROGRAM_VERSION",
-            "COLORTERM",
-            "MANPATH",
-            "XDG_DATA_DIRS",
-        ] {
-            if let value = ghosttyOverrides[key], !value.isEmpty {
-                setManagedEnvironmentValue(key, value)
-            }
-        }
-
-        let startPort = Self.sessionPortBase + portOrdinal * Self.sessionPortRangeSize
-        setManagedEnvironmentValue("CMUX_PORT", String(startPort))
-        setManagedEnvironmentValue("CMUX_PORT_END", String(startPort + Self.sessionPortRangeSize - 1))
-        setManagedEnvironmentValue("CMUX_PORT_RANGE", String(Self.sessionPortRangeSize))
-
-        let claudeHooksEnabled = ClaudeCodeIntegrationSettings.hooksEnabled()
-        if !claudeHooksEnabled {
-            setManagedEnvironmentValue("CMUX_CLAUDE_HOOKS_DISABLED", "1")
-        }
-
-        if let cliBinPath = bundle.resourceURL?.appendingPathComponent("bin").path {
-            let currentPath = env["PATH"]
-                ?? processEnvironment["PATH"]
-                ?? ""
-            if !currentPath.split(separator: ":").contains(Substring(cliBinPath)) {
-                let separator = currentPath.isEmpty ? "" : ":"
-                setManagedEnvironmentValue("PATH", "\(cliBinPath)\(separator)\(currentPath)")
-            }
-        }
-
-        let shellIntegrationEnabled = UserDefaults.standard.object(forKey: "sidebarShellIntegration") as? Bool ?? true
-        if shellIntegrationEnabled,
-           let integrationDir = env["CMUX_SHELL_INTEGRATION_DIR"] ?? ghosttyOverrides["CMUX_SHELL_INTEGRATION_DIR"] {
-            setManagedEnvironmentValue("CMUX_SHELL_INTEGRATION", "1")
-            setManagedEnvironmentValue("CMUX_SHELL_INTEGRATION_DIR", integrationDir)
-
-            let shell = (env["SHELL"]?.isEmpty == false ? env["SHELL"] : nil)
-                ?? processEnvironment["SHELL"]
-                ?? "/bin/zsh"
-            let shellName = URL(fileURLWithPath: shell).lastPathComponent
-            if shellName == "zsh" {
-                if GhosttyApp.shared.shellIntegrationMode() != "none" {
-                    setManagedEnvironmentValue("CMUX_LOAD_GHOSTTY_ZSH_INTEGRATION", "1")
-                }
-                let candidateZdotdir = (env["ZDOTDIR"]?.isEmpty == false ? env["ZDOTDIR"] : nil)
-                    ?? (processEnvironment["ZDOTDIR"]?.isEmpty == false ? processEnvironment["ZDOTDIR"] : nil)
-
-                if let candidateZdotdir, !candidateZdotdir.isEmpty {
-                    var isGhosttyInjected = false
-                    let ghosttyResources = (env["GHOSTTY_RESOURCES_DIR"]?.isEmpty == false ? env["GHOSTTY_RESOURCES_DIR"] : nil)
-                        ?? (processEnvironment["GHOSTTY_RESOURCES_DIR"]?.isEmpty == false ? processEnvironment["GHOSTTY_RESOURCES_DIR"] : nil)
-                    if let ghosttyResources {
-                        let ghosttyZdotdir = URL(fileURLWithPath: ghosttyResources)
-                            .appendingPathComponent("shell-integration/zsh").path
-                        isGhosttyInjected = (candidateZdotdir == ghosttyZdotdir)
-                    }
-                    if !isGhosttyInjected {
-                        setManagedEnvironmentValue("CMUX_ZSH_ZDOTDIR", candidateZdotdir)
-                    }
-                }
-
-                setManagedEnvironmentValue("ZDOTDIR", integrationDir)
-            } else if shellName == "bash" {
-                if GhosttyApp.shared.shellIntegrationMode() != "none" {
-                    setManagedEnvironmentValue("CMUX_LOAD_GHOSTTY_BASH_INTEGRATION", "1")
-                }
-                setManagedEnvironmentValue("PROMPT_COMMAND", """
-                unset PROMPT_COMMAND; \
-                if [[ "${CMUX_LOAD_GHOSTTY_BASH_INTEGRATION:-0}" == "1" && -n "${GHOSTTY_RESOURCES_DIR:-}" ]]; then \
-                _cmux_ghostty_bash="$GHOSTTY_RESOURCES_DIR/shell-integration/bash/ghostty.bash"; \
-                [[ -r "$_cmux_ghostty_bash" ]] && source "$_cmux_ghostty_bash"; \
-                fi; \
-                if [[ "${CMUX_SHELL_INTEGRATION:-1}" != "0" && -n "${CMUX_SHELL_INTEGRATION_DIR:-}" ]]; then \
-                _cmux_bash_integration="$CMUX_SHELL_INTEGRATION_DIR/cmux-bash-integration.bash"; \
-                [[ -r "$_cmux_bash_integration" ]] && source "$_cmux_bash_integration"; \
-                fi; \
-                unset _cmux_ghostty_bash _cmux_bash_integration; \
-                if declare -F _cmux_prompt_command >/dev/null 2>&1; then _cmux_prompt_command; fi
-                """)
-            }
-        }
-
-#if DEBUG
-        dlog(
-            "terminal.startup.env " +
-            "bundleId=\(bundleIdentifier ?? "nil") " +
-            "resource=\(resourceURL?.path ?? "nil") " +
-            "executable=\(executableURL?.path ?? "nil") " +
-            "socket=\(env["CMUX_SOCKET_PATH"] ?? "nil") " +
-            "cmuxBundle=\(env["CMUX_BUNDLE_ID"] ?? "nil") " +
-            "shellDir=\(env["CMUX_SHELL_INTEGRATION_DIR"] ?? "nil") " +
-            "ghosttyBin=\(env["GHOSTTY_BIN_DIR"] ?? "nil") " +
-            "ghosttyResources=\(env["GHOSTTY_RESOURCES_DIR"] ?? "nil") " +
-            "terminfo=\(env["TERMINFO"] ?? "nil")"
-        )
-#endif
-
-        return Self.mergedStartupEnvironment(
-            base: env,
-            protectedKeys: protectedStartupEnvironmentKeys,
-            additionalEnvironment: additionalEnvironment,
-            initialEnvironmentOverrides: initialEnvironmentOverrides
-        )
-    }
-
-    func setInitialCommand(_ newCommand: String?) {
-        let trimmedCommand = newCommand?.trimmingCharacters(in: .whitespacesAndNewlines)
-        initialCommand = (trimmedCommand?.isEmpty == false) ? trimmedCommand : nil
-#if DEBUG
-        let summary: String
-        if let initialCommand {
-            let prefix = String(initialCommand.prefix(160)).replacingOccurrences(of: "\n", with: "\\n")
-            summary = prefix
-        } else {
-            summary = "nil"
-        }
-        dlog("surface.initialCommand.set surface=\(id.uuidString.prefix(8)) command=\(summary)")
-#endif
     }
 
     func isAttached(to view: GhosttyNSView) -> Bool {
@@ -4216,15 +4023,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         let terminfo = getenv("TERMINFO").flatMap { String(cString: $0) } ?? "(unset)"
         let xdg = getenv("XDG_DATA_DIRS").flatMap { String(cString: $0) } ?? "(unset)"
         let manpath = getenv("MANPATH").flatMap { String(cString: $0) } ?? "(unset)"
-        let initialCommandSummary = initialCommand.map {
-            String($0.prefix(160)).replacingOccurrences(of: "\n", with: "\\n")
-        } ?? "nil"
-        Self.surfaceLog(
-            "createSurface start surface=\(id.uuidString) tab=\(tabId.uuidString) " +
-            "bounds=\(view.bounds) inWindow=\(view.window != nil) " +
-            "resources=\(resourcesDir) terminfo=\(terminfo) xdg=\(xdg) manpath=\(manpath) " +
-            "initialCommand=\(initialCommandSummary)"
-        )
+        Self.surfaceLog("createSurface start surface=\(id.uuidString) tab=\(tabId.uuidString) bounds=\(view.bounds) inWindow=\(view.window != nil) resources=\(resourcesDir) terminfo=\(terminfo) xdg=\(xdg) manpath=\(manpath)")
         #endif
 
         guard let app = GhosttyApp.shared.app else {
@@ -4269,13 +4068,6 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
         var env = baseConfig.environmentVariables
 
-<<<<<<< HEAD
-        env = Self.startupEnvironment(
-            tabId: tabId,
-            surfaceId: id,
-            portOrdinal: portOrdinal,
-            baseEnvironment: env,
-=======
         var protectedStartupEnvironmentKeys: Set<String> = []
         Self.applyManagedTerminalIdentityEnvironment(
             to: &env,
@@ -4392,7 +4184,6 @@ final class TerminalSurface: Identifiable, ObservableObject {
         env = Self.mergedStartupEnvironment(
             base: env,
             protectedKeys: protectedStartupEnvironmentKeys,
->>>>>>> origin/main
             additionalEnvironment: additionalEnvironment,
             initialEnvironmentOverrides: initialEnvironmentOverrides
         )
@@ -5657,27 +5448,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         }
     }
 
-    static func shouldDeferSurfaceResizeForActiveDrag(
-        hasTabDragPasteboardTypes: Bool,
-        eventType: NSEvent.EventType?,
-        windowInLiveResize: Bool
-    ) -> Bool {
+    private static func shouldDeferSurfaceResizeForActiveDrag() -> Bool {
         // The drag pasteboard can retain tab-transfer UTIs briefly after a split command
         // or other layout churn. Only defer terminal resizes while an actual drag event
         // is in flight; otherwise pre-existing panes can stay stuck at their old size.
-<<<<<<< HEAD
-        guard hasTabDragPasteboardTypes else { return false }
-        guard !windowInLiveResize else { return false }
-        return isDragResizeEvent(eventType)
-    }
-
-    private func activeSurfaceResizeDeferralReason() -> String? {
-        return Self.shouldDeferSurfaceResizeForActiveDrag(
-            hasTabDragPasteboardTypes: Self.hasTabDragPasteboardTypes(),
-            eventType: NSApp.currentEvent?.type,
-            windowInLiveResize: window?.inLiveResize == true
-        ) ? "tabDrag" : nil
-=======
         // Interactive geometry resize already has an explicit fast path for sidebar and
         // split-divider drags. Do not let stale drag-pasteboard state suppress those updates.
         if TerminalWindowPortalRegistry.isInteractiveGeometryResizeActive {
@@ -5692,7 +5466,6 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             return nil
         }
         return Self.shouldDeferSurfaceResizeForActiveDrag() ? "tabDrag" : nil
->>>>>>> origin/main
     }
 
     private func scheduleDeferredSurfaceSizeRetryIfNeeded() {
@@ -8787,27 +8560,6 @@ final class GhosttySurfaceScrollView: NSView {
     private(set) var searchFocusTarget: SearchFocusTarget = .searchField
 
 
-    static func coreSurfaceTargetSize(
-        hostedBounds: CGSize,
-        scrollBounds: CGSize,
-        contentSize: CGSize
-    ) -> CGSize {
-        let liveHostedWidth = max(0, hostedBounds.width)
-        let liveHostedHeight = max(0, hostedBounds.height)
-        if liveHostedWidth > 0, liveHostedHeight > 0 {
-            return CGSize(width: liveHostedWidth, height: liveHostedHeight)
-        }
-        let liveWidth = max(0, scrollBounds.width)
-        let liveHeight = max(0, scrollBounds.height)
-        if liveWidth > 0, liveHeight > 0 {
-            return CGSize(width: liveWidth, height: liveHeight)
-        }
-        return CGSize(
-            width: max(0, contentSize.width),
-            height: max(0, contentSize.height)
-        )
-    }
-
 #if DEBUG
     private var lastDropZoneOverlayLogSignature: String?
     private var lastDragGeometryLogSignature: String?
@@ -9359,6 +9111,7 @@ final class GhosttySurfaceScrollView: NSView {
     private func synchronizeGeometryAndContent() -> Bool {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
 
         let previousSurfaceSize = surfaceView.frame.size
         _ = setFrameIfNeeded(backgroundView, to: bounds)
@@ -9408,16 +9161,7 @@ final class GhosttySurfaceScrollView: NSView {
         synchronizeScrollView()
         synchronizeSurfaceView()
         let didCoreSurfaceChange = synchronizeCoreSurface()
-        let didGeometryChange = !sizeApproximatelyEqual(previousSurfaceSize, targetSize)
-        if didCoreSurfaceChange || didGeometryChange {
-            CATransaction.setCompletionBlock { [weak self] in
-                self?.refreshSurfaceNow(reason: "portal.synchronizeGeometryAndContent")
-            }
-        } else {
-            CATransaction.setCompletionBlock(nil)
-        }
-        CATransaction.commit()
-        return didGeometryChange || didCoreSurfaceChange
+        return !sizeApproximatelyEqual(previousSurfaceSize, targetSize) || didCoreSurfaceChange
     }
 
     @discardableResult
@@ -11337,16 +11081,13 @@ final class GhosttySurfaceScrollView: NSView {
     /// regions such as scrollbar space) when telling libghostty the terminal size.
     @discardableResult
     private func synchronizeCoreSurface() -> Bool {
-        // Size the Ghostty core from the live scroll-view bounds rather than the cached
-        // contentSize. During window resize the contentSize can lag one layout turn behind,
-        // which leaves the terminal columns stale even though the hosted view already grew.
-        let targetSize = Self.coreSurfaceTargetSize(
-            hostedBounds: bounds.size,
-            scrollBounds: scrollView.bounds.size,
-            contentSize: scrollView.contentSize
-        )
-        guard targetSize.width > 0, targetSize.height > 0 else { return false }
-        return surfaceView.pushTargetSurfaceSize(targetSize)
+        // Reserving extra overlay-scroller gutter here causes AppKit and libghostty to fight
+        // over terminal columns during split churn. The width can flap by one scrollbar gutter,
+        // which redraws the shell prompt multiple times on Cmd+D. Favor stable columns.
+        let width = max(0, scrollView.contentSize.width)
+        let height = surfaceView.frame.height
+        guard width > 0, height > 0 else { return false }
+        return surfaceView.pushTargetSurfaceSize(CGSize(width: width, height: height))
     }
 
     private func updateNotificationRingPath() {

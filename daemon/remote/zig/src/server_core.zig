@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const json_rpc = @import("json_rpc.zig");
 const session_registry = @import("session_registry.zig");
 const session_service = @import("session_service.zig");
+const workspace_registry = @import("workspace_registry.zig");
 
 const AttachmentResult = struct {
     attachment_id: []const u8,
@@ -31,6 +32,16 @@ pub fn handleLine(service: *session_service.Service, output: anytype, raw_line: 
 }
 
 pub fn dispatch(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const seq_before = service.workspace_reg.change_seq;
+    const result = try dispatchInner(service, req);
+    // If any workspace state changed, notify subscribers
+    if (service.workspace_reg.change_seq != seq_before) {
+        notifyWorkspaceSubscribers(service);
+    }
+    return result;
+}
+
+fn dispatchInner(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
     const alloc = service.alloc;
 
     if (std.mem.eql(u8, req.method, "hello")) {
@@ -70,6 +81,16 @@ pub fn dispatch(service: *session_service.Service, req: *const json_rpc.Request)
     if (std.mem.eql(u8, req.method, "session.status")) return handleSessionStatus(service, req);
     if (std.mem.eql(u8, req.method, "session.list")) return handleSessionList(service, req);
     if (std.mem.eql(u8, req.method, "session.history")) return handleSessionHistory(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.list")) return handleWorkspaceList(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.create")) return handleWorkspaceCreate(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.rename")) return handleWorkspaceRename(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.close")) return handleWorkspaceClose(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.select")) return handleWorkspaceSelect(service, req);
+    if (std.mem.eql(u8, req.method, "pane.split")) return handlePaneSplit(service, req);
+    if (std.mem.eql(u8, req.method, "pane.close")) return handlePaneClose(service, req);
+    if (std.mem.eql(u8, req.method, "pane.focus")) return handlePaneFocus(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.sync")) return handleWorkspaceSync(service, req);
+    if (std.mem.eql(u8, req.method, "workspace.subscribe")) return handleWorkspaceSubscribe(service, req);
     if (std.mem.eql(u8, req.method, "terminal.open")) return handleTerminalOpen(service, req);
     if (std.mem.eql(u8, req.method, "terminal.read")) return handleTerminalRead(service, req);
     if (std.mem.eql(u8, req.method, "terminal.write")) return handleTerminalWrite(service, req);
@@ -490,6 +511,256 @@ fn invalidParams(alloc: std.mem.Allocator, id: ?std.json.Value, message: []const
 
 fn internalError(alloc: std.mem.Allocator, id: ?std.json.Value, err: anyerror) ![]u8 {
     return errorResponse(alloc, id, "internal_error", @errorName(err));
+}
+
+fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const reg = &service.workspace_reg;
+
+    const WorkspaceEntry = struct {
+        id: []const u8,
+        title: []const u8,
+        directory: []const u8,
+        focused_pane_id: ?[]const u8,
+        pane_count: usize,
+        created_at: i64,
+        last_activity_at: i64,
+    };
+
+    var entries: std.ArrayList(WorkspaceEntry) = .empty;
+    defer entries.deinit(alloc);
+
+    for (reg.order.items) |ws_id| {
+        const ws = reg.workspaces.get(ws_id) orelse continue;
+        const leaves = try ws.root_pane.collectLeaves(alloc);
+        defer alloc.free(leaves);
+        try entries.append(alloc, .{
+            .id = ws.id,
+            .title = ws.title,
+            .directory = ws.directory,
+            .focused_pane_id = ws.focused_pane_id,
+            .pane_count = leaves.len,
+            .created_at = ws.created_at,
+            .last_activity_at = ws.last_activity_at,
+        });
+    }
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .workspaces = entries.items,
+            .selected_workspace_id = reg.selected_id,
+            .change_seq = reg.change_seq,
+        },
+    });
+}
+
+fn handleWorkspaceCreate(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req);
+    const title = if (params) |p| getOptionalStringParam(p, "title") else null;
+    const directory = if (params) |p| getOptionalStringParam(p, "directory") else null;
+    const explicit_id = if (params) |p| getOptionalStringParam(p, "id") else null;
+
+    const id = service.workspace_reg.createWithId(explicit_id, title, directory) catch |err| {
+        return try errorResponse(alloc, req.id, "internal_error", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .workspace_id = id,
+            .change_seq = service.workspace_reg.change_seq,
+        },
+    });
+}
+
+fn handleWorkspaceRename(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "workspace.rename requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "workspace.rename requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+    const title = getRequiredStringParam(params, "title", "workspace.rename requires title") catch |err|
+        return paramError(alloc, req.id, err);
+
+    service.workspace_reg.rename(workspace_id, title) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handleWorkspaceClose(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "workspace.close requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "workspace.close requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+
+    service.workspace_reg.close(workspace_id) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handleWorkspaceSelect(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "workspace.select requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "workspace.select requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+
+    service.workspace_reg.select(workspace_id) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handlePaneSplit(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "pane.split requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "pane.split requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+    const pane_id = getRequiredStringParam(params, "pane_id", "pane.split requires pane_id") catch |err|
+        return paramError(alloc, req.id, err);
+    const dir_str = getOptionalStringParam(params, "direction") orelse "horizontal";
+    const direction: workspace_registry.SplitDirection = if (std.mem.eql(u8, dir_str, "vertical")) .vertical else .horizontal;
+    const type_str = getOptionalStringParam(params, "type") orelse "terminal";
+    const pane_type: workspace_registry.PaneType = if (std.mem.eql(u8, type_str, "browser")) .browser else .terminal;
+
+    const new_pane_id = service.workspace_reg.splitPane(workspace_id, pane_id, direction, pane_type) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .pane_id = new_pane_id,
+            .change_seq = service.workspace_reg.change_seq,
+        },
+    });
+}
+
+fn handlePaneClose(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "pane.close requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "pane.close requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+    const pane_id = getRequiredStringParam(params, "pane_id", "pane.close requires pane_id") catch |err|
+        return paramError(alloc, req.id, err);
+
+    service.workspace_reg.closePane(workspace_id, pane_id) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handlePaneFocus(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "pane.focus requires params");
+    const workspace_id = getRequiredStringParam(params, "workspace_id", "pane.focus requires workspace_id") catch |err|
+        return paramError(alloc, req.id, err);
+    const pane_id = getRequiredStringParam(params, "pane_id", "pane.focus requires pane_id") catch |err|
+        return paramError(alloc, req.id, err);
+
+    service.workspace_reg.focusPane(workspace_id, pane_id) catch |err| {
+        return try errorResponse(alloc, req.id, "not_found", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handleWorkspaceSync(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const alloc = service.alloc;
+    const params = getParamsObject(req) orelse
+        return invalidParams(alloc, req.id, "workspace.sync requires params");
+
+    const selected_id = getOptionalStringParam(params, "selected_workspace_id");
+
+    // Parse workspaces array from the JSON Value
+    const ws_value = params.get("workspaces") orelse
+        return invalidParams(alloc, req.id, "workspace.sync requires workspaces array");
+
+    if (ws_value != .array) return invalidParams(alloc, req.id, "workspaces must be an array");
+    const ws_array = ws_value.array.items;
+
+    var sync_workspaces: std.ArrayList(workspace_registry.Registry.SyncWorkspace) = .empty;
+    defer sync_workspaces.deinit(alloc);
+
+    for (ws_array) |item| {
+        if (item != .object) continue;
+        const obj = item.object;
+        const id = if (obj.get("id")) |v| (if (v == .string) v.string else null) else null;
+        const title = if (obj.get("title")) |v| (if (v == .string) v.string else null) else null;
+        if (id == null or title == null) continue;
+
+        try sync_workspaces.append(alloc, .{
+            .id = id.?,
+            .title = title.?,
+            .directory = if (obj.get("directory")) |v| (if (v == .string) v.string else "") else "",
+            .preview = if (obj.get("preview")) |v| (if (v == .string) v.string else "") else "",
+            .phase = if (obj.get("phase")) |v| (if (v == .string) v.string else "idle") else "idle",
+            .color = if (obj.get("color")) |v| (if (v == .string) v.string else "") else "",
+        });
+    }
+
+    service.workspace_reg.syncAll(sync_workspaces.items, selected_id) catch |err| {
+        return try errorResponse(alloc, req.id, "internal_error", @errorName(err));
+    };
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .change_seq = service.workspace_reg.change_seq },
+    });
+}
+
+fn handleWorkspaceSubscribe(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    // Note: actual subscription registration happens in serve_ws.zig's handleClient.
+    // This handler just returns the current state as the initial snapshot.
+    return handleWorkspaceList(service, req);
+}
+
+/// Notify all workspace subscribers that state has changed.
+/// Called after any workspace/pane mutation.
+fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
+    const alloc = service.alloc;
+    const event = json_rpc.encodeResponse(alloc, .{
+        .event = "workspace.changed",
+        .change_seq = service.workspace_reg.change_seq,
+    }) catch return;
+    defer alloc.free(event);
+    service.subscriptions.notifyAll(event);
 }
 
 fn errorResponse(alloc: std.mem.Allocator, id: ?std.json.Value, code: []const u8, message: []const u8) ![]u8 {

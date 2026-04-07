@@ -128,6 +128,147 @@ final class AnchormuxLiveLatencyTests: XCTestCase {
         return lastText
     }
 
+    /// Benchmark keypress-to-render round-trip latency.
+    /// Uses `stty raw -echo; exec cat` so the daemon echoes each byte immediately.
+    /// Measures: simulateTextInput → transport send → daemon echo → processOutput → render.
+    func testKeypressLatency() async throws {
+        guard let config = LiveAnchormuxConfig.resolveForLiveTest() else {
+            throw XCTSkip("Live Anchormux env not configured")
+        }
+
+        let (surfaceView, delegate) = try await MainActor.run {
+            let runtime = try GhosttyRuntime.shared()
+            let delegate = AnchormuxLatencySurfaceDelegate()
+            let surfaceView = GhosttySurfaceView(runtime: runtime, delegate: delegate)
+            surfaceView.frame = CGRect(x: 0, y: 0, width: 640, height: 420)
+            surfaceView.layoutIfNeeded()
+            return (surfaceView, delegate)
+        }
+        let initialSize = try await MainActor.run { try XCTUnwrap(delegate.lastSize) }
+
+        let transport = try await LatencyLiveSupport.connectClient(host: config.host, port: config.port)
+        let client = TerminalRemoteDaemonClient(transport: transport)
+        _ = try await client.sendHello()
+
+        let sessionTransport = TerminalRemoteDaemonSessionTransport(
+            client: client,
+            command: "stty raw -echo -onlcr; exec cat",
+            readTimeoutMilliseconds: 50
+        )
+
+        await MainActor.run {
+            delegate.onInput = { data in
+                Task { try await sessionTransport.send(data) }
+            }
+        }
+
+        let connected = expectation(description: "connected")
+        sessionTransport.eventHandler = { event in
+            switch event {
+            case .connected: connected.fulfill()
+            case .output(let data):
+                Task { @MainActor in surfaceView.processOutput(data) }
+            default: break
+            }
+        }
+
+        try await withTimeout("connect", seconds: 5) {
+            try await sessionTransport.connect(initialSize: initialSize)
+        }
+        await fulfillment(of: [connected], timeout: 5.0)
+        try await Task.sleep(for: .milliseconds(500))
+
+        let iterations = 20
+        var latencies: [Double] = []
+
+        for (i, ch) in "abcdefghijklmnopqrst".prefix(iterations).enumerated() {
+            let needle = String(ch)
+            let start = CACurrentMediaTime()
+
+            await MainActor.run { surfaceView.simulateTextInputForTesting(needle) }
+
+            let deadline = Date().addingTimeInterval(5.0)
+            var found = false
+            while Date() < deadline {
+                let text = await MainActor.run { surfaceView.renderedTextForTesting() ?? "" }
+                if text.contains(needle) {
+                    latencies.append((CACurrentMediaTime() - start) * 1000.0)
+                    found = true
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            if !found { NSLog("⚠️ Keypress %d ('%@') timed out", i, needle) }
+        }
+
+        await sessionTransport.disconnect()
+        await MainActor.run { surfaceView.disposeSurface() }
+
+        guard !latencies.isEmpty else { XCTFail("No measurements"); return }
+        let sorted = latencies.sorted()
+        let avg = latencies.reduce(0, +) / Double(latencies.count)
+        let p50 = sorted[sorted.count / 2]
+        let p95 = sorted[Int(Double(sorted.count) * 0.95)]
+        let min = sorted.first!, max = sorted.last!
+
+        NSLog("📊 Keypress Round-Trip Latency (%d samples):", latencies.count)
+        NSLog("📊   avg=%.1fms  p50=%.1fms  p95=%.1fms  min=%.1fms  max=%.1fms", avg, p50, p95, min, max)
+        XCTAssertLessThan(p50, 200, "Median keypress latency \(p50)ms exceeds 200ms")
+    }
+
+    /// Benchmark local processOutput → render latency (no network).
+    /// Measures just the Ghostty terminal processing and Metal rendering pipeline.
+    func testLocalProcessOutputLatency() async throws {
+        let (surfaceView, _) = try await MainActor.run {
+            let runtime = try GhosttyRuntime.shared()
+            let delegate = AnchormuxLatencySurfaceDelegate()
+            let surfaceView = GhosttySurfaceView(runtime: runtime, delegate: delegate)
+            surfaceView.frame = CGRect(x: 0, y: 0, width: 640, height: 420)
+            surfaceView.layoutIfNeeded()
+            return (surfaceView, delegate)
+        }
+
+        // Warm up the surface
+        try await Task.sleep(for: .milliseconds(200))
+
+        let iterations = 50
+        var latencies: [Double] = []
+
+        for i in 0..<iterations {
+            let marker = "M\(i)X"
+            let output = Data("\r\n\(marker)\r\n".utf8)
+            let start = CACurrentMediaTime()
+
+            await MainActor.run { surfaceView.processOutput(output) }
+
+            let deadline = Date().addingTimeInterval(2.0)
+            var found = false
+            while Date() < deadline {
+                let text = await MainActor.run { surfaceView.renderedTextForTesting() ?? "" }
+                if text.contains(marker) {
+                    latencies.append((CACurrentMediaTime() - start) * 1000.0)
+                    found = true
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            if !found { NSLog("⚠️ processOutput %d timed out", i) }
+        }
+
+        await MainActor.run { surfaceView.disposeSurface() }
+
+        guard !latencies.isEmpty else { XCTFail("No measurements"); return }
+        let sorted = latencies.sorted()
+        let avg = latencies.reduce(0, +) / Double(latencies.count)
+        let p50 = sorted[sorted.count / 2]
+        let p95 = sorted[Int(Double(sorted.count) * 0.95)]
+        let min = sorted.first!, max = sorted.last!
+
+        NSLog("📊 Local processOutput Latency (%d samples):", latencies.count)
+        NSLog("📊   avg=%.1fms  p50=%.1fms  p95=%.1fms  min=%.1fms  max=%.1fms", avg, p50, p95, min, max)
+        XCTAssertLessThan(p50, 50, "Median processOutput latency \(p50)ms exceeds 50ms")
+    }
+
     private func withTimeout<T: Sendable>(
         _ name: String,
         seconds: TimeInterval,

@@ -1,5 +1,18 @@
 import Foundation
 
+struct MobileWorkspaceHeartbeatRow: Equatable, Sendable {
+    let workspaceID: String
+    let taskID: String?
+    let taskRunID: String?
+    let title: String
+    let preview: String?
+    let phase: String
+    let tmuxSessionName: String
+    let lastActivityAt: Int
+    let latestEventSeq: Int
+    let lastEventAt: Int?
+}
+
 @MainActor
 final class WorkspaceSnapshotBuilder {
     private struct CachedSnapshot {

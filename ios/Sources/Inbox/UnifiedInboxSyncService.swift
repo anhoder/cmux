@@ -54,6 +54,15 @@ final class UnifiedInboxSyncService: UnifiedInboxWorkspaceSyncing {
                 self?.handleLiveWorkspaceItems(items)
             }
             .store(in: &cancellables)
+
+        // If no live snapshot is accepted within 5 seconds, force-accept
+        // the next one (even if empty) to clear stale cached data.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, !self.hasAcceptedLiveSnapshot else { return }
+            self.hasAcceptedLiveSnapshot = true
+            self.subject.send([])
+            try? self.inboxCacheRepository?.save([])
+        }
     }
 
     private func handleLiveWorkspaceItems(_ items: [UnifiedInboxItem]) {

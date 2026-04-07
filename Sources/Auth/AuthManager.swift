@@ -119,8 +119,119 @@ final class AuthManager: ObservableObject {
         }
     }
 
-    func beginSignInInBrowser() {
-        urlOpener(AuthEnvironment.signInURL())
+    private var loginPollTask: Task<Void, Never>?
+
+    func beginSignIn() {
+        loginPollTask?.cancel()
+        isLoading = true
+
+        loginPollTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let refreshToken = try await Self.runCLIAuthFlow(urlOpener: self.urlOpener)
+                NSLog("auth.login: got refresh token (%d chars)", refreshToken.count)
+                await self.tokenStore.setTokens(accessToken: nil, refreshToken: refreshToken)
+                NSLog("auth.login: tokens stored, refreshing session...")
+                try await self.refreshSession()
+                NSLog("auth.login: session refreshed, isAuthenticated=%d user=%@", self.isAuthenticated ? 1 : 0, self.currentUser?.primaryEmail ?? "nil")
+                self.didCompleteBrowserSignIn = true
+            } catch is CancellationError {
+                // cancelled
+            } catch {
+                NSLog("auth.login failed: %@", "\(error)")
+            }
+            self.isLoading = false
+        }
+    }
+
+    /// Shared CLI auth flow: initiate session, open browser, poll for token.
+    /// Used by both the Settings sign-in button and `cmux login`.
+    static func runCLIAuthFlow(
+        urlOpener: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
+    ) async throws -> String {
+        let baseURL = AuthEnvironment.stackBaseURL.absoluteString
+        let projectID = AuthEnvironment.stackProjectID
+        let clientKey = AuthEnvironment.stackPublishableClientKey
+        let handlerOrigin = AuthEnvironment.signInWebsiteOrigin.absoluteString
+
+        // Step 1: Initiate CLI auth session
+        let initBody = try JSONSerialization.data(withJSONObject: [
+            "expires_in_millis": 7_200_000,
+        ])
+        let initJSON = try await stackAPIRequest(
+            url: "\(baseURL)/api/v1/auth/cli",
+            body: initBody,
+            projectID: projectID,
+            clientKey: clientKey
+        )
+        guard let pollingCode = initJSON["polling_code"] as? String,
+              let loginCode = initJSON["login_code"] as? String else {
+            throw AuthManagerError.invalidCallback
+        }
+
+        // Step 2: Open system browser to confirm page
+        let confirmURL = URL(string: "\(handlerOrigin)/handler/cli-auth-confirm?login_code=\(loginCode)")!
+        await MainActor.run { urlOpener(confirmURL) }
+
+        // Step 3: Poll for token
+        let pollBody = try JSONSerialization.data(withJSONObject: [
+            "polling_code": pollingCode,
+        ])
+        let deadline = Date().addingTimeInterval(300) // 5 minutes
+        while Date() < deadline {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+
+            guard let pollJSON = try? await stackAPIRequest(
+                url: "\(baseURL)/api/v1/auth/cli/poll",
+                body: pollBody,
+                projectID: projectID,
+                clientKey: clientKey
+            ),
+            let status = pollJSON["status"] as? String else {
+                continue
+            }
+
+            switch status {
+            case "success":
+                guard let token = pollJSON["refresh_token"] as? String else {
+                    throw AuthManagerError.missingAccessToken
+                }
+                return token
+            case "expired", "used":
+                throw AuthManagerError.invalidCallback
+            default:
+                continue
+            }
+        }
+        throw AuthManagerError.invalidCallback
+    }
+
+    private static func stackAPIRequest(
+        url: String,
+        body: Data,
+        projectID: String,
+        clientKey: String,
+        extraHeaders: [String: String] = [:],
+        method: String = "POST"
+    ) async throws -> [String: Any] {
+        var request = URLRequest(url: URL(string: url)!)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(projectID, forHTTPHeaderField: "x-stack-project-id")
+        request.setValue(clientKey, forHTTPHeaderField: "x-stack-publishable-client-key")
+        request.setValue("client", forHTTPHeaderField: "x-stack-access-type")
+        for (key, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if method != "GET" && !body.isEmpty {
+            request.httpBody = body
+        }
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AuthManagerError.invalidCallback
+        }
+        return json
     }
 
     func handleCallbackURL(_ url: URL) async throws {
@@ -139,27 +250,191 @@ final class AuthManager: ObservableObject {
         didCompleteBrowserSignIn = true
     }
 
+    func seedTokensFromCLI(refreshToken: String, accessToken: String?) async {
+        authLog("seedTokensFromCLI: refresh=\(refreshToken.prefix(10))... access=\(accessToken != nil ? "\(accessToken!.prefix(10))..." : "nil")")
+
+        // If no access token provided, refresh it from Stack Auth first
+        var resolvedAccess = accessToken
+        if resolvedAccess == nil || resolvedAccess?.isEmpty == true {
+            do {
+                let json = try await Self.stackAPIRequest(
+                    url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/auth/sessions/current/refresh",
+                    body: Data("{}".utf8),
+                    projectID: AuthEnvironment.stackProjectID,
+                    clientKey: AuthEnvironment.stackPublishableClientKey,
+                    extraHeaders: ["x-stack-refresh-token": refreshToken]
+                )
+                resolvedAccess = json["access_token"] as? String
+                authLog("seedTokensFromCLI: refreshed access token OK")
+            } catch {
+                authLog("seedTokensFromCLI: failed to refresh access token: \(error)")
+            }
+        }
+
+        await tokenStore.setTokens(accessToken: resolvedAccess, refreshToken: refreshToken)
+        do {
+            try await refreshSession()
+            authLog("seedTokensFromCLI: success user=\(currentUser?.primaryEmail ?? "nil")")
+        } catch {
+            authLog("seedTokensFromCLI: refreshSession failed: \(error)")
+        }
+    }
+
+    struct SignInResult {
+        let accessToken: String
+        let refreshToken: String
+        let email: String?
+        let displayName: String?
+        let userId: String
+        let selectedTeamId: String?
+        let teams: [AuthTeamSummary]
+    }
+
+    nonisolated static func signInWithCredentialDirectly(email: String, password: String) async throws -> SignInResult {
+        authLog("signInDirectly: email=\(email)")
+        let signInJSON = try await stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/auth/password/sign-in",
+            body: try JSONSerialization.data(withJSONObject: ["email": email, "password": password]),
+            projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey
+        )
+        guard let accessToken = signInJSON["access_token"] as? String,
+              let refreshToken = signInJSON["refresh_token"] as? String else {
+            throw AuthManagerError.invalidCallback
+        }
+        let userJSON = try await stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/users/me",
+            body: Data(), projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey,
+            extraHeaders: ["x-stack-access-token": accessToken], method: "GET"
+        )
+        let teamsJSON = try await stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/teams?user_id=me",
+            body: Data(), projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey,
+            extraHeaders: ["x-stack-access-token": accessToken], method: "GET"
+        )
+        var teams: [AuthTeamSummary] = []
+        if let items = teamsJSON["items"] as? [[String: Any]] {
+            for item in items { if let id = item["id"] as? String {
+                teams.append(AuthTeamSummary(id: id, displayName: item["display_name"] as? String ?? ""))
+            }}
+        }
+        let selectedTeamFromAPI = userJSON["selected_team_id"] as? String
+        authLog("signInDirectly: success user=\(userJSON["primary_email"] as? String ?? "nil") teams=\(teams.count) selectedTeam=\(selectedTeamFromAPI ?? "nil")")
+        return SignInResult(accessToken: accessToken, refreshToken: refreshToken,
+                           email: userJSON["primary_email"] as? String,
+                           displayName: userJSON["display_name"] as? String,
+                           userId: userJSON["id"] as? String ?? "",
+                           selectedTeamId: selectedTeamFromAPI,
+                           teams: teams)
+    }
+
+    func applySignInResult(_ result: SignInResult) {
+        // Cache access token for fast synchronous reads
+        lastKnownAccessToken = result.accessToken
+        // Store tokens in keychain (fire-and-forget)
+        let store = tokenStore
+        Task.detached {
+            await store.setTokens(accessToken: result.accessToken, refreshToken: result.refreshToken)
+        }
+        // Update published state synchronously on main actor
+        let user = CMUXAuthUser(id: result.userId, primaryEmail: result.email, displayName: result.displayName)
+        currentUser = user
+        settingsStore.saveCachedUser(user)
+        availableTeams = result.teams
+        isAuthenticated = true
+        selectedTeamID = Self.resolveTeamID(selectedTeamID: selectedTeamID, teams: result.teams)
+        didCompleteBrowserSignIn = true
+        authLog("applySignInResult: user=\(result.email ?? "nil") teams=\(result.teams.count) teamID=\(selectedTeamID ?? "nil")")
+    }
+
+    func signInWithCredential(email: String, password: String) async throws {
+        authLog("signInWithCredential: email=\(email)")
+        isLoading = true
+        defer { isLoading = false }
+
+        // Sign in directly via the Stack Auth API and store tokens ourselves,
+        // bypassing the StackClientApp which has token refresh issues.
+        let json = try await Self.stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/auth/password/sign-in",
+            body: try JSONSerialization.data(withJSONObject: ["email": email, "password": password]),
+            projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey
+        )
+        guard let accessToken = json["access_token"] as? String,
+              let refreshToken = json["refresh_token"] as? String else {
+            throw AuthManagerError.invalidCallback
+        }
+        await tokenStore.setTokens(accessToken: accessToken, refreshToken: refreshToken)
+
+        // Fetch user info directly with the access token
+        let userJSON = try await Self.stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/users/me",
+            body: Data(),
+            projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey,
+            extraHeaders: ["x-stack-access-token": accessToken],
+            method: "GET"
+        )
+        let user = CMUXAuthUser(
+            id: userJSON["id"] as? String ?? "",
+            primaryEmail: userJSON["primary_email"] as? String,
+            displayName: userJSON["display_name"] as? String
+        )
+
+        // Fetch teams
+        let teamsJSON = try await Self.stackAPIRequest(
+            url: "\(AuthEnvironment.stackBaseURL.absoluteString)/api/v1/teams?user_id=me",
+            body: Data(),
+            projectID: AuthEnvironment.stackProjectID,
+            clientKey: AuthEnvironment.stackPublishableClientKey,
+            extraHeaders: ["x-stack-access-token": accessToken],
+            method: "GET"
+        )
+        var teams: [AuthTeamSummary] = []
+        if let items = teamsJSON["items"] as? [[String: Any]] {
+            for item in items {
+                if let id = item["id"] as? String {
+                    teams.append(AuthTeamSummary(
+                        id: id,
+                        displayName: item["display_name"] as? String ?? ""
+                    ))
+                }
+            }
+        }
+
+        currentUser = user
+        settingsStore.saveCachedUser(user)
+        availableTeams = teams
+        isAuthenticated = true
+        selectedTeamID = Self.resolveTeamID(selectedTeamID: selectedTeamID, teams: teams)
+        authLog("signInWithCredential: success user=\(user.primaryEmail ?? "nil") teams=\(teams.count) teamID=\(selectedTeamID ?? "nil")")
+        didCompleteBrowserSignIn = true
+    }
+
     func signOut() async {
         try? await client.signOut()
         await tokenStore.clear()
         clearSessionState(clearSelectedTeam: true)
     }
 
+    /// Cached access token for fast synchronous reads (no actor hops).
+    private var lastKnownAccessToken: String?
+
     func getAccessToken() async throws -> String {
-        if let accessToken = try await client.currentAccessToken(),
-           !accessToken.isEmpty {
-            return accessToken
-        }
-        if let cached = await tokenStore.currentAccessToken(),
-           !cached.isEmpty {
+        if let cached = lastKnownAccessToken, !cached.isEmpty {
             return cached
         }
         throw AuthManagerError.missingAccessToken
     }
 
     private func restoreStoredSessionIfNeeded() async {
-        let hasAccessToken = await tokenStore.currentAccessToken() != nil
-        let hasRefreshToken = await tokenStore.currentRefreshToken() != nil
+        let accessToken = await tokenStore.currentAccessToken()
+        let refreshToken = await tokenStore.currentRefreshToken()
+        let hasAccessToken = accessToken != nil && !(accessToken?.isEmpty ?? true)
+        let hasRefreshToken = refreshToken != nil && !(refreshToken?.isEmpty ?? true)
+        authLog("restore: hasAccess=\(hasAccessToken) hasRefresh=\(hasRefreshToken)")
         let hasTokens = hasAccessToken || hasRefreshToken
         guard hasTokens else {
             clearSessionState(clearSelectedTeam: true)
@@ -172,17 +447,48 @@ final class AuthManager: ObservableObject {
 
         do {
             try await refreshSession()
+            authLog("restore: success user=\(currentUser?.primaryEmail ?? "nil") auth=\(isAuthenticated)")
         } catch {
+            authLog("restore: failed error=\(error)")
             if currentUser == nil {
                 isAuthenticated = false
             }
         }
     }
 
+    nonisolated static func authLog(_ message: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] auth: \(message)\n"
+        let path = "/tmp/cmux-auth-debug.log"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+        }
+    }
+
+    private func authLog(_ message: String) {
+        Self.authLog(message)
+    }
+
     private func refreshSession() async throws {
-        let user = try await client.currentUser()
-        let teams = try await client.listTeams()
+        let user: CMUXAuthUser?
+        do {
+            user = try await client.currentUser()
+        } catch {
+            authLog("refreshSession: getUser failed: \(error)")
+            throw error
+        }
+        let teams: [AuthTeamSummary]
+        do {
+            teams = try await client.listTeams()
+        } catch {
+            authLog("refreshSession: listTeams failed: \(error)")
+            throw error
+        }
         let hasRefreshToken = await tokenStore.currentRefreshToken() != nil
+        authLog("refreshSession: user=\(user?.primaryEmail ?? "nil") teams=\(teams.count) hasRefresh=\(hasRefreshToken)")
         currentUser = user
         settingsStore.saveCachedUser(user)
         availableTeams = teams
@@ -223,7 +529,17 @@ final class AuthManager: ObservableObject {
             )
             return
         }
-        NSWorkspace.shared.open(url)
+        // Open in the system's default web browser, not cmux's built-in browser.
+        // NSWorkspace.shared.open(url) would open in cmux if it registered as HTTP handler.
+        let config = NSWorkspace.OpenConfiguration()
+        config.createsNewApplicationInstance = false
+        if let safariURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Safari") {
+            NSWorkspace.shared.open([url], withApplicationAt: safariURL, configuration: config)
+        } else if let chromeURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
+            NSWorkspace.shared.open([url], withApplicationAt: chromeURL, configuration: config)
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private static func resolveTeamID(
@@ -238,36 +554,44 @@ final class AuthManager: ObservableObject {
     }
 }
 
-extension AuthManager: MachineSessionAuthProvider {}
 
 private actor KeychainStackTokenStore: StackAuthTokenStoreProtocol {
     private static let accessTokenAccount = "cmux-auth-access-token"
     private static let refreshTokenAccount = "cmux-auth-refresh-token"
+    // Each tagged build uses its own keychain service (per bundle ID) to avoid cross-build keychain prompts.
     private let service = AuthKeychainServiceName.make()
 
+    // In-memory cache to avoid keychain prompts in environments where
+    // the login keychain is locked (SSH, background processes).
+    private var cachedAccessToken: String?
+    private var cachedRefreshToken: String?
+
     func getStoredAccessToken() async -> String? {
-        keychainValue(account: Self.accessTokenAccount)
+        cachedAccessToken ?? keychainValueSafe(account: Self.accessTokenAccount)
     }
 
     func getStoredRefreshToken() async -> String? {
-        keychainValue(account: Self.refreshTokenAccount)
+        cachedRefreshToken ?? keychainValueSafe(account: Self.refreshTokenAccount)
     }
 
     func setTokens(accessToken: String?, refreshToken: String?) async {
-        if let accessToken {
-            setKeychainValue(accessToken, account: Self.accessTokenAccount)
-        } else {
-            deleteKeychainValue(account: Self.accessTokenAccount)
+        AuthManager.authLog("setTokens: access=\(accessToken != nil ? "\(accessToken!.prefix(10))..." : "nil") refresh=\(refreshToken != nil ? "\(refreshToken!.prefix(10))..." : "nil")")
+        // Always update in-memory cache (instant, no prompt)
+        cachedAccessToken = (accessToken?.isEmpty == false) ? accessToken : nil
+        cachedRefreshToken = (refreshToken?.isEmpty == false) ? refreshToken : nil
+        // Best-effort keychain persistence (may block if keychain is locked)
+        if let accessToken, !accessToken.isEmpty {
+            setKeychainValueSafe(accessToken, account: Self.accessTokenAccount)
         }
-
-        if let refreshToken {
-            setKeychainValue(refreshToken, account: Self.refreshTokenAccount)
-        } else {
-            deleteKeychainValue(account: Self.refreshTokenAccount)
+        if let refreshToken, !refreshToken.isEmpty {
+            setKeychainValueSafe(refreshToken, account: Self.refreshTokenAccount)
         }
     }
 
     func clearTokens() async {
+        AuthManager.authLog("clearTokens called")
+        cachedAccessToken = nil
+        cachedRefreshToken = nil
         deleteKeychainValue(account: Self.accessTokenAccount)
         deleteKeychainValue(account: Self.refreshTokenAccount)
     }
@@ -277,10 +601,58 @@ private actor KeychainStackTokenStore: StackAuthTokenStoreProtocol {
         newRefreshToken: String?,
         newAccessToken: String?
     ) async {
-        guard keychainValue(account: Self.refreshTokenAccount) == compareRefreshToken else {
+        let current = keychainValue(account: Self.refreshTokenAccount)
+        let matches = current == compareRefreshToken
+        AuthManager.authLog("compareAndSet: matches=\(matches) newRefresh=\(newRefreshToken != nil ? "\(newRefreshToken!.prefix(10))..." : "nil") newAccess=\(newAccessToken != nil ? "\(newAccessToken!.prefix(10))..." : "nil")")
+        guard matches else { return }
+        // Don't let the StackClientApp's error cleanup path delete both tokens.
+        // If both new values are nil, it means the refresh failed and the SDK wants
+        // to clear the session. Preserve the refresh token so the user stays signed in.
+        if newRefreshToken == nil && newAccessToken == nil {
+            AuthManager.authLog("compareAndSet: blocked double-nil clear (preserving session)")
             return
         }
         await setTokens(accessToken: newAccessToken, refreshToken: newRefreshToken)
+    }
+
+    /// Read from keychain without blocking on a password prompt.
+    /// Uses kSecUseAuthenticationUI = kSecUseAuthenticationUISkip to avoid UI prompts.
+    private func keychainValueSafe(account: String) -> String? {
+#if canImport(Security)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+#else
+        return nil
+#endif
+    }
+
+    /// Write to keychain without blocking. If the keychain is locked, silently fails.
+    private func setKeychainValueSafe(_ value: String, account: String) {
+#if canImport(Security)
+        guard let data = value.data(using: .utf8) else { return }
+        // Try update first
+        let lookup: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let status = SecItemUpdate(lookup as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var insert = lookup
+            insert[kSecValueData as String] = data
+            SecItemAdd(insert as CFDictionary, nil)
+        }
+#endif
     }
 
     private func keychainValue(account: String) -> String? {
@@ -318,8 +690,12 @@ private actor KeychainStackTokenStore: StackAuthTokenStoreProtocol {
         if status == errSecItemNotFound {
             var insert = lookup
             insert[kSecValueData as String] = data
-            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            SecItemAdd(insert as CFDictionary, nil)
+            let addStatus = SecItemAdd(insert as CFDictionary, nil)
+            if addStatus != errSecSuccess {
+                AuthManager.authLog("keychain ADD failed: \(addStatus) account=\(account)")
+            }
+        } else if status != errSecSuccess {
+            AuthManager.authLog("keychain UPDATE failed: \(status) account=\(account)")
         }
 #endif
     }
@@ -349,6 +725,10 @@ actor LiveAuthClient: AuthClientProtocol {
             tokenStore: .custom(tokenStore),
             noAutomaticPrefetch: true
         )
+    }
+
+    func signInWithCredential(email: String, password: String) async throws {
+        try await stack.signInWithCredential(email: email, password: password)
     }
 
     func currentAccessToken() async throws -> String? {

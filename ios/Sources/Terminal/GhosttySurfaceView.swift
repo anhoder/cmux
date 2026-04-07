@@ -573,7 +573,7 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
         #endif
         #if DEBUG
         // Detect OSC 11 query (\x1b]11;?\x07 or \x1b]11;?\x1b\\) from remote TUI (e.g. Codex).
-        if data.count < 500 {
+        if data.count >= 4, data.count < 500 {
             let hasOSC11Query = data.withUnsafeBytes { buffer -> Bool in
                 guard let base = buffer.baseAddress else { return false }
                 let bytes = base.assumingMemoryBound(to: UInt8.self)
@@ -774,10 +774,9 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
 
     /// Reset cursor to visible and restart blink cycle (call on user input).
     private func resetCursorBlink() {
-        guard let surface else { return }
+        guard surface != nil else { return }
         cursorBlinkVisible = true
         lastBlinkToggle = CACurrentMediaTime()
-        ghostty_surface_set_cursor_blink_visible(surface, true)
     }
 
     @objc func handleDisplayLinkFire() {
@@ -787,12 +786,11 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
         if now - lastBlinkToggle >= 0.5 {
             cursorBlinkVisible.toggle()
             lastBlinkToggle = now
-            ghostty_surface_set_cursor_blink_visible(surface, cursorBlinkVisible)
             blinkChanged = true
         }
         if needsDraw || blinkChanged {
             needsDraw = false
-            ghostty_surface_update_and_draw(surface)
+            ghostty_surface_draw_now(surface)
         }
     }
 
@@ -908,8 +906,13 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
         surfaceConfig.font_size = fontSize
         surfaceConfig.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
         surfaceConfig.io_mode = GHOSTTY_SURFACE_IO_MANUAL
-        surfaceConfig.io_write_cb = { userdata, data, len in
-            GhosttySurfaceView.handleWrite(userdata: userdata, data: data, len: len)
+        surfaceConfig.io_write_cb = { userdata, buf, len in
+            guard let userdata, let buf, len > 0 else { return }
+            let data = Data(bytes: buf, count: Int(len))
+            let bridge = Unmanaged<GhosttySurfaceBridge>.fromOpaque(userdata).takeUnretainedValue()
+            DispatchQueue.main.async {
+                bridge.surfaceView?.handleOutboundBytes(data)
+            }
         }
         surfaceConfig.io_write_userdata = bridgePointer
         return ghostty_surface_new(app, &surfaceConfig)

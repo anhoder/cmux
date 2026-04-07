@@ -29,6 +29,7 @@ xcodebuild -scheme cmux -configuration Debug \
 
 copy_local_config_if_present "build/Build/Products/Debug-iphoneos/cmux DEV.app" "$LOCAL_CONFIG_SOURCE"
 rewrite_localhost_for_device "build/Build/Products/Debug-iphoneos/cmux DEV.app/LocalConfig.plist"
+embed_debug_relay_for_device "build/Build/Products/Debug-iphoneos/cmux DEV.app"
 
 echo "📲 Installing..."
 xcrun devicectl device install app --device "$DEVICE_ID" "build/Build/Products/Debug-iphoneos/cmux DEV.app"

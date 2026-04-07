@@ -455,8 +455,24 @@ final class TerminalSidebarStore: ObservableObject {
         )
     }
 
+    nonisolated static func debugLog(_ msg: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+        let path = NSHomeDirectory() + "/Documents/cmux-ios-debug.log"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+        }
+    }
+
     func applyDiscoveredHosts(_ discoveredHosts: [TerminalHost]) {
-        let existingHostsByID = Dictionary(uniqueKeysWithValues: hosts.map { ($0.id, $0) })
+        Self.debugLog("applyDiscoveredHosts: \(discoveredHosts.count) hosts")
+        for h in discoveredHosts {
+            Self.debugLog("  host: \(h.stableID) status=\(String(describing: h.machineStatus)) name=\(h.name)")
+        }
+        let existingHostsByID = Dictionary(hosts.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         var mergedHosts = TerminalServerCatalog.merge(discovered: discoveredHosts, local: hosts)
         let mergedHostIDs = Set(mergedHosts.map(\.id))
         let workspaceHostIDs = Set(workspaces.map(\.hostID))
@@ -528,9 +544,283 @@ final class TerminalSidebarStore: ObservableObject {
         serverDiscovery.hostsPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] hosts in
+                Self.debugLog("observeServerDiscovery: received \(hosts.count) hosts")
                 self?.applyDiscoveredHosts(hosts)
+                // Start persistent workspace subscription for each host
+                for host in hosts where host.wsPort != nil {
+                    self?.startWorkspaceSubscription(for: host)
+                }
             }
             .store(in: &cancellables)
+    }
+
+    /// Active WebSocket subscriptions keyed by host stableID
+    private var activeSubscriptions: Set<String> = []
+
+    /// Start a persistent WebSocket subscription for workspace changes.
+    /// Subscribes once, then listens for push events and re-fetches on each change.
+    private func startWorkspaceSubscription(for host: TerminalHost) {
+        guard let wsPort = host.wsPort else { return }
+        let stableID = host.stableID
+        guard !activeSubscriptions.contains(stableID) else { return }
+        activeSubscriptions.insert(stableID)
+
+        let hostname = host.hostname
+        let secret = host.wsSecret ?? ""
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Self.debugLog("subscription: starting for \(hostname):\(wsPort)")
+
+            while self != nil && self?.activeSubscriptions.contains(stableID) == true {
+                // Connect, subscribe, and listen for events
+                guard let fd = Self.connectWebSocket(hostname: hostname, port: wsPort, secret: secret) else {
+                    Self.debugLog("subscription: connect failed, retry in 5s")
+                    Thread.sleep(forTimeInterval: 5)
+                    continue
+                }
+
+                // Subscribe (also returns initial workspace list)
+                Self.wsSend(fd: fd, data: "{\"id\":1,\"method\":\"workspace.subscribe\"}")
+                if let initialResp = Self.wsRecv(fd: fd) {
+                    self?.handleWorkspaceResponse(initialResp, hostname: hostname, port: wsPort, secret: secret)
+                }
+
+                // Listen for push events
+                while true {
+                    guard let event = Self.wsRecv(fd: fd) else {
+                        Self.debugLog("subscription: connection lost, reconnecting")
+                        break
+                    }
+                    // On any workspace.changed event, re-fetch the full list
+                    if event.contains("workspace.changed") {
+                        Self.debugLog("subscription: workspace.changed event received")
+                        // Re-fetch via the same connection or a new one
+                        Self.wsSend(fd: fd, data: "{\"id\":2,\"method\":\"workspace.list\"}")
+                        if let listResp = Self.wsRecv(fd: fd) {
+                            self?.handleWorkspaceResponse(listResp, hostname: hostname, port: wsPort, secret: secret)
+                        }
+                    }
+                }
+
+                close(fd)
+                Thread.sleep(forTimeInterval: 2) // Brief pause before reconnect
+            }
+
+            Self.debugLog("subscription: stopped for \(hostname):\(wsPort)")
+        }
+    }
+
+    private func handleWorkspaceResponse(_ response: String, hostname: String, port: Int, secret: String) {
+        guard let jsonData = response.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let resultObj = json["result"] as? [String: Any],
+              let workspaces = resultObj["workspaces"] as? [[String: Any]] else {
+            return
+        }
+
+        let stableID = "localhost-\(port)"
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let resolvedHostID = self.hosts.first(where: { $0.stableID == stableID })?.id
+            guard let hostID = resolvedHostID else { return }
+            let host = self.hosts.first(where: { $0.id == hostID }) ?? TerminalHost(
+                stableID: stableID, name: hostname, hostname: hostname,
+                port: 22, username: "cmux", symbolName: "desktopcomputer",
+                palette: .sky, source: .discovered, transportPreference: .remoteDaemon
+            )
+            self.applyRemoteWorkspaces(workspaces, hostID: hostID, host: host)
+        }
+    }
+
+    /// Connect to cmuxd-remote WebSocket and authenticate. Returns fd or nil.
+    private static func connectWebSocket(hostname: String, port: Int, secret: String) -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var sendTimeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, hostname, &addr.sin_addr)
+        let addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let connectResult = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, addrLen)
+            }
+        }
+        guard connectResult == 0 else { close(fd); return nil }
+
+        // WebSocket upgrade
+        let req = "GET / HTTP/1.1\r\nHost: \(hostname):\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        _ = req.data(using: .utf8)?.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &buf, buf.count)
+        guard n > 0, String(bytes: buf[0..<n], encoding: .utf8)?.contains("101") == true else { close(fd); return nil }
+
+        // Auth
+        if !secret.isEmpty {
+            wsSend(fd: fd, data: "{\"secret\":\"\(secret)\"}")
+            guard let authResp = wsRecv(fd: fd), authResp.contains("authenticated") else { close(fd); return nil }
+        } else {
+            wsSend(fd: fd, data: "{\"secret\":\"\"}")
+            _ = wsRecv(fd: fd)
+        }
+
+        return fd
+    }
+
+    /// Fetch workspace list from a discovered host via the cmuxd-remote WebSocket.
+    private func fetchRemoteWorkspaces(from host: TerminalHost) {
+        guard let wsPort = host.wsPort else { return }
+        let hostname = host.hostname
+        let secret = host.wsSecret ?? ""
+        // Use the stableID to find the post-merge host (applyDiscoveredHosts may reassign UUIDs)
+        let stableID = host.stableID
+        let resolvedHostID = hosts.first(where: { $0.stableID == stableID })?.id ?? host.id
+        Self.debugLog("fetchRemoteWorkspaces: \(hostname):\(wsPort) hostID=\(resolvedHostID) secret=\(secret.isEmpty ? "empty" : "\(secret.prefix(8))...")")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let workspaceData = Self.fetchWorkspaceListViaWS(
+                hostname: hostname, port: wsPort, secret: secret
+            )
+            Self.debugLog("fetchRemoteWorkspaces result: \(workspaceData?.count ?? -1) workspaces")
+            guard let workspaceData else { return }
+
+            DispatchQueue.main.async {
+                self?.applyRemoteWorkspaces(workspaceData, hostID: resolvedHostID, host: host)
+            }
+        }
+    }
+
+    private func applyRemoteWorkspaces(_ data: [[String: Any]], hostID: UUID, host: TerminalHost) {
+        let remoteIds = data.compactMap { $0["id"] as? String }
+
+        // Remove stale workspaces for this host
+        let remoteIdSet = Set(remoteIds)
+        workspaces.removeAll { ws in
+            ws.hostID == hostID && ws.remoteWorkspaceID != nil && !remoteIdSet.contains(ws.remoteWorkspaceID!)
+        }
+
+        // Upsert workspaces preserving server order
+        var updatedWorkspaces: [TerminalWorkspace] = []
+        for (index, wsData) in data.enumerated() {
+            guard let remoteId = wsData["id"] as? String else { continue }
+            let title = wsData["title"] as? String ?? "Untitled"
+            let lastActivityMs = wsData["last_activity_at"] as? Int64 ?? Int64(Date().timeIntervalSince1970 * 1000)
+            let lastActivity = Date(timeIntervalSince1970: Double(lastActivityMs) / 1000)
+
+            if let existing = workspaces.first(where: { $0.remoteWorkspaceID == remoteId && $0.hostID == hostID }) {
+                var updated = existing
+                updated.title = title
+                updated.lastActivity = lastActivity
+                updated.phase = .connected
+                updatedWorkspaces.append(updated)
+            } else {
+                var workspace = TerminalWorkspace(
+                    hostID: hostID,
+                    title: title,
+                    tmuxSessionName: "local-\(remoteId)",
+                    remoteWorkspaceID: remoteId
+                )
+                workspace.lastActivity = lastActivity
+                workspace.phase = .connected
+                updatedWorkspaces.append(workspace)
+            }
+        }
+
+        // Replace remote workspaces for this host with the server-ordered list,
+        // preserving any non-remote workspaces
+        let nonRemoteWorkspaces = workspaces.filter { $0.hostID != hostID || $0.remoteWorkspaceID == nil }
+        workspaces = nonRemoteWorkspaces + updatedWorkspaces
+
+        Self.debugLog("applyRemoteWorkspaces: \(data.count) workspaces from host \(host.name)")
+    }
+
+    /// Connect to cmuxd-remote WebSocket and call workspace.list.
+    private static func fetchWorkspaceListViaWS(hostname: String, port: Int, secret: String) -> [[String: Any]]? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var timeout = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(hostname, String(port), &hints, &result) == 0, let addrInfo = result else { return nil }
+        defer { freeaddrinfo(addrInfo) }
+
+        guard Darwin.connect(fd, addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen) == 0 else { return nil }
+
+        // WebSocket upgrade
+        let key = "dGVzdA=="
+        let req = "GET / HTTP/1.1\r\nHost: \(hostname):\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        _ = req.data(using: .utf8)?.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &buf, buf.count)
+        guard n > 0, String(bytes: buf[0..<n], encoding: .utf8)?.contains("101") == true else { return nil }
+
+        // Auth (skip if no secret configured - for local dev)
+        if !secret.isEmpty {
+            wsSend(fd: fd, data: "{\"secret\":\"\(secret)\"}")
+            guard let authResp = wsRecv(fd: fd), authResp.contains("authenticated") else { return nil }
+        } else {
+            // Try without auth - some dev builds allow unauthenticated access
+            wsSend(fd: fd, data: "{\"secret\":\"\"}")
+            let authResp = wsRecv(fd: fd)
+            // Continue regardless of auth result for local dev
+            if authResp?.contains("unauthorized") == true { return nil }
+        }
+
+        // workspace.list
+        wsSend(fd: fd, data: "{\"id\":1,\"method\":\"workspace.list\"}")
+        guard let listResp = wsRecv(fd: fd),
+              let jsonData = listResp.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let resultObj = json["result"] as? [String: Any],
+              let workspaces = resultObj["workspaces"] as? [[String: Any]] else {
+            return nil
+        }
+
+        return workspaces
+    }
+
+    private static func wsSend(fd: Int32, data: String) {
+        guard let payload = data.data(using: .utf8) else { return }
+        var frame = Data()
+        frame.append(0x81)
+        let maskKey = (0..<4).map { _ in UInt8.random(in: 0...255) }
+        frame.append(UInt8(0x80 | min(payload.count, 125)))
+        frame.append(contentsOf: maskKey)
+        for (i, b) in payload.enumerated() { frame.append(b ^ maskKey[i % 4]) }
+        _ = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    }
+
+    private static func wsRecv(fd: Int32) -> String? {
+        var header = [UInt8](repeating: 0, count: 2)
+        guard read(fd, &header, 2) == 2 else { return nil }
+        var length = Int(header[1] & 0x7F)
+        if length == 126 {
+            var ext = [UInt8](repeating: 0, count: 2)
+            guard read(fd, &ext, 2) == 2 else { return nil }
+            length = Int(ext[0]) << 8 | Int(ext[1])
+        }
+        guard length > 0, length < 65536 else { return nil }
+        var payload = [UInt8](repeating: 0, count: length)
+        var total = 0
+        while total < length {
+            let n = read(fd, &payload[total], length - total)
+            if n <= 0 { return nil }
+            total += n
+        }
+        return String(bytes: payload, encoding: .utf8)
     }
 
     private func observeNetworkPath() {
@@ -788,20 +1078,37 @@ final class TerminalSidebarStore: ObservableObject {
 
     private func applyDebugWebSocketConfig(_ host: inout TerminalHost) {
         #if DEBUG
-        if host.wsPort == nil {
-            host.wsPort = 9444
-            let home = NSHomeDirectory()
-            let hostHome = home.components(separatedBy: "/Library/Developer/CoreSimulator").first ?? home
-            let secretPath = hostHome + "/Library/Application Support/cmux/mobile-ws-secret"
-            NSLog("📱 WS debug: home=%@ hostHome=%@ secretPath=%@ exists=%d", home, hostHome, secretPath, FileManager.default.fileExists(atPath: secretPath) ? 1 : 0)
-            if let secret = try? String(contentsOfFile: secretPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-               !secret.isEmpty {
-                host.wsSecret = secret
-                NSLog("📱 WS debug: secret loaded (%d chars)", secret.count)
-            } else {
-                NSLog("📱 WS debug: failed to load secret")
+        guard host.wsPort == nil else { return }
+        host.wsPort = 9444
+
+        // Load ws-secret: simulator reads from Mac filesystem, device reads from app bundle
+        var secret: String?
+        #if targetEnvironment(simulator)
+        let home = NSHomeDirectory()
+        let hostHome = home.components(separatedBy: "/Library/Developer/CoreSimulator").first ?? home
+        let secretPath = hostHome + "/Library/Application Support/cmux/mobile-ws-secret"
+        secret = try? String(contentsOfFile: secretPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        host.hostname = "127.0.0.1"
+        #else
+        // On physical device, the build script copies the secret into the app bundle
+        if let bundlePath = Bundle.main.path(forResource: "mobile-ws-secret", ofType: nil) {
+            secret = try? String(contentsOfFile: bundlePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // On physical device, the build script also writes the Mac's Tailscale IP into the bundle
+        if let ipPath = Bundle.main.path(forResource: "debug-relay-host", ofType: nil) {
+            let relayHost = (try? String(contentsOfFile: ipPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+            if !relayHost.isEmpty {
+                host.hostname = relayHost
             }
-            host.hostname = "127.0.0.1"
+        }
+        #endif
+
+        if let secret, !secret.isEmpty {
+            host.wsSecret = secret
+            NSLog("📱 WS debug: secret loaded (%d chars) hostname=%@", secret.count, host.hostname)
+        } else {
+            host.wsPort = nil
+            NSLog("📱 WS debug: no secret available, disabling WebSocket")
         }
         #endif
     }
@@ -1099,6 +1406,7 @@ final class TerminalSessionController: ObservableObject {
                     self.finishTransportConnectTask(generation: connectGeneration)
                 }
             } catch {
+                NSLog("📱 SessionController: connect failed: %@ (type=%@)", error.localizedDescription, String(describing: type(of: error)))
                 await MainActor.run {
                     let isCurrentTransport = self.isCurrentTransport(transport)
                     if isCurrentTransport {
@@ -1204,6 +1512,8 @@ final class TerminalSessionController: ObservableObject {
                 liveAnchormuxLog("controller.event notice message=\(message)")
             case .trustedHostKey(let hostKey):
                 liveAnchormuxLog("controller.event trusted_host_key key=\(hostKey)")
+            case .remotePlatform(let platform):
+                liveAnchormuxLog("controller.event remote_platform os=\(platform.goOS) arch=\(platform.goArch)")
             }
         }
         switch event {
@@ -1235,6 +1545,8 @@ final class TerminalSessionController: ObservableObject {
             setStatusMessage(message)
         case .trustedHostKey(let hostKey):
             onUpdate?(.trustedHostKey(hostKey))
+        case .remotePlatform(let platform):
+            terminalSurface?.updateRemotePlatform(platform)
         }
     }
 

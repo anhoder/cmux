@@ -12,7 +12,9 @@ final class ConvexMobileDogfoodModelsTests: XCTestCase {
             tailscaleIPs: ["100.64.0.10"],
             status: .online,
             lastSeenAt: 1_773_740_000,
-            lastWorkspaceSyncAt: 1_773_740_000
+            lastWorkspaceSyncAt: 1_773_740_000,
+            wsPort: nil,
+            wsSecret: nil
         )
 
         let host = row.asTerminalHost()

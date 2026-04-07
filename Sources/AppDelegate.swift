@@ -2254,10 +2254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var browserAddressBarFocusObserver: NSObjectProtocol?
     private var browserAddressBarBlurObserver: NSObjectProtocol?
     private let updateController = UpdateController()
-    private lazy var mobilePresenceCoordinator = MobilePresenceCoordinator(
-        authProvider: AuthManager.shared,
-        authChangePublisher: AuthManager.shared.objectWillChange.eraseToAnyPublisher()
-    )
+    private lazy var mobilePresenceCoordinator = WorkspaceDaemonBridge()
     private lazy var titlebarAccessoryController = UpdateTitlebarAccessoryController(viewModel: updateViewModel)
     private let windowDecorationsController = WindowDecorationsController()
     private var menuBarExtraController: MenuBarExtraController?

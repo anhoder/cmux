@@ -359,7 +359,8 @@ final class AppDatabase {
             try db.execute(sql: "DELETE FROM hosts")
             try db.execute(sql: "DELETE FROM workspaces")
             let machineIDsByHostID = Dictionary(
-                uniqueKeysWithValues: snapshot.hosts.map { ($0.id, $0.effectiveServerID) }
+                snapshot.hosts.map { ($0.id, $0.effectiveServerID) },
+                uniquingKeysWith: { _, last in last }
             )
 
             for host in snapshot.hosts {

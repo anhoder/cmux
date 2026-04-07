@@ -50,6 +50,7 @@ fn handleClientThreadShared(service: *session_service.Service, secret: []const u
 }
 
 fn handleClient(service: *session_service.Service, secret: []const u8, stream: std.net.Stream) !void {
+    var mutable_stream = stream;
     defer stream.close();
 
     var read_buf: [8192]u8 = undefined;
@@ -72,12 +73,23 @@ fn handleClient(service: *session_service.Service, secret: []const u8, stream: s
         return;
     }
 
+    var subscribed = false;
+    defer if (subscribed) {
+        service.subscriptions.remove(&mutable_stream);
+    };
+
     // Request loop
     while (true) {
         const msg = (try readWsTextMessage(stream, std.heap.page_allocator)) orelse return;
         defer std.heap.page_allocator.free(msg);
 
         if (msg.len == 0) continue;
+
+        // Check if this is a workspace.subscribe request
+        if (!subscribed and std.mem.indexOf(u8, msg, "workspace.subscribe") != null) {
+            service.subscriptions.add(service.alloc, &mutable_stream) catch {};
+            subscribed = true;
+        }
 
         const response = blk: {
             const alloc = service.alloc;

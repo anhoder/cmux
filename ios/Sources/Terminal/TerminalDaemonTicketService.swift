@@ -120,25 +120,48 @@ final class TerminalDaemonTicketService: @unchecked Sendable {
 
     func fetchTicket(request payload: TerminalDaemonTicketRequest) async throws -> TerminalDaemonTicket {
         if let cachedTicket = cachedTicket(for: payload) {
+            print("📱 TicketService: returning cached ticket")
             return cachedTicket
         }
 
+        print("📱 TicketService: fetching ticket from \(endpoint.absoluteString)")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.httpBody = try encoder.encode(payload)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(try await tokenProvider())", forHTTPHeaderField: "Authorization")
+        let token: String
+        do {
+            token = try await tokenProvider()
+            print("📱 TicketService: got auth token (\(token.count) chars)")
+        } catch {
+            print("📱 TicketService: failed to get auth token: \(error.localizedDescription)")
+            throw error
+        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+            print("📱 TicketService: got response type=\(type(of: response)) dataLen=\(data.count)")
+        } catch {
+            print("📱 TicketService: network request failed: \(error.localizedDescription)")
+            throw error
+        }
         guard let httpResponse = response as? HTTPURLResponse else {
+            print("📱 TicketService: response is not HTTPURLResponse, throwing invalidResponse")
             throw TerminalDaemonTicketServiceError.invalidResponse
         }
+        print("📱 TicketService: HTTP status=\(httpResponse.statusCode)")
         guard (200 ..< 300).contains(httpResponse.statusCode) else {
-            throw TerminalDaemonTicketServiceError.httpError(httpResponse.statusCode, parseErrorMessage(from: data))
+            let errMsg = parseErrorMessage(from: data)
+            print("📱 TicketService: HTTP error \(httpResponse.statusCode): \(errMsg ?? "nil")")
+            throw TerminalDaemonTicketServiceError.httpError(httpResponse.statusCode, errMsg)
         }
 
         let ticket = try decoder.decode(TerminalDaemonTicket.self, from: data)
         cache(ticket, for: payload)
+        print("📱 TicketService: ticket decoded, directURL=\(ticket.directURL)")
         return ticket
     }
 

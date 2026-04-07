@@ -6877,8 +6877,16 @@ enum LocalTerminalDaemonBridge {
 
         guard config != nil else { return nil }
 
-        // Auto-enable WebSocket listener for mobile connections
-        let wsPort = Int(environment["CMUX_MOBILE_WS_PORT"] ?? "") ?? 9444
+        // Auto-enable WebSocket listener for mobile connections.
+        // Derive from CMUX_PORT (+1 offset) so each tagged build gets a unique WS port.
+        let wsPort: Int
+        if let explicit = Int(environment["CMUX_MOBILE_WS_PORT"] ?? "") {
+            wsPort = explicit
+        } else if let cmuxPort = Int(environment["CMUX_PORT"] ?? "") {
+            wsPort = cmuxPort + 1
+        } else {
+            wsPort = 9444
+        }
         config?.wsPort = wsPort
         config?.wsSecret = resolveWebSocketSecret(environment: environment)
 

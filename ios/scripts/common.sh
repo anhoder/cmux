@@ -43,3 +43,27 @@ rewrite_localhost_for_device() {
         echo "  → Rewrote localhost → $mac_ip ($ip_source) in $(basename "$plist_path")"
     fi
 }
+
+# Copy WebSocket debug relay files into the device app bundle so the iOS app
+# can connect to the desktop cmux daemon via WebSocket over Tailscale.
+embed_debug_relay_for_device() {
+    local app_path="$1"
+    [ -d "$app_path" ] || return
+
+    # Copy ws-secret from Mac into app bundle
+    local ws_secret_src="$HOME/Library/Application Support/cmux/mobile-ws-secret"
+    if [ -f "$ws_secret_src" ]; then
+        cp "$ws_secret_src" "$app_path/mobile-ws-secret"
+        echo "  → Embedded mobile-ws-secret in app bundle"
+    else
+        echo "  ⚠️  No mobile-ws-secret found at $ws_secret_src"
+    fi
+
+    # Write the Mac's reachable IP so the app knows where to connect
+    local mac_ip
+    mac_ip="$(get_mac_reachable_ip)"
+    if [ -n "$mac_ip" ]; then
+        printf '%s' "$mac_ip" > "$app_path/debug-relay-host"
+        echo "  → Embedded debug-relay-host ($mac_ip) in app bundle"
+    fi
+}

@@ -188,7 +188,8 @@ struct TerminalHost: Identifiable, Codable, Equatable, Sendable {
     }
 
     var requiresSavedSSHPassword: Bool {
-        switch transportPreference {
+        if hasWebSocketEndpoint { return false }
+        return switch transportPreference {
         case .rawSSH:
             sshAuthenticationMethod == .password
         case .remoteDaemon:
@@ -197,7 +198,8 @@ struct TerminalHost: Identifiable, Codable, Equatable, Sendable {
     }
 
     var requiresSavedSSHPrivateKey: Bool {
-        switch transportPreference {
+        if hasWebSocketEndpoint { return false }
+        return switch transportPreference {
         case .rawSSH:
             sshAuthenticationMethod == .privateKey
         case .remoteDaemon:

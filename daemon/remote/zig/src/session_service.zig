@@ -4,6 +4,7 @@ const pty_host = @import("pty_host.zig");
 const serialize = @import("serialize.zig");
 const session_registry = @import("session_registry.zig");
 const terminal_session = @import("terminal_session.zig");
+pub const workspace_registry = @import("workspace_registry.zig");
 
 pub const AttachmentResult = struct {
     attachment_id: []const u8,
@@ -109,6 +110,8 @@ pub const Service = struct {
     proxies: proxy_streams.Manager,
     registry: session_registry.Registry,
     runtimes: std.StringHashMap(*RuntimeSession),
+    workspace_reg: workspace_registry.Registry,
+    subscriptions: workspace_registry.SubscriptionManager = .{},
 
     pub fn init(alloc: std.mem.Allocator) Service {
         return .{
@@ -116,6 +119,7 @@ pub const Service = struct {
             .proxies = proxy_streams.Manager.init(alloc),
             .registry = session_registry.Registry.init(alloc),
             .runtimes = std.StringHashMap(*RuntimeSession).init(alloc),
+            .workspace_reg = workspace_registry.Registry.init(alloc),
         };
     }
 
@@ -129,6 +133,8 @@ pub const Service = struct {
         self.runtimes.deinit();
         self.proxies.deinit();
         self.registry.deinit();
+        self.workspace_reg.deinit();
+        self.subscriptions.deinit(self.alloc);
     }
 
     pub fn openProxy(self: *Service, host: []const u8, port: u16) ![]const u8 {

@@ -36,7 +36,10 @@ class StackAuthProvider: AuthProvider {
 
     /// Re-authenticate using stored tokens
     func loginFromCache(onIdToken: @Sendable @escaping (String?) -> Void) async throws -> StackAuthResult {
-        guard let accessToken = await stack.getAccessToken() else {
+        let accessToken = await stack.getAccessToken()
+        TerminalSidebarStore.debugLog("StackAuthProvider.loginFromCache: accessToken=\(accessToken != nil ? "present" : "nil")")
+        guard let accessToken else {
+            TerminalSidebarStore.debugLog("StackAuthProvider.loginFromCache: FAILED - no access token")
             throw AuthError.unauthorized
         }
 

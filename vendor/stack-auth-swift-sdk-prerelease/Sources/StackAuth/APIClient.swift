@@ -306,7 +306,8 @@ actor APIClient {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.setValue(projectId, forHTTPHeaderField: "x-stack-project-id")
         request.setValue(publishableClientKey, forHTTPHeaderField: "x-stack-publishable-client-key")
-        
+        request.setValue("client", forHTTPHeaderField: "x-stack-access-type")
+
         let body = [
             "grant_type=refresh_token",
             "refresh_token=\(formURLEncode(refreshToken))",

@@ -2133,6 +2133,8 @@ class TerminalController {
             return v2Result(id: id, self.v2FeedbackOpen(params: params))
         case "feedback.submit":
             return v2Result(id: id, self.v2FeedbackSubmit(params: params))
+        case "account.seed_tokens":
+            return v2Result(id: id, self.v2AccountSeedTokens(params: params))
 
 
         // Surfaces / input
@@ -2503,6 +2505,7 @@ class TerminalController {
             "settings.open",
             "feedback.open",
             "feedback.submit",
+            "account.seed_tokens",
             "surface.list",
             "surface.current",
             "surface.focus",
@@ -7081,6 +7084,52 @@ class TerminalController {
 
         if semaphore.wait(timeout: .now() + 35) == .timedOut {
             return .err(code: "timeout", message: "Feedback submission timed out", data: nil)
+        }
+
+        return result
+    }
+
+    // MARK: - Account
+
+    private func v2AccountSeedTokens(params: [String: Any]) -> V2CallResult {
+        let email = params["email"] as? String
+        let password = params["password"] as? String
+        let refreshToken = params["refresh_token"] as? String
+
+        guard (email != nil && password != nil) || refreshToken != nil else {
+            return .err(code: "invalid_params", message: "Provide email+password or refresh_token", data: nil)
+        }
+
+        // Do the network call on a detached task to avoid MainActor deadlock with the socket handler.
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: V2CallResult = .err(code: "internal_error", message: "Sign-in failed", data: nil)
+
+        Task.detached {
+            do {
+                if let email, let password, !email.isEmpty, !password.isEmpty {
+                    // Sign in via Stack Auth API directly (no MainActor needed)
+                    let authResult = try await AuthManager.signInWithCredentialDirectly(email: email, password: password)
+                    // Update UI state on main actor (non-async, won't deadlock)
+                    await MainActor.run {
+                        AuthManager.shared.applySignInResult(authResult)
+                    }
+                    result = .ok(["authenticated": true, "email": authResult.email as Any])
+                } else if let refreshToken, !refreshToken.isEmpty {
+                    await MainActor.run {
+                        Task {
+                            await AuthManager.shared.seedTokensFromCLI(refreshToken: refreshToken, accessToken: params["access_token"] as? String)
+                        }
+                    }
+                    result = .ok(["seeded": true])
+                }
+            } catch {
+                result = .err(code: "auth_failed", message: error.localizedDescription, data: nil)
+            }
+            semaphore.signal()
+        }
+
+        if semaphore.wait(timeout: .now() + 30) == .timedOut {
+            return .err(code: "timeout", message: "Sign-in timed out", data: nil)
         }
 
         return result

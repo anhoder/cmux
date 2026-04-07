@@ -1,6 +1,8 @@
 import Foundation
 
 enum AuthEnvironment {
+    private static let developmentStackProjectID = "1467bed0-8522-45ee-a8d8-055de324118c"
+    private static let developmentStackPublishableClientKey = "pck_pt4nwry6sdskews2pxk4g2fbe861ak2zvaf3mqendspa0"
     private static let productionStackProjectID = "8a877114-b905-47c5-8b64-3a2d90679577"
     private static let productionStackPublishableClientKey = "pck_pqghntgd942k1hg066m7htjakb8g4ybaj66hqj2g2frj0"
 
@@ -11,11 +13,7 @@ enum AuthEnvironment {
            !overridden.isEmpty {
             return overridden
         }
-#if DEBUG
-        return "cmux-dev"
-#else
-        return "cmux"
-#endif
+        return "manaflow"
     }
 
     static var callbackURL: URL {
@@ -25,16 +23,16 @@ enum AuthEnvironment {
     static var websiteOrigin: URL {
         resolvedURL(
             environmentKey: "CMUX_WWW_ORIGIN",
-            fallback: "https://cmux.dev"
+            fallback: "https://cmux.com"
         )
     }
 
     static var signInWebsiteOrigin: URL {
         canonicalizedLoopbackURL(
             resolvedURL(
-            environmentKey: "CMUX_AUTH_WWW_ORIGIN",
-            fallback: "https://cmux.dev"
-        )
+                environmentKey: "CMUX_AUTH_WWW_ORIGIN",
+                fallback: defaultWebOrigin
+            )
         )
     }
 
@@ -42,9 +40,40 @@ enum AuthEnvironment {
         canonicalizedLoopbackURL(
             resolvedURL(
                 environmentKey: "CMUX_API_BASE_URL",
-                fallback: "https://api.cmux.sh"
+                fallback: defaultAPIBaseURL
             )
         )
+    }
+
+    private static var cmuxPort: String {
+        ProcessInfo.processInfo.environment["CMUX_PORT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "3000"
+    }
+
+    private static var defaultWebOrigin: String {
+        if let origin = ProcessInfo.processInfo.environment["CMUX_WWW_ORIGIN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !origin.isEmpty {
+            return origin
+        }
+        #if DEBUG
+        return "http://localhost:\(cmuxPort)"
+        #else
+        return "https://cmux.com"
+        #endif
+    }
+
+    private static var defaultAPIBaseURL: String {
+        if let url = ProcessInfo.processInfo.environment["CMUX_API_BASE_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !url.isEmpty {
+            return url
+        }
+        #if DEBUG
+        return "http://localhost:\(cmuxPort)"
+        #else
+        return "https://api.cmux.sh"
+        #endif
     }
 
     static var stackBaseURL: URL {
@@ -61,7 +90,11 @@ enum AuthEnvironment {
            !projectID.isEmpty {
             return projectID
         }
+        #if DEBUG
+        return developmentStackProjectID
+        #else
         return productionStackProjectID
+        #endif
     }
 
     static var stackPublishableClientKey: String {
@@ -71,12 +104,27 @@ enum AuthEnvironment {
            !clientKey.isEmpty {
             return clientKey
         }
+        #if DEBUG
+        return developmentStackPublishableClientKey
+        #else
         return productionStackPublishableClientKey
+        #endif
+    }
+
+    /// The website origin used for the after-sign-in handler.
+    static var afterSignInOrigin: URL {
+        resolvedURL(
+            environmentKey: "CMUX_AUTH_WWW_ORIGIN",
+            fallback: defaultWebOrigin
+        )
     }
 
     static func signInURL() -> URL {
+        // Build the after-sign-in callback URL that includes the native app return scheme.
+        // The after-sign-in handler extracts tokens from the Stack Auth session
+        // and redirects to the native app via the manaflow:// callback scheme.
         var afterSignInComponents = URLComponents(
-            url: signInWebsiteOrigin.appendingPathComponent("handler/after-sign-in", isDirectory: false),
+            url: afterSignInOrigin.appendingPathComponent("handler/after-sign-in", isDirectory: false),
             resolvingAgainstBaseURL: false
         )!
         afterSignInComponents.queryItems = [
@@ -86,8 +134,10 @@ enum AuthEnvironment {
             ),
         ]
 
+        // Use the website's /sign-in route (provided by Stack Auth SDK).
+        // Stack Auth handles the sign-in flow, then redirects to after_auth_return_to.
         var components = URLComponents(
-            url: signInWebsiteOrigin.appendingPathComponent("handler/sign-in", isDirectory: false),
+            url: afterSignInOrigin.appendingPathComponent("handler/sign-in", isDirectory: false),
             resolvingAgainstBaseURL: false
         )!
         components.queryItems = [
