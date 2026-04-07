@@ -389,8 +389,7 @@ class TerminalController {
         label: String,
         url: URL,
         status: SidebarPullRequestStatus,
-        branch: String?,
-        checks: SidebarPullRequestChecksStatus?
+        branch: String?
     ) -> Bool {
         guard let current else { return true }
         let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -406,24 +405,11 @@ class TerminalController {
             }
             return current.branch
         }()
-        let effectiveChecks: SidebarPullRequestChecksStatus? = {
-            if let checks {
-                return checks
-            }
-            guard current.number == number,
-                  current.label == label,
-                  current.url == url,
-                  current.status == status else {
-                return nil
-            }
-            return current.checks
-        }()
         return current.number != number
             || current.label != label
             || current.url != url
             || current.status != status
             || current.branch != effectiveBranch
-            || current.checks != effectiveChecks
     }
 
     nonisolated static func shouldReplacePorts(current: [Int]?, next: [Int]) -> Bool {
@@ -15149,14 +15135,11 @@ class TerminalController {
         }
         let branch = normalizedOptionValue(parsed.options["branch"])
 
-        let checks: SidebarPullRequestChecksStatus?
         if let rawChecks = normalizedOptionValue(parsed.options["checks"]) {
             guard let parsedChecks = SidebarPullRequestChecksStatus(rawValue: rawChecks.lowercased()) else {
                 return "ERROR: Invalid pull request checks '\(rawChecks)' — use: pass, fail, pending"
             }
-            checks = parsedChecks
-        } else {
-            checks = nil
+            _ = parsedChecks
         }
 
         let labelRaw = normalizedOptionValue(parsed.options["label"]) ?? "PR"
@@ -15178,8 +15161,7 @@ class TerminalController {
                 label: label,
                 url: url,
                 status: status,
-                branch: branch,
-                checks: checks
+                branch: branch
             ) else {
                 return
             }
@@ -15190,8 +15172,7 @@ class TerminalController {
                 label: label,
                 url: url,
                 status: status,
-                branch: branch,
-                checks: checks
+                branch: branch
             )
         }
     }
@@ -15618,11 +15599,9 @@ class TerminalController {
             if let pr = tab.sidebarPullRequestsInDisplayOrder().first {
                 lines.append("pr=#\(pr.number) \(pr.status.rawValue) \(pr.url.absoluteString)")
                 lines.append("pr_label=\(pr.label)")
-                lines.append("pr_checks=\(pr.checks?.rawValue ?? "none")")
             } else {
                 lines.append("pr=none")
                 lines.append("pr_label=none")
-                lines.append("pr_checks=none")
             }
 
             if tab.listeningPorts.isEmpty {
