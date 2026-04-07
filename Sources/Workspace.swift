@@ -6036,6 +6036,9 @@ struct WorkspaceRemoteDaemonStatus: Equatable {
 }
 
 struct WorkspaceRemoteConfiguration: Equatable {
+    private static let relaySessionIDAllowedCharacters =
+        CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+
     let destination: String
     let port: Int?
     let identityFile: String?
@@ -6081,7 +6084,13 @@ struct WorkspaceRemoteConfiguration: Equatable {
 
     var relaySessionID: String? {
         let trimmed = relayID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy({
+                  Self.relaySessionIDAllowedCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return trimmed
     }
 
     var relayLogPath: String? {
@@ -8234,14 +8243,29 @@ final class Workspace: Identifiable, ObservableObject {
         controller.start()
     }
 
+    func requestReconnectRemoteConnection(relayProbeTimeout: TimeInterval = 2.5) {
+        guard remoteConfiguration != nil else { return }
+        let relayProbeController = remoteSessionController
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let relayProbe = relayProbeController?.probeRelayLiveness(timeout: relayProbeTimeout)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.remoteConfiguration != nil else { return }
+                _ = self.reconnectRemoteConnection(relayProbe: relayProbe)
+            }
+        }
+    }
+
+    func currentRemoteRelayProbeController() -> WorkspaceRemoteSessionController? {
+        remoteSessionController
+    }
+
     @discardableResult
-    func reconnectRemoteConnection() -> WorkspaceRemoteReconnectOutcome {
+    func reconnectRemoteConnection(relayProbe: Bool? = nil) -> WorkspaceRemoteReconnectOutcome {
         guard let configuration = remoteConfiguration else {
             return WorkspaceRemoteReconnectOutcome(relayRecreated: false, replacedSurfaces: [])
         }
 
         let pendingExitedSurfaceIds = pendingRemoteTerminalChildExitSurfaceIds
-        let relayProbe = remoteSessionController?.probeRelayLiveness()
         let replacedSurfaces = replaceExitedRemoteTerminalPanelsForReconnect()
         let relayRecreated =
             !pendingExitedSurfaceIds.isEmpty
@@ -8255,7 +8279,13 @@ final class Workspace: Identifiable, ObservableObject {
         configureRemoteConnection(configuration, autoConnect: true)
         if relayRecreated, let target = remoteDisplayTarget {
             appendSidebarLog(
-                message: "Remote relay for \(target) was recreated. Fresh SSH shells are starting; process state and scrollback from the dead session are not preserved.",
+                message: String.localizedStringWithFormat(
+                    String(
+                        localized: "workspace.remote.reconnect.sidebar.relayRecreated",
+                        defaultValue: "Remote relay for %@ was recreated. Fresh SSH shells are starting; process state and scrollback from the dead session are not preserved."
+                    ),
+                    target
+                ),
                 level: .warning,
                 source: "remote"
             )
@@ -8266,18 +8296,34 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
-    func shouldPreserveRemoteTerminalAfterChildExit(surfaceId: UUID) -> Bool {
+    func handleRemoteTerminalChildExit(
+        surfaceId: UUID,
+        onClose: @escaping () -> Void
+    ) -> Bool {
         guard remoteConfiguration != nil, terminalPanel(for: surfaceId) != nil else { return false }
         if remoteConnectionState != .connected || remoteDaemonStatus.state == .error {
+            preserveRemoteTerminalAfterChildExit(surfaceId: surfaceId)
             return true
         }
-        guard pendingRemoteTerminalChildExitSurfaceIds.contains(surfaceId) else {
+        guard pendingRemoteTerminalChildExitSurfaceIds.contains(surfaceId),
+              let relayProbeController = remoteSessionController else {
             return false
         }
-        if let relayAlive = remoteSessionController?.probeRelayLiveness(timeout: 0.75) {
-            return !relayAlive
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let relayAlive = relayProbeController.probeRelayLiveness(timeout: 0.75)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.terminalPanel(for: surfaceId) != nil else { return }
+                if relayAlive == false,
+                   self.pendingRemoteTerminalChildExitSurfaceIds.contains(surfaceId),
+                   self.remoteConfiguration != nil {
+                    self.preserveRemoteTerminalAfterChildExit(surfaceId: surfaceId)
+                    return
+                }
+                self.pendingRemoteTerminalChildExitSurfaceIds.remove(surfaceId)
+                onClose()
+            }
         }
-        return false
+        return true
     }
 
     func preserveRemoteTerminalAfterChildExit(surfaceId: UUID) {
@@ -8286,7 +8332,10 @@ final class Workspace: Identifiable, ObservableObject {
         untrackRemoteTerminalSurface(surfaceId)
         applyRemoteConnectionStateUpdate(
             .error,
-            detail: "Remote SSH session exited. Reconnect creates a fresh relay and shell; running processes and scrollback from the dead session are not preserved.",
+            detail: String(
+                localized: "workspace.remote.connection.detail.childExited",
+                defaultValue: "Remote SSH session exited. Reconnect creates a fresh relay and shell; running processes and scrollback from the dead session are not preserved."
+            ),
             target: remoteDisplayTarget ?? "remote host"
         )
     }
@@ -8297,13 +8346,15 @@ final class Workspace: Identifiable, ObservableObject {
             return []
         }
 
+        let pendingSurfaceIds = pendingRemoteTerminalChildExitSurfaceIds
         let orderedPendingSurfaceIds = sidebarOrderedPanelIds().filter {
-            pendingRemoteTerminalChildExitSurfaceIds.contains($0) && terminalPanel(for: $0) != nil
+            pendingSurfaceIds.contains($0) && terminalPanel(for: $0) != nil
         }
         guard !orderedPendingSurfaceIds.isEmpty else {
             pendingRemoteTerminalChildExitSurfaceIds.removeAll(keepingCapacity: false)
             return []
         }
+        let skippedPendingSurfaceIds = pendingSurfaceIds.subtracting(Set(orderedPendingSurfaceIds))
 
         let focusedBeforeReconnect = focusedPanelId
         var focusReplacementSurfaceId: UUID?
@@ -8406,6 +8457,10 @@ final class Workspace: Identifiable, ObservableObject {
             )
         }
 
+        for surfaceId in skippedPendingSurfaceIds {
+            pendingRemoteTerminalChildExitSurfaceIds.remove(surfaceId)
+        }
+
         syncRemotePortScanTTYs()
         recomputeListeningPorts()
         scheduleTerminalGeometryReconcile()
@@ -8454,7 +8509,7 @@ final class Workspace: Identifiable, ObservableObject {
 
         pendingRemoteForegroundAuthToken = nil
         guard remoteConnectionState == .disconnected else { return }
-        reconnectRemoteConnection()
+        requestReconnectRemoteConnection()
     }
 
     func disconnectRemoteConnection(clearConfiguration: Bool = false) {

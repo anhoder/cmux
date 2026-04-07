@@ -13262,7 +13262,7 @@ private struct TabItemView: View, Equatable {
 
             Button(reconnectLabel) {
                 for workspace in remoteContextMenuWorkspaces() {
-                    workspace.reconnectRemoteConnection()
+                    workspace.requestReconnectRemoteConnection()
                 }
             }
             .disabled(allRemoteContextMenuTargetsConnecting)

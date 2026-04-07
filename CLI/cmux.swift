@@ -1723,8 +1723,6 @@ struct CMUXCLI {
             return
         }
 
-        _ = try? sweepLocalRelayState()
-
         // If the argument looks like a path (not a known command), open a workspace there.
         if looksLikePath(command) {
             try openPath(command, socketPath: resolvedSocketPath)
@@ -2038,8 +2036,6 @@ struct CMUXCLI {
 
         case "ssh":
             try runSSH(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
-        case "relay":
-            try runRelayCommand(commandArgs: commandArgs, jsonOutput: jsonOutput)
         case "ssh-session-end":
             try runSSHSessionEnd(commandArgs: commandArgs, client: client)
 
@@ -4086,8 +4082,15 @@ struct CMUXCLI {
                    let pid = Int32(pidText),
                    pid > 0,
                    !isProcessAlive(pid: pid) {
-                    try? FileManager.default.removeItem(at: entryURL)
-                    removedSessionDirs += 1
+                    let lockFD = tryLockRelaySession(at: entryURL)
+                    guard let lockFD else { continue }
+                    defer { unlockRelaySession(lockFD) }
+                    do {
+                        try FileManager.default.removeItem(at: entryURL)
+                        removedSessionDirs += 1
+                    } catch {
+                        continue
+                    }
                 }
                 continue
             }
@@ -4099,8 +4102,12 @@ struct CMUXCLI {
 
         for (port, artifactURLs) in portArtifacts where !isLoopbackPortReachable(port: port) {
             for artifactURL in artifactURLs {
-                try? FileManager.default.removeItem(at: artifactURL)
-                removedPortArtifacts += 1
+                do {
+                    try FileManager.default.removeItem(at: artifactURL)
+                    removedPortArtifacts += 1
+                } catch {
+                    continue
+                }
             }
         }
 
@@ -4182,6 +4189,22 @@ struct CMUXCLI {
             getsockopt(socketFD, SOL_SOCKET, SO_ERROR, pointer, &socketErrorLength)
         }
         return optionResult == 0 && socketError == 0
+    }
+
+    private func tryLockRelaySession(at entryURL: URL) -> Int32? {
+        let lockPath = entryURL.appendingPathComponent(".lock", isDirectory: false).path
+        let fd = open(lockPath, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
+        guard fd >= 0 else { return nil }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            Darwin.close(fd)
+            return nil
+        }
+        return fd
+    }
+
+    private func unlockRelaySession(_ fd: Int32) {
+        _ = flock(fd, LOCK_UN)
+        Darwin.close(fd)
     }
 
     private func runSSH(

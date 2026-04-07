@@ -129,10 +129,6 @@ doneFlags:
 		return runRelayCommand(cmdArgs, jsonOutput)
 	}
 
-	if _, err := sweepRelayState(nil); err != nil {
-		fmt.Fprintf(os.Stderr, "cmux: relay cleanup failed: %v\n", err)
-	}
-
 	// refreshAddr is set when the address came from socket_addr file (not env/flag),
 	// allowing one stale-address refresh if another workspace has replaced socket_addr.
 	var refreshAddr func() string

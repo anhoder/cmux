@@ -4254,6 +4254,17 @@ class TabManager: ObservableObject {
     func closePanelAfterChildExited(tabId: UUID, surfaceId: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
         guard tab.panels[surfaceId] != nil else { return }
+        if tab.handleRemoteTerminalChildExit(surfaceId: surfaceId, onClose: { [weak self] in
+            self?.finishClosePanelAfterChildExited(tabId: tabId, surfaceId: surfaceId)
+        }) {
+            return
+        }
+        finishClosePanelAfterChildExited(tabId: tabId, surfaceId: surfaceId)
+    }
+
+    private func finishClosePanelAfterChildExited(tabId: UUID, surfaceId: UUID) {
+        guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
+        guard tab.panels[surfaceId] != nil else { return }
         let keepsRemoteWorkspaceOpen =
             tab.panels.count <= 1 && tab.shouldDemoteWorkspaceAfterChildExit(surfaceId: surfaceId)
 
@@ -4264,11 +4275,6 @@ class TabManager: ObservableObject {
             "remoteWorkspace=\(tab.isRemoteWorkspace ? 1 : 0) keepRemote=\(keepsRemoteWorkspaceOpen ? 1 : 0)"
         )
 #endif
-
-        if tab.shouldPreserveRemoteTerminalAfterChildExit(surfaceId: surfaceId) {
-            tab.preserveRemoteTerminalAfterChildExit(surfaceId: surfaceId)
-            return
-        }
 
         // Exiting the last SSH surface should demote the workspace back to a local one.
         // Route through Workspace close handling so remote teardown and replacement-panel

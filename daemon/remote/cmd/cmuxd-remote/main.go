@@ -256,7 +256,7 @@ func (a *atomicShutdownReason) Load() string {
 func installRelaySignalWatch(
 	logger *relayLogger,
 	sessionState *relaySessionState,
-	shutdownReason *atomicShutdownReason
+	shutdownReason *atomicShutdownReason,
 ) func() {
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGPIPE, syscall.SIGTERM)
@@ -267,11 +267,11 @@ func installRelaySignalWatch(
 			if sig == nil {
 				return
 			}
-			signalName := strings.ToLower(strings.TrimPrefix(sig.String(), "SIG"))
+			signalName := strings.ToLower(strings.TrimSpace(sig.String()))
 			shutdownReason.Set(signalName)
 			logger.Log("info", "relay.shutdown", map[string]any{
-				"mode":       "stdio",
-				"reason":     "signal:" + signalName,
+				"mode":   "stdio",
+				"reason": "signal:" + signalName,
 				"session_id": func() string {
 					if sessionState == nil {
 						return ""

@@ -2480,7 +2480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func sweepStaleRelayStateAtStartup() {
+    private static func sweepStaleRelayStateAtStartup() {
         let relayRootURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cmux", isDirectory: true)
             .appendingPathComponent("relay", isDirectory: true)
@@ -2507,6 +2507,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                       errno == ESRCH else {
                     continue
                 }
+                guard let lockFD = tryLockRelaySession(at: entryURL) else {
+                    continue
+                }
+                defer { unlockRelaySession(lockFD) }
                 try? FileManager.default.removeItem(at: entryURL)
                 continue
             }
@@ -2523,7 +2527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    private func startupRelayArtifactPort(from filename: String) -> Int? {
+    private static func startupRelayArtifactPort(from filename: String) -> Int? {
         let suffixes = [
             ".auth",
             ".daemon_path",
@@ -2540,7 +2544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return nil
     }
 
-    private func isStartupLoopbackPortReachable(port: Int) -> Bool {
+    private static func isStartupLoopbackPortReachable(port: Int) -> Bool {
         guard (1...65535).contains(port) else { return false }
 
         let socketFD = socket(AF_INET, SOCK_STREAM, 0)
@@ -2587,6 +2591,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return optionResult == 0 && socketError == 0
     }
 
+    private static func tryLockRelaySession(at entryURL: URL) -> Int32? {
+        let lockPath = entryURL.appendingPathComponent(".lock", isDirectory: false).path
+        let fd = open(lockPath, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
+        guard fd >= 0 else { return nil }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            Darwin.close(fd)
+            return nil
+        }
+        return fd
+    }
+
+    private static func unlockRelaySession(_ fd: Int32) {
+        _ = flock(fd, LOCK_UN)
+        Darwin.close(fd)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
         let isRunningUnderXCTest = isRunningUnderXCTest(env)
@@ -2605,7 +2625,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             name: .reactGrabDidCopySelection,
             object: nil
         )
-        sweepStaleRelayStateAtStartup()
+        if !isRunningUnderXCTest {
+            DispatchQueue.global(qos: .utility).async {
+                Self.sweepStaleRelayStateAtStartup()
+            }
+        }
 
 #if DEBUG
         // UI tests run on a shared VM user profile, so persisted shortcuts can drift and make

@@ -146,12 +146,15 @@ type relaySessionState struct {
 }
 
 type relayCleanupSummary struct {
-	removedSessionDirs  int
+	removedSessionDirs   int
 	removedPortArtifacts int
 }
 
 func beginRelaySession(sessionID string, logger *relayLogger) (*relaySessionState, error) {
-	trimmed := strings.TrimSpace(sessionID)
+	trimmed, err := sanitizeRelaySessionID(sessionID)
+	if err != nil {
+		return nil, err
+	}
 	if trimmed == "" {
 		return nil, nil
 	}
@@ -196,13 +199,32 @@ func (s *relaySessionState) Close() {
 		return
 	}
 	_ = os.Remove(filepath.Join(s.dir, "pid"))
-	_ = os.Remove(filepath.Join(s.dir, ".lock"))
 	if s.lockFile != nil {
 		_ = syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
 		_ = s.lockFile.Close()
 		s.lockFile = nil
 	}
+	_ = os.Remove(filepath.Join(s.dir, ".lock"))
 	removeRelayDirIfEmpty(s.dir)
+}
+
+func sanitizeRelaySessionID(sessionID string) (string, error) {
+	trimmed := strings.TrimSpace(sessionID)
+	if trimmed == "" {
+		return "", nil
+	}
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '.' ||
+			r == '_' ||
+			r == '-' {
+			continue
+		}
+		return "", fmt.Errorf("invalid relay session id %q", trimmed)
+	}
+	return trimmed, nil
 }
 
 func removeRelayDirIfEmpty(dir string) {
@@ -333,10 +355,40 @@ func cleanupDeadRelaySessionDir(sessionID string, dir string) (removed bool, pid
 	if pidIsAlive(parsedPID) {
 		return false, parsedPID, nil
 	}
+	lockFile, locked, err := tryLockRelaySessionDir(dir)
+	if err != nil {
+		return false, parsedPID, err
+	}
+	if !locked {
+		return false, parsedPID, nil
+	}
+	defer func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+	}()
 	if err := os.RemoveAll(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, parsedPID, err
 	}
 	return true, parsedPID, nil
+}
+
+func tryLockRelaySessionDir(dir string) (*os.File, bool, error) {
+	lockPath := filepath.Join(dir, ".lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return lockFile, true, nil
 }
 
 func pidIsAlive(pid int) bool {
