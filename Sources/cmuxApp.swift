@@ -6847,6 +6847,7 @@ private struct GlobalHotkeySection: View {
 
         SettingsCard {
             SettingsCardRow(
+                configurationReview: .settingsOnly,
                 String(localized: "settings.globalHotkey.enable", defaultValue: "Enable System-Wide Hotkey"),
                 subtitle: enableSubtitle
             ) {
