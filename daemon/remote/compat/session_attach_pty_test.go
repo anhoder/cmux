@@ -2,7 +2,6 @@ package compat
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -482,15 +481,18 @@ func ensurePTYNonblocking(t *testing.T, ptmx *os.File) {
 }
 
 func readPTYChunk(ptmx *os.File, buf []byte) (int, error) {
-	n, err := ptmx.Read(buf)
-	if err == nil {
-		return n, nil
+	ready, err := pollPTYReadable(int(ptmx.Fd()), 20*time.Millisecond)
+	if err != nil {
+		if err == syscall.EINTR {
+			return 0, nil
+		}
+		return 0, err
 	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		err = pathErr.Err
+	if !ready {
+		return 0, nil
 	}
-	if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+	n, err := syscall.Read(int(ptmx.Fd()), buf)
+	if err == nil || err == syscall.EAGAIN || err == syscall.EWOULDBLOCK || err == syscall.EINTR {
 		return n, nil
 	}
 	return n, err
