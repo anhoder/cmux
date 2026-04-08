@@ -212,7 +212,6 @@ struct cmuxApp: App {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let processEnvironment = cmuxCurrentProcessEnvironment()
 
-<<<<<<< HEAD
         for (key, value) in ghosttyEnvironmentOverrides(
             processEnvironment: processEnvironment,
             resourceURL: cmuxCurrentResourceURL(fileManager: .default) ?? bundle.resourceURL,
@@ -222,48 +221,6 @@ struct cmuxApp: App {
             fileManager: .default
         ) {
             setenv(key, value, 1)
-=======
-        if getenv("GHOSTTY_RESOURCES_DIR") == nil {
-            if let bundledGhosttyURL,
-               fileManager.fileExists(atPath: bundledGhosttyURL.path),
-               fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            } else if fileManager.fileExists(atPath: ghosttyAppResources) {
-                resolvedResourcesDir = ghosttyAppResources
-            } else if let bundledGhosttyURL, fileManager.fileExists(atPath: bundledGhosttyURL.path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            }
-
-            if let resolvedResourcesDir {
-                setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
-            }
-        }
-
-        if getenv("TERM") == nil {
-            setenv("TERM", TerminalSurface.managedTerminalType, 1)
-        }
-
-        if getenv("COLORTERM") == nil {
-            setenv("COLORTERM", TerminalSurface.managedColorTerm, 1)
-        }
-
-        if getenv("TERM_PROGRAM") == nil {
-            setenv("TERM_PROGRAM", TerminalSurface.managedTerminalProgram, 1)
-        }
-
-        if let resourcesDir = getenv("GHOSTTY_RESOURCES_DIR").flatMap({ String(cString: $0) }) {
-            let resourcesURL = URL(fileURLWithPath: resourcesDir)
-            let resourcesParent = resourcesURL.deletingLastPathComponent()
-            let dataDir = resourcesParent.path
-            let manDir = resourcesParent.appendingPathComponent("man").path
-
-            appendEnvPathIfMissing(
-                "XDG_DATA_DIRS",
-                path: dataDir,
-                defaultValue: "/usr/local/share:/usr/share"
-            )
-            appendEnvPathIfMissing("MANPATH", path: manDir)
->>>>>>> origin/main
         }
     }
 
@@ -4231,12 +4188,9 @@ struct SettingsView: View {
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
     @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
-<<<<<<< HEAD
     @AppStorage(SettingsPIIDisplayMode.key)
     private var settingsPIIDisplayMode = SettingsPIIDisplayMode.defaultValue
-=======
     @AppStorage("sidebarMatchTerminalBackground") private var sidebarMatchTerminalBackground = false
->>>>>>> origin/main
 
     @StateObject private var authManager = AuthManager.shared
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
