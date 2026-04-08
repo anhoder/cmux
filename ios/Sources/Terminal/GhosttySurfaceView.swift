@@ -55,14 +55,12 @@ final class GhosttySurfaceBridge {
 }
 
 private enum GhosttySurfaceDisposer {
-    static let queue = DispatchQueue(label: "GhosttySurfaceDisposer.queue")
-
+    // ghostty_surface_free deadlocks: its pthread_join waits for an internal
+    // IO thread that never exits. Intentionally leak the surface to avoid
+    // hanging the app. TODO: fix the Ghostty surface teardown so the IO
+    // thread exits cleanly and re-enable the free.
     static func dispose(surface: ghostty_surface_t, bridge: GhosttySurfaceBridge) {
-        let retainedBridge = Unmanaged.passRetained(bridge)
-        queue.async {
-            ghostty_surface_free(surface)
-            retainedBridge.release()
-        }
+        // Intentionally not calling ghostty_surface_free(surface) to avoid deadlock
     }
 }
 

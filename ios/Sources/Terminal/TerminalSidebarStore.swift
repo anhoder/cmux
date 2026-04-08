@@ -366,8 +366,24 @@ final class TerminalSidebarStore: ObservableObject {
 
     func renameWorkspace(_ workspaceID: TerminalWorkspace.ID, to name: String) {
         guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
+        let workspace = workspaces[index]
         workspaces[index].title = name
         persist()
+
+        // Send rename to server for remote workspaces so other devices pick it up
+        if let remoteID = workspace.remoteWorkspaceID,
+           let host = server(for: workspace.hostID),
+           let wsPort = host.wsPort {
+            let hostname = host.hostname
+            let secret = host.wsSecret ?? ""
+            DispatchQueue.global(qos: .userInitiated).async {
+                Self.sendWSCommand(
+                    hostname: hostname, port: wsPort, secret: secret,
+                    method: "workspace.rename",
+                    params: ["workspace_id": remoteID, "title": name]
+                )
+            }
+        }
     }
 
     func togglePinned(for workspaceID: TerminalWorkspace.ID) {
@@ -802,6 +818,50 @@ final class TerminalSidebarStore: ObservableObject {
         }
 
         return workspaces
+    }
+
+    /// Send a one-shot JSON-RPC command to a cmuxd-remote WebSocket.
+    @discardableResult
+    private static func sendWSCommand(hostname: String, port: Int, secret: String, method: String, params: [String: Any]) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var timeout = timeval(tv_sec: 3, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(hostname, String(port), &hints, &result) == 0, let addrInfo = result else { return false }
+        defer { freeaddrinfo(addrInfo) }
+
+        guard Darwin.connect(fd, addrInfo.pointee.ai_addr, addrInfo.pointee.ai_addrlen) == 0 else { return false }
+
+        let key = "dGVzdA=="
+        let req = "GET / HTTP/1.1\r\nHost: \(hostname):\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: \(key)\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        _ = req.data(using: .utf8)?.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &buf, buf.count)
+        guard n > 0, String(bytes: buf[0..<n], encoding: .utf8)?.contains("101") == true else { return false }
+
+        if !secret.isEmpty {
+            wsSend(fd: fd, data: "{\"secret\":\"\(secret)\"}")
+            guard let authResp = wsRecv(fd: fd), authResp.contains("authenticated") else { return false }
+        } else {
+            wsSend(fd: fd, data: "{\"secret\":\"\"}")
+            let authResp = wsRecv(fd: fd)
+            if authResp?.contains("unauthorized") == true { return false }
+        }
+
+        let payload: [String: Any] = ["id": 1, "method": method, "params": params]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
+              let jsonString = String(data: jsonData, encoding: .utf8) else { return false }
+        wsSend(fd: fd, data: jsonString)
+        _ = wsRecv(fd: fd)
+        return true
     }
 
     private static func wsSend(fd: Int32, data: String) {
@@ -1338,8 +1398,6 @@ final class TerminalSessionController: ObservableObject {
         self.remoteDaemonResumeState = workspace.remoteDaemonResumeState
         self.phase = workspace.phase
         self.errorMessage = workspace.lastError
-
-        _ = ensureTerminalSurface()
     }
 
     deinit {

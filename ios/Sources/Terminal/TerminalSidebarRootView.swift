@@ -698,48 +698,24 @@ private struct TerminalWorkspaceConversationRow: View {
                 }
 
                 if isOffline {
-                    HStack(spacing: 6) {
-                        Text(host.name)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Text("•")
-                            .foregroundStyle(.tertiary)
-                        Text(TerminalHomeStrings.offlineLabel)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .accessibilityIdentifier("terminal.workspace.preview.\(workspace.id.uuidString)")
+                    Text(TerminalHomeStrings.offlineLabel)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("terminal.workspace.preview.\(workspace.id.uuidString)")
                 } else {
-                    HStack(spacing: 6) {
-                        Text(host.name)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(host.palette.accent)
-                            .lineLimit(1)
-                        Text("•")
-                            .foregroundStyle(.tertiary)
-                        Text(previewText(for: workspace, host: host))
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .accessibilityIdentifier("terminal.workspace.preview.\(workspace.id.uuidString)")
-                    }
+                    Text(previewText(for: workspace, host: host))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("terminal.workspace.preview.\(workspace.id.uuidString)")
                 }
 
-                if !isOffline {
-                    if let lastError = workspace.lastError, workspace.phase == .failed {
-                        Text(lastError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(1)
-                    } else {
-                        Text(statusText(for: workspace.phase))
-                            .font(.caption)
-                            .foregroundStyle(statusColor(for: workspace.phase))
-                            .lineLimit(1)
-                            .accessibilityIdentifier("terminal.workspace.status.\(workspace.id.uuidString)")
-                    }
+                if !isOffline, let lastError = workspace.lastError, workspace.phase == .failed {
+                    Text(lastError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
                 }
             }
         }
@@ -769,19 +745,23 @@ private struct TerminalWorkspaceConversationRow: View {
     private func previewText(for workspace: TerminalWorkspace, host: TerminalHost) -> String {
         let usesPlaceholderPreview = workspace.preview.isEmpty || workspace.preview == host.subtitle
 
+        let raw: String
         if !usesPlaceholderPreview {
-            return workspace.preview
+            raw = workspace.preview
+        } else if let backendPreview = workspace.backendMetadata?.preview, !backendPreview.isEmpty {
+            raw = backendPreview
+        } else if !workspace.preview.isEmpty {
+            raw = workspace.preview
+        } else {
+            return statusText(for: workspace.phase)
         }
 
-        if let backendPreview = workspace.backendMetadata?.preview, !backendPreview.isEmpty {
-            return backendPreview
-        }
-
-        if !workspace.preview.isEmpty {
-            return workspace.preview
-        }
-
-        return statusText(for: workspace.phase)
+        // Strip ANSI escape sequences (CSI with or without ESC prefix, and OSC)
+        return raw.replacingOccurrences(
+            of: "\\x1B?\\[\\??[0-9;]*[A-Za-z]|\\x1B\\][^\u{07}]*\u{07}|\\x1B[()][0-9A-Za-z]",
+            with: "",
+            options: .regularExpression
+        )
     }
 
     private func statusText(for phase: TerminalConnectionPhase) -> String {
