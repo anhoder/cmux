@@ -10,12 +10,13 @@ import Bonsplit
 
 enum ReactGrabSettings {
     static let versionKey = "reactGrabVersion"
-    static let defaultVersion = "0.1.29"
+    static let defaultVersion = "0.1.31"
 
     /// Known versions and their SHA-256 integrity hashes.
     /// Add new entries when bumping the default or to allow user-selected versions.
     static let knownHashes: [String: String] = [
         "0.1.29": "4a1e71090e8ad8bb6049de80ccccdc0f5bb147b9f8fb88886d871612ac7ca04b",
+        "0.1.31": "f70cd9b5a02f9c44a626d6fb58197fc95675fecf9ea06828bc196ca3231fd1ee",
     ]
 
     static func scriptURL(for version: String) -> URL {
