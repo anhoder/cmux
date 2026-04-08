@@ -440,6 +440,11 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         addGestureRecognizer(pinch)
 
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        addGestureRecognizer(pan)
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppDidEnterBackground),
@@ -499,6 +504,18 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
     }
 
     private var pinchAccumulatedScale: CGFloat = 1.0
+
+    @objc private func handleScrollPan(_ gesture: UIPanGestureRecognizer) {
+        guard let surface else { return }
+        if gesture.state == .changed {
+            let translation = gesture.translation(in: self)
+            // Convert points to scroll units. Negative y = scroll up (show history).
+            let scrollY = -translation.y / 10.0
+            ghostty_surface_mouse_scroll(surface, 0, Double(scrollY), 0)
+            gesture.setTranslation(.zero, in: self)
+            needsDraw = true
+        }
+    }
 
     @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
         guard let surface else { return }
