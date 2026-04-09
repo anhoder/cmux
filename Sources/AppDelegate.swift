@@ -14678,6 +14678,9 @@ final class MobileDaemonBridgeInline {
     static let shared = MobileDaemonBridgeInline()
     private var process: Process?
     private var wsPortFilePath: String?
+    #if canImport(TailscaleKit)
+    private var tailscaleManager: TailscaleNodeManager?
+    #endif
 
     private(set) var wsPort: Int?
     private(set) var daemonSocketPath: String?
@@ -14728,16 +14731,53 @@ final class MobileDaemonBridgeInline {
             try? String(port).write(toFile: wsportPath, atomically: true, encoding: .utf8)
             wsPortFilePath = wsportPath
             NSLog("📱 MobileBridge: started ws://127.0.0.1:%d socket=%@ wsport=%@", port, daemonSocket, wsportPath)
+            #if canImport(TailscaleKit)
+            startTailscaleNode(appSupport: appSupport)
+            #endif
         } catch {
             NSLog("📱 MobileBridge: failed: %@", error.localizedDescription)
         }
     }
+
+    #if canImport(TailscaleKit)
+    private func startTailscaleNode(appSupport: String) {
+        let identity = MachineIdentityStore().identity()
+        let tsStateDir = "\(appSupport)/tailscale"
+        try? FileManager.default.createDirectory(atPath: tsStateDir, withIntermediateDirectories: true)
+
+        let manager = TailscaleNodeManager(
+            machineID: identity.machineID,
+            stateDir: tsStateDir,
+            ephemeral: false
+        )
+        self.tailscaleManager = manager
+
+        Task.detached {
+            do {
+                try await manager.start()
+                let addrs = try await manager.addresses()
+                NSLog("📱 MobileBridge: Tailscale node up, hostname=cmux-%@, ip4=%@, ip6=%@",
+                      identity.machineID,
+                      addrs.ip4 ?? "none",
+                      addrs.ip6 ?? "none")
+            } catch {
+                NSLog("📱 MobileBridge: Tailscale node failed: %@", error.localizedDescription)
+            }
+        }
+    }
+    #endif
 
     func stop(killDaemon shouldKill: Bool = false) {
         if shouldKill, let p = process, p.isRunning {
             p.terminate()
             NSLog("📱 MobileBridge: terminated daemon pid=%d on quit", p.processIdentifier)
         }
+        #if canImport(TailscaleKit)
+        if let manager = tailscaleManager {
+            Task { await manager.stop() }
+            tailscaleManager = nil
+        }
+        #endif
         process = nil
         wsPort = nil
         daemonSocketPath = nil
@@ -14795,7 +14835,7 @@ final class MobileDaemonBridgeInline {
         // Derive a stable port from tag or bundle ID to avoid collisions.
         // Uses FNV-1a (not hashValue, which is randomized per process).
         if let tag = env["CMUX_TAG"] ?? env["CMUX_LAUNCH_TAG"], !tag.isEmpty {
-            return 9444 + 1 + (Self.stableHash(tag) % 99)
+            return 52100 + 1 + (Self.stableHash(tag) % 99)
         }
         let bundleId = Bundle.main.bundleIdentifier ?? ""
         let basePrefixes = ["com.cmuxterm.app.debug", "dev.cmux.app.dev"]
@@ -14803,11 +14843,11 @@ final class MobileDaemonBridgeInline {
             if bundleId.count > prefix.count, bundleId.hasPrefix(prefix) {
                 let suffix = String(bundleId.dropFirst(prefix.count + 1))
                 if !suffix.isEmpty {
-                    return 9444 + 1 + (Self.stableHash(suffix) % 99)
+                    return 52100 + 1 + (Self.stableHash(suffix) % 99)
                 }
             }
         }
-        return 9444
+        return 52100
     }
 
     private static func stableHash(_ string: String) -> Int {

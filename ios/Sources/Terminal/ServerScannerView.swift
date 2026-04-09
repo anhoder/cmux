@@ -1,4 +1,5 @@
 import SwiftUI
+import TailscaleKit
 
 struct DiscoveredServer: Identifiable {
     let id = UUID()
@@ -8,14 +9,61 @@ struct DiscoveredServer: Identifiable {
     let version: String
     let workspaceCount: Int
     let wsSecret: String
+    let isTailscale: Bool
+
+    init(hostname: String, port: Int, name: String, version: String, workspaceCount: Int, wsSecret: String, isTailscale: Bool = false) {
+        self.hostname = hostname
+        self.port = port
+        self.name = name
+        self.version = version
+        self.workspaceCount = workspaceCount
+        self.wsSecret = wsSecret
+        self.isTailscale = isTailscale
+    }
+}
+
+/// Thread-safe ring buffer for scanner debug logs.
+final class ScannerLog: @unchecked Sendable {
+    static let shared = ScannerLog()
+    private var entries: [String] = []
+    private let lock = NSLock()
+    private let maxEntries = 200
+
+    func log(_ message: String) {
+        let ts = Self.formatter.string(from: Date())
+        let line = "\(ts) \(message)"
+        lock.lock()
+        entries.append(line)
+        if entries.count > maxEntries { entries.removeFirst(entries.count - maxEntries) }
+        lock.unlock()
+        NSLog("📡 Scanner: %@", message)
+    }
+
+    func allEntries() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.joined(separator: "\n")
+    }
+
+    func clear() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
 }
 
 @MainActor
 final class ServerScanner: ObservableObject {
     @Published var servers: [DiscoveredServer] = []
     @Published var isScanning = false
-
     private var scanTask: Task<Void, Never>?
+    private let log = ScannerLog.shared
 
     func startScan() {
         guard !isScanning else { return }
@@ -23,8 +71,7 @@ final class ServerScanner: ObservableObject {
         servers = []
 
         scanTask = Task {
-            let results = await scanAll()
-            self.servers = results
+            await scanAll()
             self.isScanning = false
         }
     }
@@ -35,27 +82,58 @@ final class ServerScanner: ObservableObject {
         isScanning = false
     }
 
-    private func scanAll() async -> [DiscoveredServer] {
+    private func scanAll() async {
         let secret = loadWsSecret()
+        let relayHost = loadRelayHost()
 
-        // Build list of (hostname, port) candidates
-        var candidates: [(String, Int)] = []
+        log.log("scan.start secret=\(secret.isEmpty ? "empty" : "\(secret.prefix(8))...") relay=\(relayHost ?? "none")")
 
-        // Localhost ports 9444-9543
-        for port in 9444...9543 {
-            candidates.append(("127.0.0.1", port))
+        // Build immediate candidates (localhost + relay host)
+        var candidates: [(String, Int, Bool)] = []
+
+        for port in 52100...52199 {
+            candidates.append(("127.0.0.1", port, false))
         }
 
-        // Tailscale IPs from relay host file
-        if let relayHost = loadRelayHost(), relayHost != "127.0.0.1" {
-            for port in 9444...9543 {
-                candidates.append((relayHost, port))
+        if let relayHost, relayHost != "127.0.0.1" {
+            log.log("scan.relay adding \(relayHost):52100-52199")
+            for port in 52100...52199 {
+                candidates.append((relayHost, port, false))
             }
         }
 
-        // Probe in parallel batches
-        let batchSize = 20
+        log.log("scan.candidates count=\(candidates.count)")
+
+        // Start port scanning and TailscaleKit discovery concurrently.
+        // Port scanning proceeds immediately; TailscaleKit has a 10s timeout.
         var found: [DiscoveredServer] = []
+        var seenEndpoints: Set<String> = []
+
+        // Probe known candidates first (non-blocking)
+        found = await probeCandidates(candidates, secret: secret, existing: found, seen: &seenEndpoints)
+        log.log("scan.probe.done found=\(found.count)")
+
+        // TailscaleKit peer discovery is disabled until auth is configured.
+        // tailscale_start() blocks forever without an auth key, and Swift task
+        // cancellation cannot interrupt a blocked C/Go function call.
+        // TailscaleKit peer discovery disabled until auth flow is implemented.
+        // tailscale_start() blocks forever without an auth key.
+        #if !targetEnvironment(simulator)
+        log.log("tailscale.skip reason=no_auth_configured")
+        #endif
+
+        self.servers = found.sorted { $0.port < $1.port }
+        log.log("scan.complete total=\(found.count)")
+    }
+
+    private func probeCandidates(
+        _ candidates: [(String, Int, Bool)],
+        secret: String,
+        existing: [DiscoveredServer],
+        seen: inout Set<String>
+    ) async -> [DiscoveredServer] {
+        var found = existing
+        let batchSize = 20
 
         for batchStart in stride(from: 0, to: candidates.count, by: batchSize) {
             guard !Task.isCancelled else { break }
@@ -63,9 +141,9 @@ final class ServerScanner: ObservableObject {
             let batch = candidates[batchStart..<batchEnd]
 
             let results = await withTaskGroup(of: DiscoveredServer?.self) { group in
-                for (host, port) in batch {
+                for (host, port, isTailscale) in batch {
                     group.addTask {
-                        await Self.probeAndIdentify(hostname: host, port: port, secret: secret)
+                        await Self.probeAndIdentify(hostname: host, port: port, secret: secret, isTailscale: isTailscale)
                     }
                 }
                 var batchResults: [DiscoveredServer] = []
@@ -77,25 +155,28 @@ final class ServerScanner: ObservableObject {
                 return batchResults
             }
 
-            found.append(contentsOf: results)
-            // Update UI incrementally
+            for server in results {
+                let key = "\(server.name):\(server.port)"
+                if seen.insert(key).inserted {
+                    found.append(server)
+                    log.log("scan.found \(server.hostname):\(server.port) name=\(server.name) ws=\(server.workspaceCount)")
+                }
+            }
             self.servers = found.sorted { $0.port < $1.port }
         }
-
-        return found.sorted { $0.port < $1.port }
+        return found
     }
 
-    private static func probeAndIdentify(hostname: String, port: Int, secret: String) async -> DiscoveredServer? {
-        // Full WebSocket handshake + hello RPC on a background thread
+    private static func probeAndIdentify(hostname: String, port: Int, secret: String, isTailscale: Bool = false) async -> DiscoveredServer? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                let result = Self.probeSync(hostname: hostname, port: port, secret: secret)
+                let result = Self.probeSync(hostname: hostname, port: port, secret: secret, isTailscale: isTailscale)
                 continuation.resume(returning: result)
             }
         }
     }
 
-    private static func probeSync(hostname: String, port: Int, secret: String) -> DiscoveredServer? {
+    private static func probeSync(hostname: String, port: Int, secret: String, isTailscale: Bool = false) -> DiscoveredServer? {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -104,7 +185,6 @@ final class ServerScanner: ObservableObject {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-        // Connect
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
@@ -117,18 +197,15 @@ final class ServerScanner: ObservableObject {
         }
         guard connectResult == 0 else { return nil }
 
-        // WebSocket upgrade
         let req = "GET / HTTP/1.1\r\nHost: \(hostname):\(port)\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         _ = req.data(using: .utf8)?.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = read(fd, &buf, buf.count)
         guard n > 0, String(bytes: buf[0..<n], encoding: .utf8)?.contains("101") == true else { return nil }
 
-        // Auth
         wsSend(fd: fd, data: "{\"secret\":\"\(secret)\"}")
         guard let authResp = wsRecv(fd: fd), authResp.contains("authenticated") else { return nil }
 
-        // Hello RPC
         wsSend(fd: fd, data: "{\"id\":1,\"method\":\"hello\"}")
         guard let helloResp = wsRecv(fd: fd),
               let helloData = helloResp.data(using: .utf8),
@@ -147,7 +224,8 @@ final class ServerScanner: ObservableObject {
             name: name,
             version: version,
             workspaceCount: workspaceCount,
-            wsSecret: secret
+            wsSecret: secret,
+            isTailscale: isTailscale
         )
     }
 
@@ -201,12 +279,22 @@ final class ServerScanner: ObservableObject {
     // MARK: - Config helpers
 
     private func loadWsSecret() -> String {
+        // Device: read from app bundle; Simulator: read from host filesystem
+        if let bundlePath = Bundle.main.path(forResource: "mobile-ws-secret", ofType: nil),
+           let s = try? String(contentsOfFile: bundlePath, encoding: .utf8)
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           !s.isEmpty {
+            log.log("config.secret source=bundle")
+            return s
+        }
         let home = ProcessInfo.processInfo.environment["SIMULATOR_HOST_HOME"]
             ?? ProcessInfo.processInfo.environment["HOME"]
             ?? NSHomeDirectory()
         let path = "\(home)/Library/Application Support/cmux/mobile-ws-secret"
-        return (try? String(contentsOfFile: path, encoding: .utf8)
+        let s = (try? String(contentsOfFile: path, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+        log.log("config.secret source=\(s.isEmpty ? "missing" : "filesystem")")
+        return s
     }
 
     private func loadRelayHost() -> String? {
@@ -223,6 +311,7 @@ final class ServerScanner: ObservableObject {
 struct ServerScannerView: View {
     @StateObject private var scanner = ServerScanner()
     @State private var connectedPorts: Set<Int>
+    @State private var showingLogs = false
     let onSelect: (DiscoveredServer) -> Void
     let onRemove: (DiscoveredServer) -> Void
     let onDismiss: () -> Void
@@ -280,6 +369,14 @@ struct ServerScannerView: View {
                         ServerScanRow(server: server, isConnected: isConnected)
                     }
                 }
+
+                Section {
+                    Button {
+                        showingLogs = true
+                    } label: {
+                        Label(String(localized: "server.scan.logs", defaultValue: "Scanner Logs"), systemImage: "doc.text")
+                    }
+                }
             }
             .navigationTitle(String(localized: "server.scan.title", defaultValue: "Find Servers"))
             .navigationBarTitleDisplayMode(.inline)
@@ -304,6 +401,52 @@ struct ServerScannerView: View {
             }
             .task {
                 scanner.startScan()
+            }
+            .sheet(isPresented: $showingLogs) {
+                ScannerLogView()
+            }
+        }
+    }
+
+}
+
+struct ScannerLogView: View {
+    @State private var logText = ScannerLog.shared.allEntries()
+    @State private var copied = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(logText.isEmpty ? "No logs yet." : logText)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .textSelection(.enabled)
+            }
+            .navigationTitle(String(localized: "server.scan.logs.title", defaultValue: "Scanner Logs"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        UIPasteboard.general.string = logText
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                    } label: {
+                        Label(
+                            copied ? String(localized: "server.scan.logs.copied", defaultValue: "Copied") : String(localized: "server.scan.logs.copy", defaultValue: "Copy"),
+                            systemImage: copied ? "checkmark" : "doc.on.doc"
+                        )
+                    }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "server.scan.logs.clear", defaultValue: "Clear")) {
+                        ScannerLog.shared.clear()
+                        logText = ""
+                    }
+                }
+            }
+            .onAppear {
+                logText = ScannerLog.shared.allEntries()
             }
         }
     }
@@ -347,6 +490,9 @@ private struct ServerScanRow: View {
     private var displayName: String {
         if server.hostname == "127.0.0.1" {
             return "Local (:\(server.port))"
+        }
+        if server.isTailscale {
+            return "\(server.name) (Tailscale)"
         }
         return "\(server.hostname) (:\(server.port))"
     }

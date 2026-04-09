@@ -6874,7 +6874,7 @@ enum LocalTerminalDaemonBridge {
         } else if let cmuxPort = Int(environment["CMUX_PORT"] ?? "") {
             wsPort = cmuxPort + 1
         } else {
-            wsPort = 9444
+            wsPort = 52100
         }
         config?.wsPort = wsPort
         config?.wsSecret = resolveWebSocketSecret(environment: environment)

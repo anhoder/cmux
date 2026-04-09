@@ -647,16 +647,28 @@ final class TerminalSidebarStore: ObservableObject {
               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let resultObj = json["result"] as? [String: Any],
               let workspaces = resultObj["workspaces"] as? [[String: Any]] else {
+            ScannerLog.shared.log("subscription.parse_failed hostname=\(hostname) port=\(port)")
             return
         }
 
-        let stableID = "localhost-\(port)"
+        ScannerLog.shared.log("subscription.workspaces hostname=\(hostname) port=\(port) count=\(workspaces.count)")
+
+        // Match host by hostname+port since stableID format varies (localhost vs IP)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let resolvedHostID = self.hosts.first(where: { $0.stableID == stableID })?.id
-            guard let hostID = resolvedHostID else { return }
+            let resolvedHostID = self.hosts.first(where: {
+                $0.hostname == hostname && $0.wsPort == port
+            })?.id ?? self.hosts.first(where: {
+                $0.stableID == "\(hostname)-\(port)"
+            })?.id ?? self.hosts.first(where: {
+                $0.stableID == "localhost-\(port)"
+            })?.id
+            guard let hostID = resolvedHostID else {
+                ScannerLog.shared.log("subscription.host_not_found hostname=\(hostname) port=\(port) known=\(self.hosts.map(\.stableID))")
+                return
+            }
             let host = self.hosts.first(where: { $0.id == hostID }) ?? TerminalHost(
-                stableID: stableID, name: hostname, hostname: hostname,
+                stableID: "\(hostname)-\(port)", name: hostname, hostname: hostname,
                 port: 22, username: "cmux", symbolName: "desktopcomputer",
                 palette: .sky, source: .discovered, transportPreference: .remoteDaemon
             )
@@ -1162,14 +1174,14 @@ final class TerminalSidebarStore: ObservableObject {
         #if DEBUG
         guard host.wsPort == nil else { return }
 
-        // Check for embedded port from tagged build, fall back to 9444
+        // Check for embedded port from tagged build, fall back to 52100
         if let bundlePath = Bundle.main.path(forResource: "debug-ws-port", ofType: nil),
            let portStr = try? String(contentsOfFile: bundlePath, encoding: .utf8)
                .trimmingCharacters(in: .whitespacesAndNewlines),
            let port = Int(portStr) {
             host.wsPort = port
         } else {
-            host.wsPort = 9444
+            host.wsPort = 52100
         }
 
         // Load ws-secret: simulator reads from Mac filesystem, device reads from app bundle

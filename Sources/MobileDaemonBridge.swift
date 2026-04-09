@@ -107,7 +107,7 @@ final class MobileDaemonBridge {
         // which is randomized per process in Swift).
         let tag = env["CMUX_TAG"] ?? env["CMUX_LAUNCH_TAG"] ?? ""
         if !tag.isEmpty {
-            return 9444 + 1 + (Self.stableHash(tag) % 99)
+            return 52100 + 1 + (Self.stableHash(tag) % 99)
         }
         let bundleId = Bundle.main.bundleIdentifier ?? ""
         let basePrefixes = ["com.cmuxterm.app.debug", "dev.cmux.app.dev"]
@@ -115,11 +115,11 @@ final class MobileDaemonBridge {
             if bundleId.count > prefix.count, bundleId.hasPrefix(prefix) {
                 let suffix = String(bundleId.dropFirst(prefix.count + 1))
                 if !suffix.isEmpty {
-                    return 9444 + 1 + (Self.stableHash(suffix) % 99)
+                    return 52100 + 1 + (Self.stableHash(suffix) % 99)
                 }
             }
         }
-        return 9444
+        return 52100
     }
 
     private static func stableHash(_ string: String) -> Int {

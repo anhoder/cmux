@@ -17,8 +17,16 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
     convenience init() {
         // In DEBUG, auto-probe common local ports for cmuxd-remote
         #if DEBUG
-        // Read the WS secret from the host's well-known file (simulator shares host filesystem)
+        // Read the WS secret: device reads from app bundle, simulator from host filesystem
         let hostSecret: String = {
+            // Device: embedded by reload.sh
+            if let bundlePath = Bundle.main.path(forResource: "mobile-ws-secret", ofType: nil),
+               let s = try? String(contentsOfFile: bundlePath, encoding: .utf8)
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !s.isEmpty {
+                return s
+            }
+            // Simulator: shared filesystem with host Mac
             let home = ProcessInfo.processInfo.environment["SIMULATOR_HOST_HOME"]
                 ?? ProcessInfo.processInfo.environment["HOME"]
                 ?? NSHomeDirectory()
@@ -27,8 +35,25 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
                 .trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
         }()
 
+        // Determine hostname: device uses relay host (Tailscale IP), simulator uses localhost
+        let probeHostname: String = {
+            #if targetEnvironment(simulator)
+            return "127.0.0.1"
+            #else
+            if let path = Bundle.main.path(forResource: "debug-relay-host", ofType: nil),
+               let host = try? String(contentsOfFile: path, encoding: .utf8)
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !host.isEmpty {
+                return host
+            }
+            return "127.0.0.1"
+            #endif
+        }()
+
         var debugHosts: [TerminalHost] = []
         var seenPorts: Set<Int> = []
+
+        ScannerLog.shared.log("discovery.init hostname=\(probeHostname) secret=\(hostSecret.isEmpty ? "empty" : "\(hostSecret.prefix(8))...")")
 
         // Check for embedded port from tagged build
         if let bundlePath = Bundle.main.path(forResource: "debug-ws-port", ofType: nil),
@@ -36,16 +61,20 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
                .trimmingCharacters(in: .whitespacesAndNewlines),
            let port = Int(portStr) {
             seenPorts.insert(port)
+            ScannerLog.shared.log("discovery.port embedded=\(port)")
             debugHosts.append(TerminalHost(
-                stableID: "localhost-\(port)",
-                name: "Local Dev (:\(port))",
-                hostname: "127.0.0.1", port: 22, username: "cmux",
+                stableID: "\(probeHostname)-\(port)",
+                name: probeHostname == "127.0.0.1" ? "Local Dev (:\(port))" : "\(probeHostname) (:\(port))",
+                hostname: probeHostname, port: 22, username: "cmux",
                 symbolName: "desktopcomputer", palette: .sky,
                 source: .discovered, transportPreference: .remoteDaemon,
                 wsPort: port, wsSecret: hostSecret
             ))
+        } else {
+            ScannerLog.shared.log("discovery.port not_embedded")
         }
 
+        ScannerLog.shared.log("discovery.hosts count=\(debugHosts.count)")
         self.init(existingHosts: debugHosts)
         #else
         // Load persisted hosts from GRDB snapshot store for production discovery
@@ -91,6 +120,8 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
         let hostsToProbe = hosts.filter { $0.wsPort != nil }
         guard !hostsToProbe.isEmpty else { return }
 
+        ScannerLog.shared.log("discovery.probe starting count=\(hostsToProbe.count)")
+
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var onlineHosts: [TerminalHost] = []
             let lock = NSLock()
@@ -101,7 +132,10 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
                 DispatchQueue.global(qos: .utility).async {
                     defer { group.leave() }
                     var probed = host
-                    if Self.probeHost(hostname: host.hostname, port: host.wsPort ?? 9444, secret: host.wsSecret ?? "") {
+                    let port = host.wsPort ?? 52100
+                    let ok = Self.probeHost(hostname: host.hostname, port: port, secret: host.wsSecret ?? "")
+                    ScannerLog.shared.log("discovery.probe \(host.hostname):\(port) result=\(ok ? "online" : "offline")")
+                    if ok {
                         probed.machineStatus = .online
                         lock.lock()
                         onlineHosts.append(probed)
@@ -111,6 +145,7 @@ final class TailscaleServerDiscovery: TerminalServerDiscovering {
             }
 
             group.wait()
+            ScannerLog.shared.log("discovery.probe.done online=\(onlineHosts.count)/\(hostsToProbe.count)")
             DispatchQueue.main.async { self?.subject.send(onlineHosts) }
         }
     }
