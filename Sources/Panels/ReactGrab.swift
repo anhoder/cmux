@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import WebKit
 
@@ -10,23 +9,11 @@ import Bonsplit
 
 enum ReactGrabSettings {
     static let versionKey = "reactGrabVersion"
+
+    /// Built from https://github.com/aidenybai/react-grab (v0.1.31) with
+    /// PREVIEW_TEXT_MAX_LENGTH increased to 50000 so element text is not
+    /// truncated to 100 chars.
     static let defaultVersion = "0.1.31"
-
-    /// Known versions and their SHA-256 integrity hashes.
-    /// Add new entries when bumping the default or to allow user-selected versions.
-    static let knownHashes: [String: String] = [
-        "0.1.29": "4a1e71090e8ad8bb6049de80ccccdc0f5bb147b9f8fb88886d871612ac7ca04b",
-        "0.1.31": "f70cd9b5a02f9c44a626d6fb58197fc95675fecf9ea06828bc196ca3231fd1ee",
-    ]
-
-    static func scriptURL(for version: String) -> URL {
-        URL(string: "https://unpkg.com/react-grab@\(version)/dist/index.global.js")!
-    }
-
-    static var configuredVersion: String {
-        let stored = UserDefaults.standard.string(forKey: versionKey)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return stored.isEmpty ? defaultVersion : stored
-    }
 }
 
 struct ReactGrabShortcutPanelSnapshot: Equatable {
@@ -87,84 +74,34 @@ private enum ReactGrabPastebackContentFilter {
 
 // MARK: - Script Loader
 
-/// Fetches, integrity-checks, and caches the react-grab script.
+/// Loads the bundled react-grab script from app resources.
 /// Shared across all BrowserPanel instances.
 enum ReactGrabScriptLoader {
     private static var cachedScript: String?
-    private static var cachedVersion: String?
-    private static var prefetchTask: Task<String?, Never>?
 
     static func prefetch() {
-        let version = ReactGrabSettings.configuredVersion
-        // Invalidate cache if version changed.
-        if cachedVersion != version {
-            cachedScript = nil
-            cachedVersion = nil
-        }
         guard cachedScript == nil else { return }
-        guard prefetchTask == nil else { return }
-        prefetchTask = Task.detached(priority: .low) {
-            let result = await doFetch(version: version)
-            await MainActor.run { prefetchTask = nil }
-            return result
-        }
+        cachedScript = loadFromBundle()
     }
 
     static func fetch() async -> String? {
-        let version = ReactGrabSettings.configuredVersion
-        if cachedVersion == version, let cached = cachedScript { return cached }
-        prefetch()
-        return await prefetchTask?.value
+        if let cached = cachedScript { return cached }
+        let script = loadFromBundle()
+        cachedScript = script
+        return script
     }
 
-    private static func doFetch(version: String) async -> String? {
-        let url = ReactGrabSettings.scriptURL(for: version)
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            if let expectedHash = ReactGrabSettings.knownHashes[version] {
-                let hash = SHA256.hash(data: data)
-                let hex = hash.compactMap { String(format: "%02x", $0) }.joined()
-                guard hex == expectedHash else {
-                    NSLog("ReactGrab: integrity mismatch for v%@ (got %@)", version, hex)
-                    return nil
-                }
-            }
-            guard let script = String(data: data, encoding: .utf8) else { return nil }
-            let patched = Self.applyPatches(script)
-            await MainActor.run {
-                cachedScript = patched
-                cachedVersion = version
-            }
-            return patched
-        } catch {
-            NSLog("ReactGrab: fetch failed for v%@: %@", version, error.localizedDescription)
+    private static func loadFromBundle() -> String? {
+        guard let url = Bundle.main.url(forResource: "react-grab", withExtension: "js") else {
+            NSLog("ReactGrab: react-grab.js not found in bundle")
             return nil
         }
-    }
-
-    /// Post-integrity-check patches applied to the upstream script.
-    private static func applyPatches(_ script: String) -> String {
-        var s = script
-
-        // The truncation helper `Pa=(e,t)=>e.length>t?...` caps text to 100 chars
-        // in element snippets. Replace with an identity function so the full
-        // innerText is preserved.
-        s = s.replacingOccurrences(
-            of: "Pa=(e,t)=>e.length>t?`${e.slice(0,t)}...`:e",
-            with: "Pa=(e,t)=>e"
-        )
-
-        // Tailwind v4 CSS relies on @property to register --tw-* custom properties,
-        // but @property inside shadow DOM <style> may not register globally in WebKit.
-        // The @supports fallback that initializes these properties fails on modern
-        // Safari (16.4+) because Safari now supports margin-trim:inline. Force the
-        // fallback to always apply so --tw-* properties have correct initial values.
-        s = s.replacingOccurrences(
-            of: "@supports (((-webkit-hyphens:none)) and (not (margin-trim:inline))) or ((-moz-orient:inline) and (not (color:rgb(from red r g b))))",
-            with: "@supports (display:block)"
-        )
-
-        return s
+        do {
+            return try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            NSLog("ReactGrab: failed to read bundled script: %@", error.localizedDescription)
+            return nil
+        }
     }
 }
 
