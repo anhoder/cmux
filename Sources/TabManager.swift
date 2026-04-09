@@ -1395,19 +1395,36 @@ class TabManager: ObservableObject {
             return
         }
 
-        for workspace in tabs where !workspace.isRemoteWorkspace && !workspace.gitMetadataWatcherDisabled {
-            for panelId in workspace.panels.keys where gitProbeDirectory(for: workspace, panelId: panelId) != nil {
-                scheduleWorkspaceGitMetadataRefreshIfPossible(
-                    workspaceId: workspace.id,
-                    panelId: panelId,
-                    reason: reason
-                )
-            }
+        for workspace in tabs {
+            scheduleWorkspaceGitMetadataRefreshForAllPanelsIfPossible(
+                in: workspace,
+                reason: reason
+            )
         }
     }
 
     private func isWorkspaceGitMetadataWatcherEnabled(for workspace: Workspace) -> Bool {
         GitMetadataWatcherSettings.isEnabled() && !workspace.gitMetadataWatcherDisabled
+    }
+
+    private func scheduleWorkspaceGitMetadataRefreshForAllPanelsIfPossible(
+        in workspace: Workspace,
+        reason: String,
+        delays: [TimeInterval] = [0]
+    ) {
+        guard !workspace.isRemoteWorkspace,
+              isWorkspaceGitMetadataWatcherEnabled(for: workspace) else {
+            return
+        }
+
+        for panelId in workspace.panels.keys where gitProbeDirectory(for: workspace, panelId: panelId) != nil {
+            scheduleWorkspaceGitMetadataRefreshIfPossible(
+                workspaceId: workspace.id,
+                panelId: panelId,
+                reason: reason,
+                delays: delays
+            )
+        }
     }
 
     private func attachWorkspaceGitEventWatcher(
@@ -1915,14 +1932,10 @@ class TabManager: ObservableObject {
         return rerunPending
     }
 
-    nonisolated static func workspacePullRequestRefreshAllowsRepoCache(reason: String) -> Bool {
-        let cacheablePrefixes = [
-            "localGitProbe",
-            "gitFsEvent",
-        ]
-        return cacheablePrefixes.contains { prefix in
-            reason == prefix || reason.hasPrefix("\(prefix).")
-        }
+    nonisolated static func workspacePullRequestRefreshAllowsRepoCache(reason _: String) -> Bool {
+        // Git-triggered PR refreshes need fresh repository data. Reusing recent
+        // GitHub results here can leave merged/closed state stale in the sidebar.
+        false
     }
 
     func refreshTrackedWorkspaceGitMetadataForTesting() {
@@ -1959,6 +1972,14 @@ class TabManager: ObservableObject {
         let probeKeys = Set(workspaceGitProbeStateByKey.keys.filter { $0.workspaceId == workspaceId })
             .union(workspaceGitProbeTimersByKey.keys.filter { $0.workspaceId == workspaceId })
         return Set(probeKeys.map(\.panelId))
+    }
+
+    func attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: UUID) -> Set<UUID> {
+        Set(
+            workspaceGitRepositoryByProbeKey.keys
+                .filter { $0.workspaceId == workspaceId }
+                .map(\.panelId)
+        )
     }
 
     private func trackedWorkspaceGitMetadataPollCandidatePanelIds(
@@ -2626,14 +2647,21 @@ class TabManager: ObservableObject {
         }
 
         let nextBranch = snapshot.branch
+        let resolvedDirtyState: Bool? = {
+            guard snapshot.branch != nil else { return nil }
+            if let isDirty = snapshot.isDirty {
+                return isDirty
+            }
+            if snapshot.gitMetadataWatcherOptedOut {
+                return false
+            }
+            return workspace.panelGitBranches[probeKey.panelId]?.isDirty ?? false
+        }()
         if let nextBranch {
-            let resolvedDirtyState = snapshot.isDirty
-                ?? workspace.panelGitBranches[probeKey.panelId]?.isDirty
-                ?? false
             workspace.updatePanelGitBranch(
                 panelId: probeKey.panelId,
                 branch: nextBranch,
-                isDirty: resolvedDirtyState
+                isDirty: resolvedDirtyState ?? false
             )
         } else {
             workspace.clearPanelGitBranch(panelId: probeKey.panelId)
@@ -2698,7 +2726,7 @@ class TabManager: ObservableObject {
         dlog(
             "workspace.gitProbe.apply workspace=\(probeKey.workspaceId.uuidString.prefix(5)) " +
             "panel=\(probeKey.panelId.uuidString.prefix(5)) branch=\(branchLabel) " +
-            "dirty=\((snapshot.isDirty ?? workspace.panelGitBranches[probeKey.panelId]?.isDirty ?? false) ? 1 : 0) " +
+            "dirty=\((resolvedDirtyState ?? false) ? 1 : 0) " +
             "pr=\(prLabel)"
         )
 #endif
@@ -4274,13 +4302,10 @@ class TabManager: ObservableObject {
             clearWorkspaceGitProbes(workspaceId: workspaceId)
 
             if !disabled {
-                for panelId in workspace.panels.keys where gitProbeDirectory(for: workspace, panelId: panelId) != nil {
-                    scheduleWorkspaceGitMetadataRefreshIfPossible(
-                        workspaceId: workspace.id,
-                        panelId: panelId,
-                        reason: "workspaceSettingChanged"
-                    )
-                }
+                scheduleWorkspaceGitMetadataRefreshForAllPanelsIfPossible(
+                    in: workspace,
+                    reason: "workspaceSettingChanged"
+                )
             }
         }
     }
@@ -4545,6 +4570,10 @@ class TabManager: ObservableObject {
         if select {
             selectedTabId = workspace.id
         }
+        scheduleWorkspaceGitMetadataRefreshForAllPanelsIfPossible(
+            in: workspace,
+            reason: "workspaceAttached"
+        )
     }
 
     // Keep closeTab as convenience alias
@@ -7437,6 +7466,7 @@ extension TabManager {
             hasher.combine(workspace.customDescription ?? "")
             hasher.combine(workspace.customColor ?? "")
             hasher.combine(workspace.isPinned)
+            hasher.combine(workspace.gitMetadataWatcherDisabled)
             hasher.combine(workspace.panels.count)
             hasher.combine(workspace.statusEntries.count)
             hasher.combine(workspace.metadataBlocks.count)
@@ -7501,6 +7531,7 @@ extension TabManager {
         for key in existingProbeKeys {
             clearWorkspaceGitProbe(key)
         }
+        stopAllWorkspaceGitEventWatchers()
         workspaceGitTrackedDirectoryByKey.removeAll()
         resetWorkspacePullRequestRefreshState()
 

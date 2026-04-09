@@ -434,12 +434,11 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertFalse(TabManager.shouldSkipWorkspacePullRequestLookup(branch: "release/master-fix"))
     }
 
-    func testWorkspacePullRequestRefreshAllowsRepoCacheOnlyForLocalProbeAndGitEvents() {
-        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe"))
-        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe.followUp"))
-        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "gitFsEvent"))
-        XCTAssertTrue(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "gitFsEvent.followUp"))
-
+    func testWorkspacePullRequestRefreshDoesNotAllowRepoCacheForCurrentReasons() {
+        XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe"))
+        XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "localGitProbe.followUp"))
+        XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "gitFsEvent"))
+        XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "gitFsEvent.followUp"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange.followUp"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "directoryChange"))
@@ -660,6 +659,50 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertEqual(workspace.sidebarGitBranchesInDisplayOrder().map(\.branch), ["main"])
     }
 
+    func testPeriodicWorkspaceGitMetadataRefreshClearsDirtyStateWhenWatcherOptsOut() throws {
+        let fileManager = FileManager.default
+        let repoURL = try makeTempGitRepoWithInitialCommit(prefix: "cmux-git-dirty-optout-refresh")
+        defer { try? fileManager.removeItem(at: repoURL) }
+
+        try "changed\n".write(
+            to: repoURL.appendingPathComponent("README.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+
+        manager.updateSurfaceDirectory(tabId: workspace.id, surfaceId: panelId, directory: repoURL.path)
+
+        XCTAssertTrue(
+            waitForCondition {
+                workspace.panelGitBranches[panelId]?.branch == "main" &&
+                    workspace.panelGitBranches[panelId]?.isDirty == true
+            }
+        )
+
+        try "".write(
+            to: repoURL.appendingPathComponent(".cmuxignore"),
+            atomically: true,
+            encoding: .utf8
+        )
+        manager.refreshTrackedWorkspaceGitMetadataForTesting()
+
+        XCTAssertTrue(
+            waitForCondition {
+                workspace.panelGitBranches[panelId]?.branch == "main" &&
+                    workspace.panelGitBranches[panelId]?.isDirty == false
+            }
+        )
+        XCTAssertEqual(workspace.gitBranch?.branch, "main")
+        XCTAssertEqual(workspace.gitBranch?.isDirty, false)
+    }
+
     func testWorkspaceGitMetadataSummaryHonorsCmuxIgnoreOptOut() throws {
         let fileManager = FileManager.default
         let repoURL = try makeTempGitRepoWithInitialCommit(prefix: "cmux-git-ignore-optout")
@@ -851,6 +894,77 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertEqual(
             TabManager.githubRepositorySlugsForTesting(directory: worktreeURL.path),
             ["ghostty-org/ghostty", "manaflow-ai/cmux"]
+        )
+    }
+
+    func testAttachWorkspaceReattachesGitWatcherAfterCrossWindowMove() throws {
+        let fileManager = FileManager.default
+        let repoURL = try makeTempGitRepoWithInitialCommit(prefix: "cmux-git-move-watcher")
+        defer { try? fileManager.removeItem(at: repoURL) }
+
+        let sourceManager = TabManager()
+        guard let workspace = sourceManager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+
+        sourceManager.updateSurfaceDirectory(tabId: workspace.id, surfaceId: panelId, directory: repoURL.path)
+        XCTAssertTrue(
+            waitForCondition(timeout: 12.0) {
+                sourceManager.attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: workspace.id)
+                    .contains(panelId)
+            }
+        )
+
+        let destinationManager = TabManager()
+        let movedWorkspace = try XCTUnwrap(sourceManager.detachWorkspace(tabId: workspace.id))
+
+        XCTAssertEqual(
+            sourceManager.attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: movedWorkspace.id),
+            Set<UUID>()
+        )
+
+        destinationManager.attachWorkspace(movedWorkspace)
+
+        XCTAssertTrue(
+            waitForCondition(timeout: 12.0) {
+                destinationManager.attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: movedWorkspace.id)
+                    .contains(panelId)
+            }
+        )
+    }
+
+    func testRestoreSessionSnapshotClearsGitWatchersForReplacedWorkspaces() throws {
+        let fileManager = FileManager.default
+        let repoURL = try makeTempGitRepoWithInitialCommit(prefix: "cmux-git-restore-watchers")
+        defer { try? fileManager.removeItem(at: repoURL) }
+
+        let manager = TabManager()
+        guard let workspace = manager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+
+        manager.updateSurfaceDirectory(tabId: workspace.id, surfaceId: panelId, directory: repoURL.path)
+        XCTAssertTrue(
+            waitForCondition(timeout: 12.0) {
+                manager.attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: workspace.id)
+                    .contains(panelId)
+            }
+        )
+
+        manager.restoreSessionSnapshot(
+            SessionTabManagerSnapshot(
+                selectedWorkspaceIndex: nil,
+                workspaces: []
+            )
+        )
+
+        XCTAssertEqual(
+            manager.attachedWorkspaceGitWatcherPanelIdsForTesting(workspaceId: workspace.id),
+            Set<UUID>()
         )
     }
 
