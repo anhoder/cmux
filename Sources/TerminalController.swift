@@ -1503,9 +1503,7 @@ class TerminalController {
 
             // Handle client in new thread
             Thread.detachNewThread { [weak self] in
-                MainActor.assumeIsolated {
-                    self?.handleClient(clientSocket, peerPid: peerPid)
-                }
+                self?.handleClient(clientSocket, peerPid: peerPid)
             }
         }
     }
