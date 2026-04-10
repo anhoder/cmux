@@ -276,42 +276,6 @@ final class GhosttyConfigTests: XCTestCase {
         XCTAssertEqual(second.fontFamily, "reload-2")
     }
 
-    func testLegacyConfigFallbackUsesLegacyFileWhenConfigGhosttyIsEmpty() {
-        XCTAssertTrue(
-            GhosttyApp.shouldLoadLegacyGhosttyConfig(
-                newConfigFileSize: 0,
-                legacyConfigFileSize: 42
-            )
-        )
-    }
-
-    func testLegacyConfigFallbackSkipsWhenNewFileMissingOrLegacyEmpty() {
-        XCTAssertFalse(
-            GhosttyApp.shouldLoadLegacyGhosttyConfig(
-                newConfigFileSize: nil,
-                legacyConfigFileSize: 42
-            )
-        )
-        XCTAssertFalse(
-            GhosttyApp.shouldLoadLegacyGhosttyConfig(
-                newConfigFileSize: 10,
-                legacyConfigFileSize: 42
-            )
-        )
-        XCTAssertFalse(
-            GhosttyApp.shouldLoadLegacyGhosttyConfig(
-                newConfigFileSize: 0,
-                legacyConfigFileSize: 0
-            )
-        )
-        XCTAssertFalse(
-            GhosttyApp.shouldLoadLegacyGhosttyConfig(
-                newConfigFileSize: 0,
-                legacyConfigFileSize: nil
-            )
-        )
-    }
-
     func testCmuxAppSupportConfigURLsUseReleaseConfigForDebugBundleWithoutCurrentConfig() throws {
         try withTemporaryAppSupportDirectory { appSupportDirectory in
             let releaseConfigURL = try writeAppSupportConfig(

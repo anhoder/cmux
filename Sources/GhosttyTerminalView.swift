@@ -1858,6 +1858,11 @@ class GhosttyApp {
         }
     }
 
+    private struct UserFontConfigScanPlan {
+        var topLevelConfigPaths: [String]
+        var overrideConfigPaths: [String]
+    }
+
     /// Returns (range, font) pairs for CJK font fallback based on the system's
     /// preferred languages, or nil if no CJK language is detected. Each language
     /// only maps its own script ranges to avoid assigning glyphs to a font that
@@ -1904,12 +1909,21 @@ class GhosttyApp {
     /// primary font family.
     static func autoInjectedCJKFontMappings(
         preferredLanguages: [String] = Locale.preferredLanguages,
-        configPaths: [String] = loadedCJKScanPaths(),
+        configPaths: [String]? = nil,
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
         rangeCoverageProbe: ((String, String) -> Bool)? = nil
     ) -> [(String, String)]? {
         guard var mappings = cjkFontMappings(preferredLanguages: preferredLanguages) else { return nil }
 
-        let summary = userFontConfigSummary(configPaths: configPaths)
+        let summary = userFontConfigSummary(
+            configPaths: configPaths,
+            currentBundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        )
         if summary.containsCodepointMap || summary.hasExplicitFontFamilyFallbackChain {
             return nil
         }
@@ -1935,25 +1949,50 @@ class GhosttyApp {
     /// a `font-codepoint-map` entry covering CJK ranges. Also checks
     /// application-support config paths that cmux may load at runtime.
     static func userConfigContainsCJKCodepointMap(
-        configPaths: [String] = loadedCJKScanPaths()
+        configPaths: [String]? = nil,
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
     ) -> Bool {
-        userFontConfigSummary(configPaths: configPaths).containsCodepointMap
+        userFontConfigSummary(
+            configPaths: configPaths,
+            currentBundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ).containsCodepointMap
     }
 
     static func userConfigHasExplicitFontFamilyFallbackChain(
-        configPaths: [String] = loadedCJKScanPaths()
+        configPaths: [String]? = nil,
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
     ) -> Bool {
-        userFontConfigSummary(configPaths: configPaths).hasExplicitFontFamilyFallbackChain
+        userFontConfigSummary(
+            configPaths: configPaths,
+            currentBundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ).hasExplicitFontFamilyFallbackChain
     }
 
     static func shouldInjectCJKFontFallback(
         preferredLanguages: [String] = Locale.preferredLanguages,
-        configPaths: [String] = loadedCJKScanPaths(),
+        configPaths: [String]? = nil,
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first,
         rangeCoverageProbe: ((String, String) -> Bool)? = nil
     ) -> Bool {
         autoInjectedCJKFontMappings(
             preferredLanguages: preferredLanguages,
             configPaths: configPaths,
+            currentBundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory,
             rangeCoverageProbe: rangeCoverageProbe
         ) != nil
     }
@@ -2003,18 +2042,70 @@ class GhosttyApp {
     }
 
     private static func userFontConfigSummary(
-        configPaths: [String] = loadedCJKScanPaths()
+        configPaths: [String]? = nil,
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+    ) -> UserFontConfigSummary {
+        if let configPaths {
+            return userFontConfigSummary(topLevelConfigPaths: configPaths)
+        }
+
+        return userFontConfigSummary(
+            scanPlan: userFontConfigScanPlan(
+                currentBundleIdentifier: currentBundleIdentifier,
+                appSupportDirectory: appSupportDirectory
+            )
+        )
+    }
+
+    private static func userFontConfigSummary(
+        topLevelConfigPaths: [String]
     ) -> UserFontConfigSummary {
         var summary = UserFontConfigSummary()
+        scanFontConfigFiles(
+            atPaths: topLevelConfigPaths,
+            summary: &summary,
+            loadRecursiveIncludes: true
+        )
+        return summary
+    }
+
+    private static func userFontConfigSummary(
+        scanPlan: UserFontConfigScanPlan
+    ) -> UserFontConfigSummary {
+        var summary = UserFontConfigSummary()
+        scanFontConfigFiles(
+            atPaths: scanPlan.topLevelConfigPaths,
+            summary: &summary,
+            loadRecursiveIncludes: true
+        )
+        scanFontConfigFiles(
+            atPaths: scanPlan.overrideConfigPaths,
+            summary: &summary,
+            loadRecursiveIncludes: false
+        )
+        return summary
+    }
+
+    private static func scanFontConfigFiles(
+        atPaths paths: [String],
+        summary: inout UserFontConfigSummary,
+        loadRecursiveIncludes: Bool
+    ) {
         var recursiveConfigPaths: [String] = []
 
-        for path in configPaths.map({ NSString(string: $0).expandingTildeInPath }) {
+        for path in paths.map({ NSString(string: $0).expandingTildeInPath }) {
             scanFontConfigFile(
                 atPath: path,
                 summary: &summary,
                 recursiveConfigPaths: &recursiveConfigPaths
             )
         }
+
+        guard loadRecursiveIncludes else { return }
 
         var loadedRecursivePaths = Set<String>()
         var index = 0
@@ -2031,12 +2122,11 @@ class GhosttyApp {
                 recursiveConfigPaths: &recursiveConfigPaths
             )
         }
-
-        return summary
     }
 
-    /// Returns the top-level config paths that cmux will actually load before
-    /// recursive `config-file` processing.
+    /// Returns the top-level config paths that can affect cmux's CJK scan.
+    /// Standalone Ghostty config participates in recursive `config-file`
+    /// loading before cmux's bundle-specific override layer is applied last.
     static func loadedCJKScanPaths(
         currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
         appSupportDirectory: URL? = FileManager.default.urls(
@@ -2044,26 +2134,47 @@ class GhosttyApp {
             in: .userDomainMask
         ).first
     ) -> [String] {
-        var paths = [
+        let scanPlan = userFontConfigScanPlan(
+            currentBundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        )
+        return scanPlan.topLevelConfigPaths + scanPlan.overrideConfigPaths
+    }
+
+    private static func userFontConfigScanPlan(
+        currentBundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+    ) -> UserFontConfigScanPlan {
+        var topLevelConfigPaths = [
             "~/.config/ghostty/config",
             "~/.config/ghostty/config.ghostty",
         ]
+        var overrideConfigPaths: [String] = []
 
         guard let bundleId = currentBundleIdentifier,
               !bundleId.isEmpty,
-              let appSupportDirectory else { return paths }
+              let appSupportDirectory else {
+            return UserFontConfigScanPlan(
+                topLevelConfigPaths: topLevelConfigPaths,
+                overrideConfigPaths: overrideConfigPaths
+            )
+        }
 
-        paths.append(contentsOf: standaloneGhosttyAppSupportConfigURLs(
+        topLevelConfigPaths.append(contentsOf: standaloneGhosttyAppSupportConfigURLs(
+            appSupportDirectory: appSupportDirectory
+        ).map(\.path))
+        overrideConfigPaths.append(contentsOf: cmuxAppSupportConfigURLs(
+            currentBundleIdentifier: bundleId,
             appSupportDirectory: appSupportDirectory
         ).map(\.path))
 
-        let appSupportConfigURLs = cmuxAppSupportConfigURLs(
-            currentBundleIdentifier: bundleId,
-            appSupportDirectory: appSupportDirectory
+        return UserFontConfigScanPlan(
+            topLevelConfigPaths: topLevelConfigPaths,
+            overrideConfigPaths: overrideConfigPaths
         )
-        paths.append(contentsOf: appSupportConfigURLs.map(\.path))
-
-        return paths
     }
 
     /// Scans a single config file for font settings relevant to cmux's
@@ -2153,15 +2264,6 @@ class GhosttyApp {
             ? expanded
             : (parentDir as NSString).appendingPathComponent(expanded)
         recursiveConfigPaths.append(absolute)
-    }
-
-    static func shouldLoadLegacyGhosttyConfig(
-        newConfigFileSize: Int?,
-        legacyConfigFileSize: Int?
-    ) -> Bool {
-        guard let newConfigFileSize, newConfigFileSize == 0 else { return false }
-        guard let legacyConfigFileSize, legacyConfigFileSize > 0 else { return false }
-        return true
     }
 
     private static func appSupportConfigURLs(
@@ -2266,6 +2368,11 @@ class GhosttyApp {
         guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         guard let currentBundleIdentifier = Bundle.main.bundleIdentifier,
               !currentBundleIdentifier.isEmpty else { return }
+        // Ghostty's default-file pass already loaded its normal XDG and
+        // app-support roots, and `ghostty_config_load_recursive_files`
+        // has already consumed any queued `config-file` includes from those
+        // sources. This late pass is only for cmux's bundle-specific
+        // app-support override layer.
         let urls = Self.cmuxAppSupportConfigURLs(
             currentBundleIdentifier: currentBundleIdentifier,
             appSupportDirectory: appSupport,
