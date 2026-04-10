@@ -35,6 +35,100 @@ final class DaemonTerminalBridge: @unchecked Sendable {
         stop()
     }
 
+    /// Deterministically compute the daemon session ID for a workspace+surface pair.
+    /// Both the bridge and the workspace sync publisher use this so the ID is known
+    /// even before the bridge is running (e.g. lazily-created restored surfaces).
+    static func computeSessionID(workspaceID: UUID, surfaceID: UUID) -> String {
+        "ws-\(workspaceID.uuidString.lowercased())-\(surfaceID.uuidString.prefix(8).lowercased())"
+    }
+
+    /// Pre-create a daemon session without starting a bridge. Used on session restore
+    /// so iOS clients can attach to the session even before the desktop user opens
+    /// the workspace (Ghostty surface creation is lazy).
+    ///
+    /// Called synchronously; performs its RPC on a background queue. Safe to call
+    /// multiple times (uses already_exists check).
+    static func preCreateSession(
+        socketPath: String,
+        workspaceID: UUID,
+        surfaceID: UUID,
+        shellCommand: String,
+        cols: Int = 80,
+        rows: Int = 24
+    ) {
+        let sessionID = computeSessionID(workspaceID: workspaceID, surfaceID: surfaceID)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else { return }
+            defer { Darwin.close(fd) }
+
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let pathSize = MemoryLayout.size(ofValue: addr.sun_path)
+            socketPath.withCString { cstr in
+                _ = memcpy(&addr.sun_path, cstr, min(Int(strlen(cstr)), pathSize - 1))
+            }
+            let addrLen = socklen_t(MemoryLayout<sockaddr_un>.size)
+            let result = withUnsafePointer(to: &addr) { addrPtr in
+                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    Darwin.connect(fd, sockaddrPtr, addrLen)
+                }
+            }
+            guard result == 0 else { return }
+
+            var timeout = timeval(tv_sec: 3, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+            // terminal.open with the deterministic session ID
+            let openPayload: [String: Any] = [
+                "id": 1,
+                "method": "terminal.open",
+                "params": [
+                    "session_id": sessionID,
+                    "command": shellCommand,
+                    "cols": cols,
+                    "rows": rows,
+                ] as [String: Any],
+            ]
+            guard var openData = try? JSONSerialization.data(withJSONObject: openPayload) else { return }
+            openData.append(0x0A)
+            _ = openData.withUnsafeBytes { ptr in Darwin.write(fd, ptr.baseAddress, ptr.count) }
+
+            // Read response
+            var buf = [UInt8](repeating: 0, count: 8192)
+            let n = Darwin.read(fd, &buf, buf.count)
+            guard n > 0 else { return }
+            let respData = Data(buf[0..<Int(n)])
+            guard let respLine = respData.split(separator: 0x0A).first,
+                  let respJson = try? JSONSerialization.jsonObject(with: Data(respLine)) as? [String: Any] else {
+                return
+            }
+
+            // If already_exists, session is good — done.
+            // If ok=true, we need to detach the bootstrap attachment so the session
+            // has zero attachments (daemon preserves the size via last_known).
+            if let ok = respJson["ok"] as? Bool, ok,
+               let result = respJson["result"] as? [String: Any],
+               let bootstrapID = result["attachment_id"] as? String {
+                let detachPayload: [String: Any] = [
+                    "id": 2,
+                    "method": "session.detach",
+                    "params": [
+                        "session_id": sessionID,
+                        "attachment_id": bootstrapID,
+                    ] as [String: Any],
+                ]
+                if var detachData = try? JSONSerialization.data(withJSONObject: detachPayload) {
+                    detachData.append(0x0A)
+                    _ = detachData.withUnsafeBytes { ptr in Darwin.write(fd, ptr.baseAddress, ptr.count) }
+                    _ = Darwin.read(fd, &buf, buf.count)
+                }
+                NSLog("📱 DaemonBridge: pre-created session %@", sessionID)
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     func start(cols: Int, rows: Int) {

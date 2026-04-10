@@ -540,7 +540,53 @@ extension Workspace {
         } else {
             scheduleFocusReconcile()
         }
+
+        #if DEBUG
+        // Pre-create daemon sessions for all restored terminal panels so iOS
+        // clients can attach to them before the user opens them on desktop
+        // (Ghostty surface creation is lazy).
+        preCreateDaemonSessionsForRestoredPanels()
+        #endif
     }
+
+    #if DEBUG
+    private func preCreateDaemonSessionsForRestoredPanels() {
+        // The daemon may not be running yet when restoration happens (it starts
+        // asynchronously in applicationDidFinishLaunching). Retry until it's ready.
+        let terminalPanels = panels.values.compactMap { $0 as? TerminalPanel }
+        guard !terminalPanels.isEmpty else { return }
+        let panelSurfaceIDs: [UUID] = terminalPanels.map { $0.surface.id }
+        let workspaceID = self.id
+        dlog("preCreateDaemonSessions.scheduled workspace=\(workspaceID.uuidString.prefix(8)) panels=\(panelSurfaceIDs.count)")
+        Self.retryPreCreate(workspaceID: workspaceID, surfaceIDs: panelSurfaceIDs, attempts: 0)
+    }
+
+    private static func retryPreCreate(workspaceID: UUID, surfaceIDs: [UUID], attempts: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempts == 0 ? 0.5 : 1.0)) {
+            let daemonRunning = MobileDaemonBridgeInline.shared.isRunning
+            let daemonPath = MobileDaemonBridgeInline.shared.daemonSocketPath
+            if let socket = daemonPath, daemonRunning {
+                dlog("preCreateDaemonSessions.ready workspace=\(workspaceID.uuidString.prefix(8)) attempts=\(attempts)")
+                let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+                let shellCommand = "TERM=xterm-256color COLORTERM=truecolor \(shell) -l"
+                for surfaceID in surfaceIDs {
+                    DaemonTerminalBridge.preCreateSession(
+                        socketPath: socket,
+                        workspaceID: workspaceID,
+                        surfaceID: surfaceID,
+                        shellCommand: shellCommand
+                    )
+                }
+                return
+            }
+            if attempts < 10 {
+                retryPreCreate(workspaceID: workspaceID, surfaceIDs: surfaceIDs, attempts: attempts + 1)
+            } else {
+                dlog("preCreateDaemonSessions.giveup workspace=\(workspaceID.uuidString.prefix(8))")
+            }
+        }
+    }
+    #endif
 
     private func sessionLayoutSnapshot(from node: ExternalTreeNode) -> SessionWorkspaceLayoutSnapshot {
         switch node {

@@ -105,9 +105,16 @@ final class WorkspaceDaemonBridge {
         // Build full workspace payload
         let workspaces: [[String: Any]] = tabManager.tabs.map { workspace in
             let preview = workspacePreview(for: workspace)
-            // Collect daemon session IDs from terminal surfaces with active bridges
-            let sessionIDs: [String] = workspace.panels.values.compactMap { panel in
-                (panel as? TerminalPanel)?.surface.daemonBridge?.sessionID
+            // Compute daemon session IDs deterministically from workspace+surface IDs.
+            // This works even before the surface's DaemonTerminalBridge is created
+            // (e.g. restored workspaces not yet made visible). The bridge uses the
+            // same computation, so they match when the bridge eventually starts.
+            let terminalPanels = workspace.panels.values.compactMap { $0 as? TerminalPanel }
+            let sessionIDs: [String] = terminalPanels.map { panel in
+                DaemonTerminalBridge.computeSessionID(
+                    workspaceID: workspace.id,
+                    surfaceID: panel.surface.id
+                )
             }
             var entry: [String: Any] = [
                 "id": workspace.id.uuidString.lowercased(),

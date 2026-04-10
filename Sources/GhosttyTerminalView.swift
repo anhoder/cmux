@@ -4242,7 +4242,7 @@ final class TerminalSurface: Identifiable, ObservableObject {
         let daemonPath = MobileDaemonBridgeInline.shared.daemonSocketPath
         NSLog("📱 surface.checkDaemon running=%d path=%@", daemonRunning ? 1 : 0, daemonPath ?? "nil")
         if let daemonSocket = daemonPath, daemonRunning {
-            let sessionID = "ws-\(tabId.uuidString.lowercased())-\(id.uuidString.prefix(8).lowercased())"
+            let sessionID = DaemonTerminalBridge.computeSessionID(workspaceID: tabId, surfaceID: id)
             let shell = (env["SHELL"]?.isEmpty == false ? env["SHELL"] : nil)
                 ?? getenv("SHELL").map { String(cString: $0) }
                 ?? ProcessInfo.processInfo.environment["SHELL"]
