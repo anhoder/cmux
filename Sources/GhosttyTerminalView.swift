@@ -1211,6 +1211,7 @@ class GhosttyApp {
     }
 
     static let shared = GhosttyApp()
+    private static let standaloneGhosttyBundleIdentifier = "com.mitchellh.ghostty"
     private static let releaseBundleIdentifier = "com.cmuxterm.app"
     private static let backgroundLogTimestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
@@ -1733,9 +1734,8 @@ class GhosttyApp {
 
     private func loadDefaultConfigFilesWithLegacyFallback(_ config: ghostty_config_t) {
         ghostty_config_load_default_files(config)
-        loadLegacyGhosttyConfigIfNeeded(config)
+        loadAdditionalAppSupportGhosttyConfigFilesIfNeeded(config)
         ghostty_config_load_recursive_files(config)
-        loadCmuxAppSupportGhosttyConfigIfNeeded(config)
         loadCJKFontFallbackIfNeeded(config)
         let useHostLayerBackground = !hasConfiguredBackgroundImage(config)
         usesHostLayerBackground = useHostLayerBackground
@@ -2053,33 +2053,17 @@ class GhosttyApp {
               !bundleId.isEmpty,
               let appSupportDirectory else { return paths }
 
+        paths.append(contentsOf: standaloneGhosttyAppSupportConfigURLs(
+            appSupportDirectory: appSupportDirectory
+        ).map(\.path))
+
         let appSupportConfigURLs = cmuxAppSupportConfigURLs(
             currentBundleIdentifier: bundleId,
             appSupportDirectory: appSupportDirectory
         )
         paths.append(contentsOf: appSupportConfigURLs.map(\.path))
 
-        let releaseDir = appSupportDirectory.appendingPathComponent(releaseBundleIdentifier, isDirectory: true)
-        let releaseLegacyConfig = releaseDir.appendingPathComponent("config", isDirectory: false)
-        let releaseConfig = releaseDir.appendingPathComponent("config.ghostty", isDirectory: false)
-
-        let releaseConfigSize = configFileSize(at: releaseConfig)
-        let releaseLegacyConfigSize = configFileSize(at: releaseLegacyConfig)
-
-        if shouldLoadLegacyGhosttyConfig(
-            newConfigFileSize: releaseConfigSize,
-            legacyConfigFileSize: releaseLegacyConfigSize
-        ), !paths.contains(releaseLegacyConfig.path) {
-            paths.append(releaseLegacyConfig.path)
-        }
-
         return paths
-    }
-
-    private static func configFileSize(at url: URL) -> Int? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? NSNumber else { return nil }
-        return size.intValue
     }
 
     /// Scans a single config file for font settings relevant to cmux's
@@ -2180,6 +2164,37 @@ class GhosttyApp {
         return true
     }
 
+    private static func appSupportConfigURLs(
+        bundleIdentifier: String,
+        appSupportDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        let directory = appSupportDirectory.appendingPathComponent(bundleIdentifier, isDirectory: true)
+        return [
+            directory.appendingPathComponent("config", isDirectory: false),
+            directory.appendingPathComponent("config.ghostty", isDirectory: false)
+        ].filter { url in
+            guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+                  let type = attrs[.type] as? FileAttributeType,
+                  type == .typeRegular,
+                  let size = attrs[.size] as? NSNumber else {
+                return false
+            }
+            return size.intValue > 0
+        }
+    }
+
+    static func standaloneGhosttyAppSupportConfigURLs(
+        appSupportDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        appSupportConfigURLs(
+            bundleIdentifier: standaloneGhosttyBundleIdentifier,
+            appSupportDirectory: appSupportDirectory,
+            fileManager: fileManager
+        )
+    }
+
     static func cmuxAppSupportConfigURLs(
         currentBundleIdentifier: String?,
         appSupportDirectory: URL,
@@ -2187,28 +2202,20 @@ class GhosttyApp {
     ) -> [URL] {
         guard let currentBundleIdentifier, !currentBundleIdentifier.isEmpty else { return [] }
 
-        func existingConfigURLs(for bundleIdentifier: String) -> [URL] {
-            let directory = appSupportDirectory.appendingPathComponent(bundleIdentifier, isDirectory: true)
-            return [
-                directory.appendingPathComponent("config", isDirectory: false),
-                directory.appendingPathComponent("config.ghostty", isDirectory: false)
-            ].filter { url in
-                guard let attrs = try? fileManager.attributesOfItem(atPath: url.path),
-                      let type = attrs[.type] as? FileAttributeType,
-                      type == .typeRegular,
-                      let size = attrs[.size] as? NSNumber else {
-                    return false
-                }
-                return size.intValue > 0
-            }
-        }
-
-        let currentURLs = existingConfigURLs(for: currentBundleIdentifier)
+        let currentURLs = appSupportConfigURLs(
+            bundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory,
+            fileManager: fileManager
+        )
         if !currentURLs.isEmpty {
             return currentURLs
         }
         if SocketControlSettings.isDebugLikeBundleIdentifier(currentBundleIdentifier) {
-            let releaseURLs = existingConfigURLs(for: releaseBundleIdentifier)
+            let releaseURLs = appSupportConfigURLs(
+                bundleIdentifier: releaseBundleIdentifier,
+                appSupportDirectory: appSupportDirectory,
+                fileManager: fileManager
+            )
             if !releaseURLs.isEmpty {
                 return releaseURLs
             }
@@ -2253,14 +2260,42 @@ class GhosttyApp {
         return true
     }
 
-    private func loadCmuxAppSupportGhosttyConfigIfNeeded(_ config: ghostty_config_t) {
+    /// Standalone Ghostty's macOS config should apply in cmux as the shared
+    /// baseline, with cmux-specific app-support config layered on top.
+    private static func supplementalAppSupportConfigURLsForRuntime(
+        currentBundleIdentifier: String?,
+        appSupportDirectory: URL,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        var urls = standaloneGhosttyAppSupportConfigURLs(
+            appSupportDirectory: appSupportDirectory,
+            fileManager: fileManager
+        )
+        guard let currentBundleIdentifier, !currentBundleIdentifier.isEmpty else { return urls }
+        guard currentBundleIdentifier != releaseBundleIdentifier else { return urls }
+
+        let currentURLs = appSupportConfigURLs(
+            bundleIdentifier: currentBundleIdentifier,
+            appSupportDirectory: appSupportDirectory,
+            fileManager: fileManager
+        )
+        if currentURLs.isEmpty && SocketControlSettings.isDebugLikeBundleIdentifier(currentBundleIdentifier) {
+            urls.append(contentsOf: appSupportConfigURLs(
+                bundleIdentifier: releaseBundleIdentifier,
+                appSupportDirectory: appSupportDirectory,
+                fileManager: fileManager
+            ))
+        }
+
+        return urls
+    }
+
+    private func loadAdditionalAppSupportGhosttyConfigFilesIfNeeded(_ config: ghostty_config_t) {
         #if os(macOS)
         let fm = FileManager.default
         guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        guard let currentBundleIdentifier = Bundle.main.bundleIdentifier,
-              !currentBundleIdentifier.isEmpty else { return }
-        let urls = Self.cmuxAppSupportConfigURLs(
-            currentBundleIdentifier: currentBundleIdentifier,
+        let urls = Self.supplementalAppSupportConfigURLsForRuntime(
+            currentBundleIdentifier: Bundle.main.bundleIdentifier,
             appSupportDirectory: appSupport,
             fileManager: fm
         )
@@ -2274,41 +2309,9 @@ class GhosttyApp {
 
 #if DEBUG
         dlog(
-            "loaded cmux app support ghostty config from: \(urls.map(\.path).joined(separator: ", "))"
+            "loaded supplemental ghostty app support config from: \(urls.map(\.path).joined(separator: ", "))"
         )
 #endif
-        #endif
-    }
-
-    private func loadLegacyGhosttyConfigIfNeeded(_ config: ghostty_config_t) {
-        #if os(macOS)
-        // Ghostty 1.3+ prefers `config.ghostty`, but some users still have their real
-        // settings in the legacy `config` file. If the new file exists but is empty,
-        // load the legacy file as a compatibility fallback.
-        let fm = FileManager.default
-        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
-        let ghosttyDir = appSupport.appendingPathComponent("com.mitchellh.ghostty", isDirectory: true)
-        let configNew = ghosttyDir.appendingPathComponent("config.ghostty", isDirectory: false)
-        let configLegacy = ghosttyDir.appendingPathComponent("config", isDirectory: false)
-
-        func fileSize(_ url: URL) -> Int? {
-            guard let attrs = try? fm.attributesOfItem(atPath: url.path),
-                  let size = attrs[.size] as? NSNumber else { return nil }
-            return size.intValue
-        }
-
-        guard Self.shouldLoadLegacyGhosttyConfig(
-            newConfigFileSize: fileSize(configNew),
-            legacyConfigFileSize: fileSize(configLegacy)
-        ) else { return }
-
-        configLegacy.path.withCString { path in
-            ghostty_config_load_file(config, path)
-        }
-
-        #if DEBUG
-        Self.initLog("loaded legacy ghostty config because config.ghostty was empty: \(configLegacy.path)")
-        #endif
         #endif
     }
 
