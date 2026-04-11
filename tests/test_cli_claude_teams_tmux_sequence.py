@@ -38,6 +38,7 @@ class FakeCmuxState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.requests: list[str] = []
+        self.split_calls: list[dict[str, object]] = []
         self.workspace = {
             "id": INITIAL_WORKSPACE_ID,
             "ref": "workspace:1",
@@ -161,6 +162,13 @@ class FakeCmuxState:
                     ]
                 }
             if method == "surface.split":
+                self.split_calls.append(
+                    {
+                        "surface_id": str(params.get("surface_id") or ""),
+                        "direction": str(params.get("direction") or ""),
+                        "focus": params.get("focus"),
+                    }
+                )
                 self.panes.append(
                     {
                         "id": NEW_PANE_ID,
@@ -334,6 +342,19 @@ tmux list-panes -t "$window_target" -F '#{pane_id}' > "$FAKE_PANE_LIST_LOG"
         split_pane = read_text(split_pane_log)
         if split_pane != f"%{NEW_PANE_ID}":
             print(f"FAIL: expected split-window to print %{NEW_PANE_ID}, got {split_pane!r}")
+            return 1
+
+        if len(state.split_calls) != 1:
+            print(f"FAIL: expected exactly one split call, got {len(state.split_calls)}")
+            print(f"split_calls={state.split_calls!r}")
+            return 1
+
+        split_call = state.split_calls[0]
+        if split_call["focus"] is not False:
+            print(
+                "FAIL: expected teammate split to open in background, "
+                f"got focus={split_call['focus']!r}"
+            )
             return 1
 
         pane_lines = pane_list_log.read_text(encoding="utf-8").splitlines()
