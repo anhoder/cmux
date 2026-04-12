@@ -132,10 +132,13 @@ final class WorkspaceDaemonBridge {
             // same computation, so they match when the bridge eventually starts.
             let terminalPanels = workspace.panels.values.compactMap { $0 as? TerminalPanel }
             let sessionIDs: [String] = terminalPanels.map { panel in
-                DaemonTerminalBridge.computeSessionID(
-                    workspaceID: workspace.id,
-                    surfaceID: panel.surface.id
-                )
+                // Prefer the saved session ID (persisted across quit+reopen)
+                // so the daemon keeps mapping to the same PTY sessions.
+                panel.surface.savedDaemonSessionID
+                    ?? DaemonTerminalBridge.computeSessionID(
+                        workspaceID: workspace.id,
+                        surfaceID: panel.surface.id
+                    )
             }
             // Per-pane metadata so iOS can show meaningful labels in the
             // pane dropdown. Uses the resolved title (custom rename > shell
@@ -145,11 +148,13 @@ final class WorkspaceDaemonBridge {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let resolvedTitle = (customTitle?.isEmpty == false ? customTitle : nil)
                     ?? panel.title
-                return [
-                    "session_id": DaemonTerminalBridge.computeSessionID(
+                let paneSID = panel.surface.savedDaemonSessionID
+                    ?? DaemonTerminalBridge.computeSessionID(
                         workspaceID: workspace.id,
                         surfaceID: panel.surface.id
-                    ),
+                    )
+                return [
+                    "session_id": paneSID,
                     "title": resolvedTitle,
                     "directory": panel.directory,
                 ]

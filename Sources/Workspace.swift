@@ -555,7 +555,15 @@ extension Workspace {
         // asynchronously in applicationDidFinishLaunching). Retry until it's ready.
         let terminalPanels = panels.values.compactMap { $0 as? TerminalPanel }
         guard !terminalPanels.isEmpty else { return }
-        let panelSurfaceIDs: [UUID] = terminalPanels.map { $0.surface.id }
+        // Skip panels that have a saved daemon session ID — those sessions
+        // already exist in the daemon from the previous app run (quit with
+        // "Keep Daemon"). Only pre-create for panels without saved IDs.
+        let panelsNeedingPreCreate = terminalPanels.filter { $0.savedDaemonSessionID == nil }
+        guard !panelsNeedingPreCreate.isEmpty else {
+            dlog("preCreateDaemonSessions.skipped workspace=\(id.uuidString.prefix(8)) all panels have saved session IDs")
+            return
+        }
+        let panelSurfaceIDs: [UUID] = panelsNeedingPreCreate.map { $0.surface.id }
         let workspaceID = self.id
         dlog("preCreateDaemonSessions.scheduled workspace=\(workspaceID.uuidString.prefix(8)) panels=\(panelSurfaceIDs.count)")
         Self.retryPreCreate(workspaceID: workspaceID, surfaceIDs: panelSurfaceIDs, attempts: 0)
