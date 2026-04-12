@@ -79,11 +79,32 @@ final class WorkspaceDaemonBridge {
 
     // MARK: - Change observation
 
+    private var panelCancellables: [UUID: AnyCancellable] = [:]
+    private var panelSetCancellables: [UUID: AnyCancellable] = [:]
+
     private func rewireWorkspaceObservers(workspaces: [Workspace]) {
         workspaceCancellables.removeAll()
+        panelCancellables.removeAll()
+        panelSetCancellables.removeAll()
         for workspace in workspaces {
             workspaceCancellables[workspace.id] = workspace.objectWillChange
                 .sink { [weak self] _ in self?.scheduleSyncNow() }
+            // Re-observe panels when the panel set changes (cmd+d, close pane).
+            panelSetCancellables[workspace.id] = workspace.$panels
+                .sink { [weak self] panels in
+                    self?.rewirePanelObservers(panels)
+                    self?.scheduleSyncNow()
+                }
+        }
+    }
+
+    private func rewirePanelObservers(_ panels: [UUID: any Panel]) {
+        panelCancellables.removeAll()
+        for panel in panels.values {
+            if let terminal = panel as? TerminalPanel {
+                panelCancellables[panel.id] = terminal.objectWillChange
+                    .sink { [weak self] _ in self?.scheduleSyncNow() }
+            }
         }
     }
 
