@@ -1648,6 +1648,10 @@ final class TerminalSessionController: ObservableObject {
         updateRemoteDaemonResumeState(nil)
         clearPendingReconnectAfterTransportWork()
         cancelTransportConnectTask()
+        // Tear down the old Ghostty surface so stale content from the
+        // previous pane doesn't linger. A fresh surface is created by
+        // ensureTerminalSurface() inside connectIfNeeded().
+        clearTerminalSurface()
         setPhase(.reconnecting, error: nil)
         let transport = releaseTransport()
         scheduleTransportDisconnect(transport, preserveSession: true)

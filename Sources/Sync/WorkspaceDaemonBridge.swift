@@ -117,14 +117,19 @@ final class WorkspaceDaemonBridge {
                 )
             }
             // Per-pane metadata so iOS can show meaningful labels in the
-            // pane dropdown (surface title from shell, working directory).
+            // pane dropdown. Uses the resolved title (custom rename > shell
+            // process title > "Terminal") so renamed tabs show correctly.
             let paneInfos: [[String: Any]] = terminalPanels.map { panel in
-                [
+                let customTitle = workspace.panelCustomTitles[panel.id]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedTitle = (customTitle?.isEmpty == false ? customTitle : nil)
+                    ?? panel.title
+                return [
                     "session_id": DaemonTerminalBridge.computeSessionID(
                         workspaceID: workspace.id,
                         surfaceID: panel.surface.id
                     ),
-                    "title": panel.title,
+                    "title": resolvedTitle,
                     "directory": panel.directory,
                 ]
             }
