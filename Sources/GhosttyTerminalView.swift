@@ -9201,6 +9201,25 @@ final class GhosttySurfaceScrollView: NSView {
         surfaceView.terminalSurface?.forceRefresh(reason: reason)
     }
 
+    /// Nudge AppKit/CoreAnimation to composite the selected surface once the portal sync lands.
+    /// This is only used on structural transitions like new-workspace insertion, not typing paths.
+    func requestVisibleSurfaceDisplayIfNeeded() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.requestVisibleSurfaceDisplayIfNeeded()
+            }
+            return
+        }
+
+        guard window != nil else { return }
+        surfaceView.layoutSubtreeIfNeeded()
+        if let metalLayer = surfaceView.layer as? CAMetalLayer {
+            metalLayer.setNeedsDisplay()
+        } else {
+            surfaceView.layer?.setNeedsDisplay()
+        }
+    }
+
     @discardableResult
     private func synchronizeGeometryAndContent() -> Bool {
         CATransaction.begin()
