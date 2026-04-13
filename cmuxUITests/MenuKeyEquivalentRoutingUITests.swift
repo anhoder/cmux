@@ -110,7 +110,7 @@ final class MenuKeyEquivalentRoutingUITests: XCTestCase {
         )
     }
 
-    func testBrowserFirstFindShortcutDoesNotReplayUnclaimedCmdEIntoWebContentTwice() {
+    func testBrowserFirstFindShortcutDoesNotReplayUnclaimedCmdEIntoWebContentTwice() throws {
         let app = launchWithBrowserSetup(browserURL: makeBrowserObservedCmdEPageURL())
 
         XCTAssertTrue(
