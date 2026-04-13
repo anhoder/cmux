@@ -433,6 +433,25 @@ struct WorkspaceContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .onAppear {
+            #if DEBUG
+            startupLog(
+                "startup.view.appear workspace=\(workspace.id.uuidString.prefix(5)) " +
+                    "visible=\(isWorkspaceVisible ? 1 : 0) inputActive=\(isWorkspaceInputActive ? 1 : 0) " +
+                    "minimal=\(isMinimalMode ? 1 : 0) fullScreen=\(isFullScreen ? 1 : 0) " +
+                    "panels=\(workspace.panels.count) focused=\(workspace.focusedPanelId?.uuidString.prefix(5) ?? "nil")"
+            )
+            #endif
+        }
+        .onChange(of: isWorkspaceVisible) { _, newValue in
+            #if DEBUG
+            startupLog(
+                "startup.view.visibility workspace=\(workspace.id.uuidString.prefix(5)) " +
+                    "visible=\(newValue ? 1 : 0) panels=\(workspace.panels.count) " +
+                    "focused=\(workspace.focusedPanelId?.uuidString.prefix(5) ?? "nil")"
+            )
+            #endif
+        }
     }
 
     private func syncSplitNotificationBadges() {
@@ -749,6 +768,10 @@ extension WorkspaceContentView {
             } else {
                 FileManager.default.createFile(atPath: logPath, contents: line.data(using: .utf8))
             }
+            startupLog(
+                "startup.host.panelLookupMissing workspace=\(workspace.id.uuidString.prefix(5)) " +
+                    "tab=\(tab.id.uuid.uuidString.prefix(5)) panelCount=\(workspace.panels.count)"
+            )
         }
     }
     #else

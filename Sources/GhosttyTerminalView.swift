@@ -1298,8 +1298,8 @@ class GhosttyApp {
                 increments: ["probeCloseSurfaceCbCount": 1]
             )
 #endif
-
-            DispatchQueue.main.async {
+            @MainActor
+            func handleCloseSurface() {
                 guard let app = AppDelegate.shared else { return }
                 // Close requests must be resolved by the callback's workspace/surface IDs only.
                 // If the mapping is already gone (duplicate/stale callback), ignore it.
@@ -1318,6 +1318,15 @@ class GhosttyApp {
                             surfaceId: callbackSurfaceId
                         )
                     }
+                }
+            }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    handleCloseSurface()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    handleCloseSurface()
                 }
             }
         }
@@ -2452,9 +2461,18 @@ class GhosttyApp {
         if action.tag == GHOSTTY_ACTION_SHOW_CHILD_EXITED {
             // The child (shell) exited. Ghostty will fall back to printing
             // "Process exited. Press any key..." into the terminal unless the host
-            // handles this action. For cmux, the correct behavior is to close
-            // the panel immediately (no prompt).
+            // handles this action. Upstream macOS does not handle this action for
+            // normal exits, and instead relies on the separate close_surface_cb path
+            // for the actual close. Matching that behavior avoids double-closing and
+            // keeps the close path aligned with Ghostty's ground truth.
 #if DEBUG
+            latencyLog(
+                "ctrl_d.surface.showChildExited",
+                data: [
+                    "surface": callbackSurfaceId?.uuidString.prefix(5).description ?? "nil",
+                    "tab": callbackTabId?.uuidString.prefix(5).description ?? "nil",
+                ]
+            )
             dlog(
                 "surface.action.showChildExited tab=\(callbackTabId?.uuidString.prefix(5) ?? "nil") " +
                 "surface=\(callbackSurfaceId?.uuidString.prefix(5) ?? "nil")"
@@ -2469,20 +2487,7 @@ class GhosttyApp {
                 increments: ["probeShowChildExitedCount": 1]
             )
 #endif
-            // Keep host-close async to avoid re-entrant close/deinit while Ghostty is still
-            // dispatching this action callback.
-            DispatchQueue.main.async {
-                guard let app = AppDelegate.shared else { return }
-                if let callbackTabId,
-                   let callbackSurfaceId,
-                   let manager = app.tabManagerFor(tabId: callbackTabId) ?? app.tabManager,
-                   let workspace = manager.tabs.first(where: { $0.id == callbackTabId }),
-                   workspace.panels[callbackSurfaceId] != nil {
-                    manager.closePanelAfterChildExited(tabId: callbackTabId, surfaceId: callbackSurfaceId)
-                }
-            }
-            // Always report handled so Ghostty doesn't print the fallback prompt.
-            return true
+            return false
         }
 
         guard let surfaceView = callbackContext?.surfaceView else { return false }
@@ -5913,6 +5918,17 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         // This avoids intermittent drops after rapid split close/reparent transitions.
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.control) && !flags.contains(.command) && !flags.contains(.option) && !hasMarkedText() {
+#if DEBUG
+            if isDebugCtrlD(event) {
+                latencyLog(
+                    "ctrl_d.terminal.keyDown.begin",
+                    data: [
+                        "surface": terminalSurface?.id.uuidString.prefix(5).description ?? "nil",
+                        "window": String(window?.windowNumber ?? -1),
+                    ]
+                )
+            }
+#endif
             terminalSurface?.recordExternalFocusState(true)
             ghostty_surface_set_focus(surface, true)
             var keyEvent = ghostty_input_key_s()
@@ -5964,6 +5980,15 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 "handled=\(handled ? 1 : 0) keyCode=\(event.keyCode) chars=\(cmuxScalarHex(event.characters)) " +
                 "ign=\(cmuxScalarHex(event.charactersIgnoringModifiers)) mods=\(event.modifierFlags.rawValue)"
             )
+            if isDebugCtrlD(event) {
+                latencyLog(
+                    "ctrl_d.terminal.keyDown.sent",
+                    data: [
+                        "handled": handled ? "1" : "0",
+                        "surface": terminalSurface?.id.uuidString.prefix(5).description ?? "nil",
+                    ]
+                )
+            }
 #endif
             // If Ghostty handled the key (action/encoding), we're done.
             // If not (e.g. `ignore` keybind), fall through to interpretKeyEvents

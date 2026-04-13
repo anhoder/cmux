@@ -3466,6 +3466,12 @@ struct ContentView: View {
     private func startWorkspaceHandoffIfNeeded(newSelectedId: UUID?) {
         let oldSelectedId = previousSelectedWorkspaceId
         previousSelectedWorkspaceId = newSelectedId
+#if DEBUG
+        startupLog(
+            "startup.handoff.start old=\(debugShortWorkspaceId(oldSelectedId)) " +
+                "new=\(debugShortWorkspaceId(newSelectedId))"
+        )
+#endif
 
         guard let oldSelectedId, let newSelectedId, oldSelectedId != newSelectedId else {
             tabManager.completePendingWorkspaceUnfocus(reason: "no_handoff")
@@ -3541,6 +3547,12 @@ struct ContentView: View {
         workspaceHandoffFallbackTask?.cancel()
         workspaceHandoffFallbackTask = nil
         let retiring = retiringWorkspaceId
+#if DEBUG
+        startupLog(
+            "startup.handoff.complete reason=\(reason) retiring=\(debugShortWorkspaceId(retiring)) " +
+                "selected=\(debugShortWorkspaceId(tabManager.selectedTabId))"
+        )
+#endif
 
         // Hide portal-hosted views for the retiring workspace BEFORE clearing
         // retiringWorkspaceId. Once cleared, reconcileMountedWorkspaceIds unmounts

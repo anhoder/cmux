@@ -3036,6 +3036,16 @@ class TabManager: ObservableObject {
     func closeRuntimeSurface(tabId: UUID, surfaceId: UUID) {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return }
         guard tab.panels[surfaceId] != nil else { return }
+#if DEBUG
+        latencyLog(
+            "ctrl_d.closeRuntimeSurface.begin",
+            data: [
+                "panelsBefore": String(tab.panels.count),
+                "surface": surfaceId.uuidString.prefix(5).description,
+                "tab": tabId.uuidString.prefix(5).description,
+            ]
+        )
+#endif
 
 #if DEBUG
         dlog(
@@ -3050,6 +3060,15 @@ class TabManager: ObservableObject {
         reconcileFocusedPanelFromFirstResponderForKeyboard()
         let closed = tab.closePanel(surfaceId, force: true)
 #if DEBUG
+        latencyLog(
+            "ctrl_d.closeRuntimeSurface.end",
+            data: [
+                "closed": closed ? "1" : "0",
+                "panelsAfter": String(tab.panels.count),
+                "surface": surfaceId.uuidString.prefix(5).description,
+                "tab": tabId.uuidString.prefix(5).description,
+            ]
+        )
         dlog(
             "surface.close.runtime.done tab=\(tabId.uuidString.prefix(5)) " +
             "surface=\(surfaceId.uuidString.prefix(5)) closed=\(closed ? 1 : 0) panelsAfter=\(tab.panels.count)"
@@ -3067,6 +3086,19 @@ class TabManager: ObservableObject {
         guard tab.panels[surfaceId] != nil else { return }
         let keepsRemoteWorkspaceOpen =
             tab.panels.count <= 1 && tab.shouldDemoteWorkspaceAfterChildExit(surfaceId: surfaceId)
+
+#if DEBUG
+        latencyLog(
+            "ctrl_d.closePanelAfterChildExited.begin",
+            data: [
+                "keepRemote": keepsRemoteWorkspaceOpen ? "1" : "0",
+                "panels": String(tab.panels.count),
+                "surface": surfaceId.uuidString.prefix(5).description,
+                "tab": tabId.uuidString.prefix(5).description,
+                "workspaces": String(tabs.count),
+            ]
+        )
+#endif
 
 #if DEBUG
         dlog(
@@ -3658,6 +3690,17 @@ class TabManager: ObservableObject {
         guard let selectedTabId,
               let tab = tabs.first(where: { $0.id == selectedTabId }),
               let focusedPanelId = tab.focusedPanelId else { return nil }
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.tabManager.createSplit.focused",
+                data: [
+                    "tab": selectedTabId.uuidString.prefix(5).description,
+                    "surface": focusedPanelId.uuidString.prefix(5).description,
+                ]
+            )
+        }
+#endif
         return createSplit(tabId: selectedTabId, surfaceId: focusedPanelId, direction: direction)
     }
 
@@ -3666,9 +3709,33 @@ class TabManager: ObservableObject {
     func createSplit(tabId: UUID, surfaceId: UUID, direction: SplitDirection, focus: Bool = true) -> UUID? {
         guard let tab = tabs.first(where: { $0.id == tabId }),
               tab.panels[surfaceId] != nil else { return nil }
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.tabManager.createSplit.begin",
+                data: [
+                    "focus": focus ? "1" : "0",
+                    "tab": tabId.uuidString.prefix(5).description,
+                    "surface": surfaceId.uuidString.prefix(5).description,
+                ]
+            )
+        }
+#endif
         tab.clearSplitZoom()
         sentryBreadcrumb("split.create", data: ["direction": String(describing: direction)])
-        return newSplit(tabId: tabId, surfaceId: surfaceId, direction: direction, focus: focus)
+        let result = newSplit(tabId: tabId, surfaceId: surfaceId, direction: direction, focus: focus)
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.tabManager.createSplit.end",
+                data: [
+                    "createdSurface": result?.uuidString.prefix(5).description ?? "nil",
+                    "tab": tabId.uuidString.prefix(5).description,
+                ]
+            )
+        }
+#endif
+        return result
     }
 
     /// Create a new browser split from the currently focused panel.
@@ -3785,12 +3852,24 @@ class TabManager: ObservableObject {
     /// Returns the new panel's ID (which is also the surface ID for terminals)
     func newSplit(tabId: UUID, surfaceId: UUID, direction: SplitDirection, focus: Bool = true) -> UUID? {
         guard let tab = tabs.first(where: { $0.id == tabId }) else { return nil }
-        return tab.newTerminalSplit(
+        let result = tab.newTerminalSplit(
             from: surfaceId,
             orientation: direction.orientation,
             insertFirst: direction.insertFirst,
             focus: focus
         )?.id
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.tabManager.newSplit.end",
+                data: [
+                    "createdSurface": result?.uuidString.prefix(5).description ?? "nil",
+                    "tab": tabId.uuidString.prefix(5).description,
+                ]
+            )
+        }
+#endif
+        return result
     }
 
     /// Move focus in the specified direction
@@ -5543,6 +5622,12 @@ extension TabManager {
     }
 
     func restoreSessionSnapshot(_ snapshot: SessionTabManagerSnapshot) {
+#if DEBUG
+        startupLog(
+            "startup.restore.tabManager.begin workspaces=\(snapshot.workspaces.count) " +
+                "existingTabs=\(tabs.count)"
+        )
+#endif
         let previousTabs = tabs
         for tab in previousTabs {
             unwireClosedBrowserTracking(for: tab)
@@ -5584,6 +5669,13 @@ extension TabManager {
             workspace.restoreSessionSnapshot(workspaceSnapshot)
             wireClosedBrowserTracking(for: workspace)
             newTabs.append(workspace)
+#if DEBUG
+            startupLog(
+                "startup.restore.tabManager.workspace workspace=\(workspace.id.uuidString.prefix(5)) " +
+                    "panels=\(workspace.panels.count) panes=\(workspace.splitController.allPaneIds.count) " +
+                    "focusedPanel=\(workspace.focusedPanelId?.uuidString.prefix(5) ?? "nil")"
+            )
+#endif
         }
 
         if newTabs.isEmpty {
@@ -5635,6 +5727,12 @@ extension TabManager {
                 userInfo: [GhosttyNotificationKey.tabId: selectedTabId]
             )
         }
+#if DEBUG
+        startupLog(
+            "startup.restore.tabManager.end tabs=\(tabs.count) " +
+                "selectedWorkspace=\(selectedTabId?.uuidString.prefix(5) ?? "nil")"
+        )
+#endif
     }
 }
 

@@ -474,6 +474,82 @@ enum WorkspaceSplitDebugCounters {
 func dlog(_ message: String) {
     NSLog("%@", message)
 }
+
+#if DEBUG
+func startupLog(_ message: String) {
+    let ts = ISO8601DateFormatter().string(from: Date())
+    let line = "[\(ts)] \(message)\n"
+    let logPath = "/tmp/cmux-startup-debug.log"
+    if let handle = FileHandle(forWritingAtPath: logPath) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: logPath, contents: Data(line.utf8))
+    }
+}
+#else
+func startupLog(_ message: String) {
+    _ = message
+}
+#endif
+
+#if DEBUG
+private let cmuxLatencyLogPath = "/tmp/cmux-key-latency-debug.log"
+private let cmuxLatencyLogLock = NSLock()
+private var cmuxLatencyLogSequence: UInt64 = 0
+
+func latencyLog(_ name: String, data: [String: String] = [:]) {
+    let ts = ISO8601DateFormatter().string(from: Date())
+    cmuxLatencyLogLock.lock()
+    cmuxLatencyLogSequence &+= 1
+    let seq = cmuxLatencyLogSequence
+    cmuxLatencyLogLock.unlock()
+
+    let monoMs = Int((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+    let payload = data
+        .sorted { $0.key < $1.key }
+        .map { "\($0.key)=\($0.value)" }
+        .joined(separator: " ")
+    let suffix = payload.isEmpty ? "" : " " + payload
+    let line = "[\(ts)] seq=\(seq) mono_ms=\(monoMs) event=\(name)\(suffix)\n"
+
+    cmuxLatencyLogLock.lock()
+    defer { cmuxLatencyLogLock.unlock() }
+    if let handle = FileHandle(forWritingAtPath: cmuxLatencyLogPath) {
+        handle.seekToEndOfFile()
+        handle.write(Data(line.utf8))
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: cmuxLatencyLogPath, contents: Data(line.utf8))
+    }
+}
+
+func isDebugCmdD(_ event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    return flags == [.command] && (event.charactersIgnoringModifiers ?? "").lowercased() == "d"
+}
+
+func isDebugCtrlD(_ event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    return flags == [.control] && (event.charactersIgnoringModifiers ?? "").lowercased() == "d"
+}
+#else
+func latencyLog(_ name: String, data: [String: String] = [:]) {
+    _ = name
+    _ = data
+}
+
+func isDebugCmdD(_ event: NSEvent) -> Bool {
+    _ = event
+    return false
+}
+
+func isDebugCtrlD(_ event: NSEvent) -> Bool {
+    _ = event
+    return false
+}
+#endif
 import AppKit
 import SwiftUI
 

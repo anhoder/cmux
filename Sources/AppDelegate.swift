@@ -2990,7 +2990,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         didPrepareStartupSessionSnapshot = true
         guard SessionRestorePolicy.shouldAttemptRestore() else { return }
         Self.removeLegacyPersistedWindowGeometry()
-        startupSessionSnapshot = SessionPersistenceStore.load()
+        let snapshot = SessionPersistenceStore.load()
+#if DEBUG
+        startupLog(
+            "startup.restore.prepare loaded=\(snapshot != nil ? 1 : 0) " +
+                "windowCount=\(snapshot?.windows.count ?? 0)"
+        )
+#endif
+        startupSessionSnapshot = snapshot
     }
 
     private func persistedWindowGeometry(
@@ -3082,6 +3089,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard let primaryContext = contextForMainTerminalWindow(primaryWindow) else { return }
 
         let startupSnapshot = startupSessionSnapshot
+#if DEBUG
+        startupLog(
+            "startup.restore.attempt window=\(primaryWindow.windowNumber) " +
+                "hasSnapshot=\(startupSnapshot != nil ? 1 : 0) " +
+                "windowCount=\(startupSnapshot?.windows.count ?? 0)"
+        )
+#endif
         let primaryWindowSnapshot = startupSnapshot?.windows.first
         if let primaryWindowSnapshot {
             isApplyingStartupSessionRestore = true
@@ -10686,6 +10700,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         #endif
 
         prepareFocusedBrowserDevToolsForSplit(directionLabel: directionLabel)
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.performSplitShortcut.begin",
+                data: [
+                    "selectedTab": tabManager?.selectedTabId?.uuidString.prefix(5).description ?? "nil",
+                    "focusedPanel": tabManager?.selectedWorkspace?.focusedPanelId?.uuidString.prefix(5).description ?? "nil",
+                    "terminalContext": terminalContext != nil ? "1" : "0",
+                ]
+            )
+        }
+#endif
         let didCreateSplit: Bool = {
             if let terminalContext {
                 return terminalContext.tabManager.createSplit(
@@ -10696,6 +10722,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
             return tabManager?.createSplit(direction: direction) != nil
         }()
+#if DEBUG
+        if direction == .right {
+            latencyLog(
+                "cmd_d.performSplitShortcut.end",
+                data: [
+                    "created": didCreateSplit ? "1" : "0",
+                    "selectedTab": tabManager?.selectedTabId?.uuidString.prefix(5).description ?? "nil",
+                    "focusedPanel": tabManager?.selectedWorkspace?.focusedPanelId?.uuidString.prefix(5).description ?? "nil",
+                ]
+            )
+        }
+#endif
 #if DEBUG
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             let keyWindow = NSApp.keyWindow
@@ -12822,6 +12860,15 @@ private extension NSWindow {
         }
         let frType = self.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         dlog("performKeyEquiv: \(Self.keyDescription(event)) fr=\(frType)")
+        if isDebugCmdD(event) {
+            latencyLog(
+                "cmd_d.window.performKeyEquivalent.begin",
+                data: [
+                    "firstResponder": frType,
+                    "keyWindow": String(NSApp.keyWindow?.windowNumber ?? -1),
+                ]
+            )
+        }
 #endif
 
         // When the terminal surface is the first responder, prevent SwiftUI's

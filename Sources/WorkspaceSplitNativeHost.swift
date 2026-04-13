@@ -71,6 +71,8 @@ final class WorkspaceSplitRootHostView<Content: View, EmptyContent: View>: NSVie
     private var currentRootView: NSView?
     private var paneHosts: [UUID: WorkspaceSplitPaneHostView<Content, EmptyContent>] = [:]
     private var splitHosts: [UUID: WorkspaceSplitNativeSplitView<Content, EmptyContent>] = [:]
+    private var renderedPaneIds: Set<UUID> = []
+    private var renderedSplitIds: Set<UUID> = []
     private var lastContainerFrame: CGRect = .zero
 
     init(
@@ -157,6 +159,26 @@ final class WorkspaceSplitRootHostView<Content: View, EmptyContent: View>: NSVie
 
     private func rebuildTree() {
         let renderedNode = controller.internalController.zoomedNode ?? controller.internalController.rootNode
+        let nextPaneIds = Set(renderedNode.allPaneIds.map(\.id))
+        let nextSplitIds = Set(workspaceSplitCollectSplitIDs(in: renderedNode))
+        let topologyChanged = nextPaneIds != renderedPaneIds || nextSplitIds != renderedSplitIds
+
+        if topologyChanged {
+            resetHostCaches()
+#if DEBUG
+            startupLog(
+                "startup.host.topologyChanged panes=\(nextPaneIds.count) splits=\(nextSplitIds.count)"
+            )
+            latencyLog(
+                "cmd_d.host.topologyChanged",
+                data: [
+                    "panes": String(nextPaneIds.count),
+                    "splits": String(nextSplitIds.count),
+                ]
+            )
+#endif
+        }
+
         let nextRootView = hostView(for: renderedNode)
 
         if currentRootView !== nextRootView {
@@ -166,7 +188,21 @@ final class WorkspaceSplitRootHostView<Content: View, EmptyContent: View>: NSVie
         }
 
         currentRootView?.frame = bounds
-        cleanupUnusedHosts()
+        renderedPaneIds = nextPaneIds
+        renderedSplitIds = nextSplitIds
+        if !topologyChanged {
+            cleanupUnusedHosts()
+        }
+    }
+
+    private func resetHostCaches() {
+        currentRootView?.removeFromSuperview()
+        currentRootView = nil
+        for host in splitHosts.values {
+            host.removeAllChildren()
+        }
+        paneHosts.removeAll()
+        splitHosts.removeAll()
     }
 
     private func cleanupUnusedHosts() {
@@ -694,6 +730,16 @@ private final class WorkspaceSplitPaneHostView<Content: View, EmptyContent: View
                     isSelected: isSelected
                 )
             }
+#if DEBUG
+            if isSelected {
+                let paneShort = String(pane.id.id.uuidString.prefix(5))
+                let tabShort = String(tab.id.uuidString.prefix(5))
+                startupLog(
+                    "startup.host.refreshContent.native pane=\(paneShort) " +
+                        "tab=\(tabShort)"
+                )
+            }
+#endif
             return
         }
 
@@ -704,9 +750,30 @@ private final class WorkspaceSplitPaneHostView<Content: View, EmptyContent: View
                 slotView: slotView,
                 isSelected: isSelected
             )
+#if DEBUG
+            if isSelected {
+                let paneShort = String(pane.id.id.uuidString.prefix(5))
+                let tabShort = String(tab.id.uuidString.prefix(5))
+                let panelShort = String(descriptor.panel.id.uuidString.prefix(5))
+                startupLog(
+                    "startup.host.refreshContent.cachedTerminal pane=\(paneShort) " +
+                        "tab=\(tabShort) panel=\(panelShort)"
+                )
+            }
+#endif
             return
         }
 
+#if DEBUG
+        if isSelected {
+            let paneShort = String(pane.id.id.uuidString.prefix(5))
+            let tabShort = String(tab.id.uuidString.prefix(5))
+            startupLog(
+                "startup.host.refreshContent.swiftUI pane=\(paneShort) " +
+                    "tab=\(tabShort)"
+            )
+        }
+#endif
         refreshSwiftUIContent(
             for: tabModel,
             tabId: tab.id,
@@ -771,6 +838,34 @@ private final class WorkspaceSplitPaneHostView<Content: View, EmptyContent: View
         hostedView.setDropZoneOverlay(zone: isSelected ? activeDropZone : nil)
         hostedView.setVisibleInUI(isSelected ? descriptor.isVisibleInUI : false)
         hostedView.setActive(isSelected ? descriptor.isFocused : false)
+#if DEBUG
+        if isSelected {
+            let paneShort = String(pane.id.id.uuidString.prefix(5))
+            let panelShort = String(panel.id.uuidString.prefix(5))
+            let visible = descriptor.isVisibleInUI ? 1 : 0
+            let focused = descriptor.isFocused ? 1 : 0
+            let hostWindow = slotView.window != nil ? 1 : 0
+            let hostedWindow = hostedView.window != nil ? 1 : 0
+            let runtime = panel.surface.surface != nil ? 1 : 0
+            startupLog(
+                "startup.host.applyTerminal pane=\(paneShort) panel=\(panelShort) " +
+                    "visible=\(visible) focused=\(focused) hostWindow=\(hostWindow) " +
+                    "hostedWindow=\(hostedWindow) runtime=\(runtime)"
+            )
+            latencyLog(
+                "cmd_d.host.applyTerminal",
+                data: [
+                    "focused": String(focused),
+                    "hostWindow": String(hostWindow),
+                    "hostedWindow": String(hostedWindow),
+                    "pane": paneShort,
+                    "panel": panelShort,
+                    "runtime": String(runtime),
+                    "visible": String(visible),
+                ]
+            )
+        }
+#endif
     }
 
     private func refreshSwiftUIContent(

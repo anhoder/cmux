@@ -294,6 +294,14 @@ extension Workspace {
 
     func restoreSessionSnapshot(_ snapshot: SessionWorkspaceSnapshot) {
         restoredTerminalScrollbackByPanelId.removeAll(keepingCapacity: false)
+#if DEBUG
+        startupLog(
+            "startup.restore.workspace.begin workspace=\(id.uuidString.prefix(5)) " +
+                "snapshotPanels=\(snapshot.panels.count) " +
+                "existingPanels=\(panels.count) " +
+                "focusedOld=\(snapshot.focusedPanelId?.uuidString.prefix(5) ?? "nil")"
+        )
+#endif
 
         let normalizedCurrentDirectory = snapshot.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         if !normalizedCurrentDirectory.isEmpty {
@@ -348,6 +356,13 @@ extension Workspace {
         } else {
             scheduleFocusReconcile()
         }
+#if DEBUG
+        startupLog(
+            "startup.restore.workspace.end workspace=\(id.uuidString.prefix(5)) " +
+                "panels=\(panels.count) panes=\(splitController.allPaneIds.count) " +
+                "focusedNow=\(focusedPanelId?.uuidString.prefix(5) ?? "nil")"
+        )
+#endif
     }
 
     private func sessionLayoutSnapshot(from node: ExternalTreeNode) -> SessionWorkspaceLayoutSnapshot {
@@ -579,6 +594,13 @@ extension Workspace {
             .tabs(inPane: paneId)
             .compactMap { panelIdFromSurfaceId($0.id) }
         let desiredOldPanelIds = snapshot.panelIds.filter { panelSnapshotsById[$0] != nil }
+#if DEBUG
+        startupLog(
+            "startup.restore.pane.begin workspace=\(id.uuidString.prefix(5)) " +
+                "pane=\(paneId.id.uuidString.prefix(5)) existing=\(existingPanelIds.count) " +
+                "desired=\(desiredOldPanelIds.count) selectedOld=\(snapshot.selectedPanelId?.uuidString.prefix(5) ?? "nil")"
+        )
+#endif
 
         var createdPanelIds: [UUID] = []
         for oldPanelId in desiredOldPanelIds {
@@ -610,9 +632,23 @@ extension Workspace {
             splitController.focusPane(paneId)
             splitController.selectTab(selectedTabId)
         }
+#if DEBUG
+        startupLog(
+            "startup.restore.pane.end workspace=\(id.uuidString.prefix(5)) " +
+                "pane=\(paneId.id.uuidString.prefix(5)) created=\(createdPanelIds.count) " +
+                "selectedNew=\(selectedPanelId?.uuidString.prefix(5) ?? "nil")"
+        )
+#endif
     }
 
     private func createPanel(from snapshot: SessionPanelSnapshot, inPane paneId: PaneID) -> UUID? {
+#if DEBUG
+        startupLog(
+            "startup.restore.createPanel workspace=\(id.uuidString.prefix(5)) " +
+                "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                "type=\(snapshot.type.rawValue)"
+        )
+#endif
         switch snapshot.type {
         case .terminal:
             let workingDirectory = snapshot.terminal?.workingDirectory ?? snapshot.directory ?? currentDirectory
@@ -625,6 +661,13 @@ extension Workspace {
                 workingDirectory: workingDirectory,
                 startupEnvironment: replayEnvironment
             ) else {
+#if DEBUG
+                startupLog(
+                    "startup.restore.createPanel.fail workspace=\(id.uuidString.prefix(5)) " +
+                        "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                        "type=terminal"
+                )
+#endif
                 return nil
             }
             let fallbackScrollback = SessionPersistencePolicy.truncatedScrollback(snapshot.terminal?.scrollback)
@@ -634,6 +677,13 @@ extension Workspace {
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: terminalPanel.id)
             }
             applySessionPanelMetadata(snapshot, toPanelId: terminalPanel.id)
+#if DEBUG
+            startupLog(
+                "startup.restore.createPanel.ok workspace=\(id.uuidString.prefix(5)) " +
+                    "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                    "newPanel=\(terminalPanel.id.uuidString.prefix(5)) type=terminal"
+            )
+#endif
             return terminalPanel.id
         case .browser:
             guard let browserPanel = newBrowserSurface(
@@ -642,9 +692,23 @@ extension Workspace {
                 focus: false,
                 preferredProfileID: snapshot.browser?.profileID
             ) else {
+#if DEBUG
+                startupLog(
+                    "startup.restore.createPanel.fail workspace=\(id.uuidString.prefix(5)) " +
+                        "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                        "type=browser"
+                )
+#endif
                 return nil
             }
             applySessionPanelMetadata(snapshot, toPanelId: browserPanel.id)
+#if DEBUG
+            startupLog(
+                "startup.restore.createPanel.ok workspace=\(id.uuidString.prefix(5)) " +
+                    "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                    "newPanel=\(browserPanel.id.uuidString.prefix(5)) type=browser"
+            )
+#endif
             return browserPanel.id
         case .markdown:
             guard let filePath = snapshot.markdown?.filePath,
@@ -653,9 +717,23 @@ extension Workspace {
                     filePath: filePath,
                     focus: false
                   ) else {
+#if DEBUG
+                startupLog(
+                    "startup.restore.createPanel.fail workspace=\(id.uuidString.prefix(5)) " +
+                        "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                        "type=markdown"
+                )
+#endif
                 return nil
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
+#if DEBUG
+            startupLog(
+                "startup.restore.createPanel.ok workspace=\(id.uuidString.prefix(5)) " +
+                    "pane=\(paneId.id.uuidString.prefix(5)) oldPanel=\(snapshot.id.uuidString.prefix(5)) " +
+                    "newPanel=\(markdownPanel.id.uuidString.prefix(5)) type=markdown"
+            )
+#endif
             return markdownPanel.id
         }
     }
@@ -8907,7 +8985,14 @@ final class Workspace: Identifiable, ObservableObject {
     func hideAllTerminalPortalViews() {
         for panel in panels.values {
             guard let terminal = panel as? TerminalPanel else { continue }
-            terminal.hostedView.setVisibleInUI(false)
+#if DEBUG
+            startupLog(
+                "startup.portal.hideAllTerminal workspace=\(id.uuidString.prefix(5)) " +
+                    "panel=\(terminal.id.uuidString.prefix(5)) inWindow=\(terminal.hostedView.window != nil ? 1 : 0) " +
+                    "hasSuperview=\(terminal.hostedView.superview != nil ? 1 : 0) " +
+                    "visibleFlag=\(terminal.hostedView.debugPortalVisibleInUI ? 1 : 0)"
+            )
+#endif
             TerminalWindowPortalRegistry.hideHostedView(terminal.hostedView)
         }
     }
