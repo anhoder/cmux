@@ -268,6 +268,10 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
     func handleDeviceToken(_ deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
         tokenStore.save(token)
+        #if DEBUG
+        NSLog("🔔 APNs device token (hex): %@", token)
+        #endif
+        PushNotificationConfigurator.shared.updateDeviceToken(token)
         Task {
             await syncTokenIfPossible()
         }
@@ -461,6 +465,7 @@ enum NotificationRequestTrigger: String {
     case createConversation
     case sendMessage
     case settings
+    case launch
 }
 
 enum NotificationTestError: Error, LocalizedError {

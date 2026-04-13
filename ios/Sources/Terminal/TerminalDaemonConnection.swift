@@ -21,11 +21,19 @@ actor TerminalDaemonConnection {
     private var connectTask: Task<(TerminalRemoteDaemonClient, TerminalRemoteDaemonHello, TerminalWebSocketLineTransport?), Error>?
     private var subscriptionTask: Task<Void, Never>?
     private var subscribed = false
+    private let pushConfigurator: PushNotificationConfigurator
+    private var lastPushConfiguration: PushNotificationConfigurator.DaemonConfiguration?
 
-    init(hostname: String, port: Int, secret: String) {
+    init(
+        hostname: String,
+        port: Int,
+        secret: String,
+        pushConfigurator: PushNotificationConfigurator = .shared
+    ) {
         self.hostname = hostname
         self.port = port
         self.secret = secret
+        self.pushConfigurator = pushConfigurator
     }
 
     func currentClient() -> TerminalRemoteDaemonClient? { client }
@@ -155,10 +163,67 @@ actor TerminalDaemonConnection {
             self.hello = newHello
             self.lineTransport = newLine
             self.connectTask = nil
+            // Phase 4.3: configure daemon-side APNs forwarding if the daemon
+            // advertises the capability and we have a full configuration.
+            // Fire-and-forget so RPC failures don't block connect.
+            self.lastPushConfiguration = nil
+            Task { [weak self] in
+                await self?.applyPushConfigurationIfNeeded()
+            }
             return (newClient, newHello)
         } catch {
             self.connectTask = nil
             throw error
+        }
+    }
+
+    /// Re-run the push configuration check, e.g. after the device token or
+    /// UserDefaults values change. No-op if we're not connected or the daemon
+    /// doesn't advertise `notifications.remote`.
+    func reprovisionRemotePush() async {
+        await applyPushConfigurationIfNeeded(forceResend: true)
+    }
+
+    private func applyPushConfigurationIfNeeded(forceResend: Bool = false) async {
+        guard let client, let hello, await !client.isClosed() else { return }
+        guard hello.capabilities.contains("notifications.remote") else {
+            #if DEBUG
+            NSLog("📱 daemon connection: notifications.remote not advertised; skipping push config")
+            #endif
+            lastPushConfiguration = nil
+            return
+        }
+        guard let config = pushConfigurator.currentConfiguration() else {
+            #if DEBUG
+            NSLog("📱 daemon connection: push config incomplete; remote push disabled")
+            #endif
+            lastPushConfiguration = nil
+            return
+        }
+        if !forceResend, lastPushConfiguration == config {
+            return
+        }
+        do {
+            try await client.configureNotifications(
+                endpoint: config.endpoint,
+                bearerToken: config.bearerToken,
+                deviceTokens: config.deviceTokens
+            )
+            lastPushConfiguration = config
+            #if DEBUG
+            NSLog(
+                "📱 daemon connection: configured remote push endpoint=%@ tokens=%d",
+                config.endpoint,
+                config.deviceTokens.count
+            )
+            #endif
+        } catch {
+            #if DEBUG
+            NSLog(
+                "📱 daemon connection: configure_notifications failed: %@",
+                String(describing: error)
+            )
+            #endif
         }
     }
 
@@ -167,6 +232,7 @@ actor TerminalDaemonConnection {
         client = nil
         hello = nil
         lineTransport = nil
+        lastPushConfiguration = nil
         await line?.cancel()
     }
 

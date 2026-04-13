@@ -319,6 +319,26 @@ actor TerminalRemoteDaemonClient {
         )
     }
 
+    /// Configures the daemon-side APNs forwarder (Phase 4.3). `endpoint` is
+    /// the Next.js relay URL the daemon POSTs to; `bearerToken` authenticates
+    /// those POSTs; `deviceTokens` is the list of APNs device tokens the
+    /// relay should deliver to.
+    func configureNotifications(
+        endpoint: String,
+        bearerToken: String,
+        deviceTokens: [String]
+    ) async throws {
+        _ = try await sendRequest(
+            method: "daemon.configure_notifications",
+            params: [
+                "endpoint": endpoint,
+                "bearer_token": bearerToken,
+                "device_tokens": deviceTokens,
+            ],
+            as: TerminalRemoteDaemonGenericAck.self
+        )
+    }
+
     func terminalSubscribe(sessionID: String, offset: UInt64?) async throws -> TerminalRemoteDaemonTerminalReadResult {
         var params: [String: Any] = ["session_id": sessionID]
         if let offset {

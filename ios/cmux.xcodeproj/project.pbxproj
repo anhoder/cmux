@@ -110,6 +110,7 @@
 		F3849C68122B1FDC0AF85654 /* StackAuthSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245DF39EF320A4BE4F9693E1 /* StackAuthSessionTests.swift */; };
 		F716BD344C0F0A5FB54B579B /* TerminalSSHPrivateKeyParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 671A9DCE5A79588B473BB6CD /* TerminalSSHPrivateKeyParser.swift */; };
 		F71E8618CF810AB6E4D574F7 /* TerminalSidebarRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0F109D38A196A6E1D2EC346 /* TerminalSidebarRootView.swift */; };
+		FA916AEDDE3F00EC06B02089 /* PushNotificationConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B125A3A45F126CC81C320157 /* PushNotificationConfigurator.swift */; };
 		FB3565D07FB550B57259856D /* TerminalServerCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53284AC109063E406D6F0304 /* TerminalServerCatalog.swift */; };
 		FB4B4CB048C026CDC298AD07 /* InboxTestFixtures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F4D8BD25A0C3A4A2367C1D3 /* InboxTestFixtures.swift */; };
 		FC7437EF35914FCEEF7909AF /* CrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEF1E409D552C017B2175D56 /* CrashReporter.swift */; };
@@ -220,6 +221,7 @@
 		B005E08ACAAF83F6A13F9D8C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B04A72C0E65996D39B749EC4 /* TerminalReconnectUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalReconnectUITests.swift; sourceTree = "<group>"; };
 		B1032CDFED9B211EDD9B0E14 /* TerminalSSHPrivateKeyParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSSHPrivateKeyParserTests.swift; sourceTree = "<group>"; };
+		B125A3A45F126CC81C320157 /* PushNotificationConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationConfigurator.swift; sourceTree = "<group>"; };
 		B1FBD95A5E0909F51B3934BA /* MobileSyncModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileSyncModelsTests.swift; sourceTree = "<group>"; };
 		B32C00E055BF7D0F1294BC39 /* TerminalDirectDaemonTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDirectDaemonTransport.swift; sourceTree = "<group>"; };
 		B5272CEA127F60CF7B1B1D0A /* LiveAnchormuxConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveAnchormuxConfigTests.swift; sourceTree = "<group>"; };
@@ -509,6 +511,7 @@
 			children = (
 				A86C27D01D6AF427F7C40487 /* NotificationManager.swift */,
 				94431CD1B2F69881E045321C /* NotificationTokenStore.swift */,
+				B125A3A45F126CC81C320157 /* PushNotificationConfigurator.swift */,
 			);
 			path = Notifications;
 			sourceTree = "<group>";
@@ -738,6 +741,7 @@
 				93FED7D20FA11DDB6B9201CA /* NotificationManager.swift in Sources */,
 				1E375F56DD54DEFCE45E3D37 /* NotificationRouteStore.swift in Sources */,
 				C3A0857225193CFE6C5647A3 /* NotificationTokenStore.swift in Sources */,
+				FA916AEDDE3F00EC06B02089 /* PushNotificationConfigurator.swift in Sources */,
 				5C3EBC583184E0F8306609A4 /* ServerScannerView.swift in Sources */,
 				C9E3B69A93DD87E682311505 /* SignInView.swift in Sources */,
 				8D3227A416DC344EFBA9B571 /* StackAuthApp.swift in Sources */,

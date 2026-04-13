@@ -58,8 +58,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         if let userInfo = launchOptions?[Self.remoteNotificationLaunchOptionsKey] as? [AnyHashable: Any] {
             NotificationManager.shared.handleNotificationUserInfo(userInfo)
         }
+        // Seed the push configurator with any already-stored token so
+        // TerminalDaemonConnection can configure the daemon before APNs
+        // redelivers a token this launch.
+        if let storedToken = NotificationTokenStore.shared.load() {
+            PushNotificationConfigurator.shared.updateDeviceToken(storedToken)
+        }
         Task {
-            await NotificationManager.shared.refreshAuthorizationStatus()
+            // Phase 4.3: request permission on launch (will only prompt if
+            // status is .notDetermined) then refresh/register.
+            await NotificationManager.shared.requestAuthorizationIfNeeded(trigger: .launch)
         }
         return true
     }
