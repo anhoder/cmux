@@ -85,6 +85,7 @@ fn dispatchInner(service: *session_service.Service, req: *const json_rpc.Request
     if (std.mem.eql(u8, req.method, "session.detach")) return handleSessionDetach(service, req);
     if (std.mem.eql(u8, req.method, "session.status")) return handleSessionStatus(service, req);
     if (std.mem.eql(u8, req.method, "session.list")) return handleSessionList(service, req);
+    if (std.mem.eql(u8, req.method, "session.markRead")) return handleSessionMarkRead(service, req);
     if (std.mem.eql(u8, req.method, "session.history")) return handleSessionHistory(service, req);
     if (std.mem.eql(u8, req.method, "workspace.list")) return handleWorkspaceList(service, req);
     if (std.mem.eql(u8, req.method, "workspace.create")) return handleWorkspaceCreate(service, req);
@@ -274,6 +275,23 @@ fn handleSessionList(service: *session_service.Service, req: *const json_rpc.Req
         .id = req.id,
         .ok = true,
         .result = .{ .sessions = sessions },
+    });
+}
+
+fn handleSessionMarkRead(service: *session_service.Service, req: *const json_rpc.Request) ![]u8 {
+    const params = getParamsObject(req) orelse return invalidParams(service.alloc, req.id, "session.markRead requires params");
+    const session_id = getRequiredStringParam(params, "session_id", "session.markRead requires session_id") catch |err| return paramError(service.alloc, req.id, err);
+
+    const found = service.markRead(session_id);
+    if (!found) return terminalNotFound(service.alloc, req.id);
+
+    return try json_rpc.encodeResponse(service.alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .session_id = session_id,
+            .has_unread_output = false,
+        },
     });
 }
 
@@ -544,6 +562,7 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
         session_id: ?[]const u8,
         title: []const u8,
         directory: []const u8,
+        has_unread_output: bool,
     };
 
     const WorkspaceEntry = struct {
@@ -554,6 +573,7 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
         phase: []const u8,
         color: ?[]const u8,
         unread_count: u32,
+        has_unread: bool,
         pinned: bool,
         session_id: ?[]const u8,
         focused_pane_id: ?[]const u8,
@@ -586,11 +606,13 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
         defer alloc.free(leaves);
 
         var pane_entries: std.ArrayList(PaneEntry) = .empty;
+        var ws_has_unread = false;
         for (leaves) |leaf| {
             // Use OSC-extracted title/directory from the daemon's terminal
             // session as fallback when the macOS sync hasn't provided them.
             var title = leaf.title;
             var directory = leaf.directory;
+            var pane_unread = false;
             if (leaf.session_id) |sid| {
                 if (service.runtimes.getPtr(sid)) |runtime| {
                     if (title.len == 0 or std.mem.eql(u8, title, "Terminal")) {
@@ -603,6 +625,8 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
                             directory = d;
                         }
                     }
+                    pane_unread = runtime.*.*.has_unread_output.load(.seq_cst);
+                    if (pane_unread) ws_has_unread = true;
                 }
             }
             try pane_entries.append(alloc, .{
@@ -610,6 +634,7 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
                 .session_id = leaf.session_id,
                 .title = title,
                 .directory = directory,
+                .has_unread_output = pane_unread,
             });
         }
         const panes_slice = try pane_entries.toOwnedSlice(alloc);
@@ -623,6 +648,7 @@ fn handleWorkspaceList(service: *session_service.Service, req: *const json_rpc.R
             .phase = ws.phase,
             .color = ws.color,
             .unread_count = ws.unread_count,
+            .has_unread = ws_has_unread,
             .pinned = ws.pinned,
             .session_id = ws.session_id,
             .focused_pane_id = ws.focused_pane_id,
@@ -912,7 +938,7 @@ fn handleWorkspaceSubscribe(service: *session_service.Service, req: *const json_
 /// Notify all workspace subscribers that state has changed.
 /// Called after any workspace/pane mutation.
 /// Includes the full workspace list so clients don't need a round-trip re-fetch.
-fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
+pub fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
     const alloc = service.alloc;
     const reg = &service.workspace_reg;
 
@@ -921,6 +947,7 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
         session_id: ?[]const u8,
         title: []const u8,
         directory: []const u8,
+        has_unread_output: bool,
     };
 
     const WorkspaceEntry = struct {
@@ -931,6 +958,7 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
         phase: []const u8,
         color: ?[]const u8,
         unread_count: u32,
+        has_unread: bool,
         pinned: bool,
         session_id: ?[]const u8,
         focused_pane_id: ?[]const u8,
@@ -954,9 +982,11 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
         defer alloc.free(leaves);
 
         var pane_entries: std.ArrayList(PaneEntry) = .empty;
+        var ws_has_unread = false;
         for (leaves) |leaf| {
             var title = leaf.title;
             var directory = leaf.directory;
+            var pane_unread = false;
             if (leaf.session_id) |sid| {
                 if (service.runtimes.getPtr(sid)) |runtime| {
                     if (title.len == 0 or std.mem.eql(u8, title, "Terminal")) {
@@ -965,6 +995,8 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
                     if (directory.len == 0) {
                         if (runtime.*.*.terminal.last_directory) |d| directory = d;
                     }
+                    pane_unread = runtime.*.*.has_unread_output.load(.seq_cst);
+                    if (pane_unread) ws_has_unread = true;
                 }
             }
             pane_entries.append(alloc, .{
@@ -972,6 +1004,7 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
                 .session_id = leaf.session_id,
                 .title = title,
                 .directory = directory,
+                .has_unread_output = pane_unread,
             }) catch continue;
         }
         const panes_slice = pane_entries.toOwnedSlice(alloc) catch continue;
@@ -988,6 +1021,7 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
             .phase = ws.phase,
             .color = ws.color,
             .unread_count = ws.unread_count,
+            .has_unread = ws_has_unread,
             .pinned = ws.pinned,
             .session_id = ws.session_id,
             .focused_pane_id = ws.focused_pane_id,

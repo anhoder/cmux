@@ -35,6 +35,7 @@ pub fn serve(cfg: Config) !void {
         .service = session_service.Service.init(alloc),
     };
     defer shared.service.deinit();
+    shared.service.on_workspace_changed = &server_core.notifyWorkspaceSubscribers;
 
     // Start WebSocket listener on a separate thread if configured
     if (cfg.ws_port) |ws_port| {

@@ -9,6 +9,7 @@ pub fn serve() !void {
 
     var service = session_service.Service.init(alloc);
     defer service.deinit();
+    service.on_workspace_changed = &server_core.notifyWorkspaceSubscribers;
 
     const stdin = std.fs.File.stdin();
     var output_buf: [64 * 1024]u8 = undefined;

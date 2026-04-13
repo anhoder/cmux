@@ -66,6 +66,9 @@ const RuntimeSession = struct {
     /// Serializes pump-thread access to `pty`/`terminal` against any
     /// foreground caller (read/write/history/resize/deinit).
     lock: std.Thread.Mutex = .{},
+    /// True when the pump observed new PTY output while no client was
+    /// subscribed. Cleared on terminal.subscribe or session.markRead.
+    has_unread_output: std.atomic.Value(bool) = .init(false),
 
     fn init(alloc: std.mem.Allocator, command: []const u8, cols: u16, rows: u16) !RuntimeSession {
         return .{
@@ -163,6 +166,9 @@ pub const Service = struct {
     pump: ?pty_pump.Pump = null,
     sub_mutex: std.Thread.Mutex = .{},
     terminal_subs: std.ArrayListUnmanaged(*TerminalSubscription) = .empty,
+    /// Optional hook invoked when an unread-state transition occurs so the
+    /// transport layer can broadcast workspace.changed. Wired by serve_*.
+    on_workspace_changed: ?*const fn (*Service) void = null,
 
     pub fn init(alloc: std.mem.Allocator) Service {
         var service: Service = .{
@@ -408,8 +414,15 @@ pub const Service = struct {
         };
 
         self.sub_mutex.lock();
-        defer self.sub_mutex.unlock();
-        try self.terminal_subs.append(self.alloc, sub);
+        self.terminal_subs.append(self.alloc, sub) catch |err| {
+            self.sub_mutex.unlock();
+            return err;
+        };
+        self.sub_mutex.unlock();
+
+        // A new subscriber clears any "unread while idle" marker.
+        const was_unread = runtime.has_unread_output.swap(false, .seq_cst);
+        if (was_unread) self.fireWorkspaceChanged();
 
         return .{
             .data = raw.data,
@@ -419,6 +432,27 @@ pub const Service = struct {
             .eof = eof_now,
             .seq = 0,
         };
+    }
+
+    /// Clear the has_unread_output flag for `session_id`. Returns true iff
+    /// the session exists. Fires on_workspace_changed when the flag
+    /// transitioned from true to false so subscribers see the update.
+    pub fn markRead(self: *Service, session_id: []const u8) bool {
+        const runtime = self.runtimes.get(session_id) orelse return false;
+        const was = runtime.has_unread_output.swap(false, .seq_cst);
+        if (was) self.fireWorkspaceChanged();
+        return true;
+    }
+
+    /// Lock-free read of a session's has_unread_output flag. Returns false
+    /// when the session is unknown.
+    pub fn hasUnread(self: *Service, session_id: []const u8) bool {
+        const runtime = self.runtimes.get(session_id) orelse return false;
+        return runtime.has_unread_output.load(.seq_cst);
+    }
+
+    fn fireWorkspaceChanged(self: *Service) void {
+        if (self.on_workspace_changed) |cb| cb(self);
     }
 
     pub fn unsubscribeTerminal(
@@ -486,6 +520,17 @@ pub const Service = struct {
             }
         }
         self.sub_mutex.unlock();
+
+        if (matching.items.len == 0) {
+            // No live subscriber for this session: mark unread so the next
+            // workspace.list / workspace.changed reflects it. Notify only on
+            // the false→true transition to avoid spamming change events.
+            if (self.runtimes.get(entry.session_id)) |runtime| {
+                const was = runtime.has_unread_output.swap(true, .seq_cst);
+                if (!was) self.fireWorkspaceChanged();
+            }
+            return;
+        }
 
         for (matching.items) |sub| {
             if (sub.dead.load(.seq_cst)) continue;
@@ -955,4 +1000,78 @@ test "terminal.output carries notifications:{bell:true} once then null" {
     try std.testing.expect(std.mem.indexOf(u8, accum.items, "\"bell\":true") == null);
 
     _ = service.unsubscribeTerminal(&stream, "notif-smoke");
+}
+
+test "session has_unread_output flips true when pump fires without subscribers" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal("unread-smoke", "printf hi", 80, 24);
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    // Wait for the pump to drain output and notify with no subscribers.
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (std.time.milliTimestamp() < deadline) {
+        if (service.hasUnread("unread-smoke")) break;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(service.hasUnread("unread-smoke"));
+}
+
+test "markRead clears has_unread_output" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal("markread-smoke", "printf hi", 80, 24);
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (std.time.milliTimestamp() < deadline) {
+        if (service.hasUnread("markread-smoke")) break;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(service.hasUnread("markread-smoke"));
+
+    try std.testing.expect(service.markRead("markread-smoke"));
+    try std.testing.expect(!service.hasUnread("markread-smoke"));
+    try std.testing.expect(!service.markRead("no-such-session"));
+}
+
+test "subscribeTerminal clears has_unread_output" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal("sub-clears", "printf hi; sleep 5", 80, 24);
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    const deadline = std.time.milliTimestamp() + 2000;
+    while (std.time.milliTimestamp() < deadline) {
+        if (service.hasUnread("sub-clears")) break;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(service.hasUnread("sub-clears"));
+
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) {
+        return error.SocketPairFailed;
+    }
+    defer std.posix.close(fds[1]);
+    var stream = std.net.Stream{ .handle = fds[0] };
+    var write_mutex: std.Thread.Mutex = .{};
+
+    const snap = try service.subscribeTerminal(&stream, &write_mutex, "sub-clears", null);
+    std.testing.allocator.free(snap.data);
+
+    try std.testing.expect(!service.hasUnread("sub-clears"));
+
+    _ = service.unsubscribeTerminal(&stream, "sub-clears");
 }
