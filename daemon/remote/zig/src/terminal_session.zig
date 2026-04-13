@@ -3,11 +3,25 @@ const ghostty_vt = @import("ghostty-vt");
 const serialize = @import("serialize.zig");
 
 const max_raw_buffer_bytes = 1 << 20;
+const max_osc_bytes = 4096;
 
 pub const Options = struct {
     cols: u16,
     rows: u16,
     max_scrollback: usize,
+};
+
+pub const OscParserState = enum { ground, esc, osc, osc_esc, osc_discard, osc_discard_esc };
+
+pub const Notification = struct {
+    title: ?[]u8 = null,
+    body: ?[]u8 = null,
+
+    pub fn deinit(self: *Notification, alloc: std.mem.Allocator) void {
+        if (self.title) |t| alloc.free(t);
+        if (self.body) |b| alloc.free(b);
+        self.* = .{};
+    }
 };
 
 pub const RawReadResult = struct {
@@ -33,6 +47,18 @@ pub const TerminalSession = struct {
     last_title: ?[]u8 = null,
     /// Last working directory extracted from OSC 7 sequences.
     last_directory: ?[]u8 = null,
+    /// Number of BEL (0x07) bytes seen in the ground state.
+    bell_count: u64 = 0,
+    /// Last exit code parsed from OSC 133;D;<code> ST/BEL.
+    last_command_exit_code: ?i32 = null,
+    /// Set true whenever an OSC 133;D sequence is parsed.
+    command_finished: bool = false,
+    /// Last OSC 99 notification parsed (key=value;key=value form).
+    last_notification: ?Notification = null,
+    /// Incremental OSC parser state.
+    osc_state: OscParserState = .ground,
+    /// In-progress OSC payload buffer. Capped at max_osc_bytes.
+    osc_buffer: std.ArrayList(u8) = .empty,
 
     pub fn init(alloc: std.mem.Allocator, opts: Options) !TerminalSession {
         const terminal = try alloc.create(ghostty_vt.Terminal);
@@ -63,8 +89,10 @@ pub const TerminalSession = struct {
         self.terminal.deinit(self.alloc);
         self.alloc.destroy(self.terminal);
         self.raw_buffer.deinit(self.alloc);
+        self.osc_buffer.deinit(self.alloc);
         if (self.last_title) |t| self.alloc.free(t);
         if (self.last_directory) |d| self.alloc.free(d);
+        if (self.last_notification) |*n| n.deinit(self.alloc);
     }
 
     pub fn feed(self: *TerminalSession, data: []const u8) !void {
@@ -74,10 +102,7 @@ pub const TerminalSession = struct {
         try self.raw_buffer.appendSlice(self.alloc, data);
         self.next_offset += data.len;
 
-        // Extract title/directory from OSC sequences in the new data.
-        // OSC 0/2: \x1b]0;title\x07 or \x1b]2;title\x07 (or ST = \x1b\\)
-        // OSC 7: \x1b]7;file://hostname/path\x07
-        extractOSCMetadata(self, data);
+        self.feedOscParser(data);
 
         if (self.raw_buffer.items.len > max_raw_buffer_bytes) {
             const overflow = self.raw_buffer.items.len - max_raw_buffer_bytes;
@@ -88,48 +113,140 @@ pub const TerminalSession = struct {
         }
     }
 
-    fn extractOSCMetadata(self: *TerminalSession, data: []const u8) void {
-        // Scan for ESC ] (0x1b 0x5d) sequences
-        var i: usize = 0;
-        while (i + 2 < data.len) : (i += 1) {
-            if (data[i] != 0x1b or data[i + 1] != 0x5d) continue;
-            const osc_start = i + 2;
+    fn feedOscParser(self: *TerminalSession, data: []const u8) void {
+        for (data) |b| self.feedOscByte(b);
+    }
 
-            // Find terminator: BEL (0x07) or ST (ESC \)
-            var end: usize = osc_start;
-            while (end < data.len) : (end += 1) {
-                if (data[end] == 0x07) break;
-                if (end + 1 < data.len and data[end] == 0x1b and data[end + 1] == 0x5c) break;
-            }
-            if (end >= data.len) continue;
-
-            const osc_body = data[osc_start..end];
-            if (osc_body.len < 2) continue;
-
-            // OSC 0;title or OSC 2;title
-            if ((osc_body[0] == '0' or osc_body[0] == '2') and osc_body[1] == ';') {
-                const title = osc_body[2..];
-                if (title.len > 0) {
-                    if (self.last_title) |old| self.alloc.free(old);
-                    self.last_title = self.alloc.dupe(u8, title) catch null;
-                }
-            }
-            // OSC 7;file://host/path or OSC 7;kitty-shell-cwd://host/path
-            else if (osc_body.len > 2 and osc_body[0] == '7' and osc_body[1] == ';') {
-                const url = osc_body[2..];
-                // Extract path from scheme://hostname/path
-                if (std.mem.indexOf(u8, url, "//")) |slash2| {
-                    const after_scheme = url[slash2 + 2 ..];
-                    if (std.mem.indexOf(u8, after_scheme, "/")) |path_start| {
-                        const path = after_scheme[path_start..];
-                        if (self.last_directory) |old| self.alloc.free(old);
-                        self.last_directory = self.alloc.dupe(u8, path) catch null;
-                    }
-                }
-            }
-
-            i = end;
+    fn feedOscByte(self: *TerminalSession, b: u8) void {
+        switch (self.osc_state) {
+            .ground => switch (b) {
+                0x07 => self.bell_count += 1,
+                0x1b => self.osc_state = .esc,
+                else => {},
+            },
+            .esc => switch (b) {
+                ']' => {
+                    self.osc_buffer.clearRetainingCapacity();
+                    self.osc_state = .osc;
+                },
+                0x1b => {}, // stay in esc
+                else => self.osc_state = .ground,
+            },
+            .osc => switch (b) {
+                0x07 => {
+                    self.handleOscPayload();
+                    self.osc_state = .ground;
+                },
+                0x1b => self.osc_state = .osc_esc,
+                else => self.appendOscByte(b),
+            },
+            .osc_esc => switch (b) {
+                '\\' => {
+                    self.handleOscPayload();
+                    self.osc_state = .ground;
+                },
+                0x07 => {
+                    self.handleOscPayload();
+                    self.osc_state = .ground;
+                },
+                0x1b => {}, // stay in osc_esc
+                else => {
+                    // Spurious ESC inside OSC; treat as part of payload, return to osc state.
+                    self.appendOscByte(0x1b);
+                    self.appendOscByte(b);
+                    self.osc_state = .osc;
+                },
+            },
+            .osc_discard => switch (b) {
+                0x07 => self.osc_state = .ground,
+                0x1b => self.osc_state = .osc_discard_esc,
+                else => {},
+            },
+            .osc_discard_esc => switch (b) {
+                '\\' => self.osc_state = .ground,
+                0x07 => self.osc_state = .ground,
+                0x1b => {},
+                else => self.osc_state = .osc_discard,
+            },
         }
+    }
+
+    fn appendOscByte(self: *TerminalSession, b: u8) void {
+        if (self.osc_buffer.items.len >= max_osc_bytes) {
+            // Overflow: discard accumulated payload and consume bytes until terminator.
+            self.osc_buffer.clearRetainingCapacity();
+            self.osc_state = .osc_discard;
+            return;
+        }
+        self.osc_buffer.append(self.alloc, b) catch {
+            self.osc_buffer.clearRetainingCapacity();
+            self.osc_state = .osc_discard;
+        };
+    }
+
+    fn handleOscPayload(self: *TerminalSession) void {
+        const body = self.osc_buffer.items;
+        defer self.osc_buffer.clearRetainingCapacity();
+        if (body.len < 2) return;
+
+        // Split prefix "Ps;" off.
+        const semi = std.mem.indexOfScalar(u8, body, ';') orelse return;
+        const ps = body[0..semi];
+        const rest = body[semi + 1 ..];
+
+        if (std.mem.eql(u8, ps, "0") or std.mem.eql(u8, ps, "2")) {
+            if (rest.len == 0) return;
+            const dup = self.alloc.dupe(u8, rest) catch return;
+            if (self.last_title) |old| self.alloc.free(old);
+            self.last_title = dup;
+        } else if (std.mem.eql(u8, ps, "7")) {
+            // file://host/path → /path
+            if (std.mem.indexOf(u8, rest, "//")) |slash2| {
+                const after_scheme = rest[slash2 + 2 ..];
+                if (std.mem.indexOfScalar(u8, after_scheme, '/')) |path_start| {
+                    const path = after_scheme[path_start..];
+                    const dup = self.alloc.dupe(u8, path) catch return;
+                    if (self.last_directory) |old| self.alloc.free(old);
+                    self.last_directory = dup;
+                }
+            }
+        } else if (std.mem.eql(u8, ps, "133")) {
+            // 133;D[;code]
+            if (rest.len == 0) return;
+            const sub_end = std.mem.indexOfScalar(u8, rest, ';') orelse rest.len;
+            const sub = rest[0..sub_end];
+            if (sub.len == 1 and sub[0] == 'D') {
+                self.command_finished = true;
+                if (sub_end < rest.len) {
+                    const code_str = rest[sub_end + 1 ..];
+                    self.last_command_exit_code = std.fmt.parseInt(i32, code_str, 10) catch null;
+                } else {
+                    self.last_command_exit_code = null;
+                }
+            }
+        } else if (std.mem.eql(u8, ps, "99")) {
+            self.parseNotification(rest);
+        }
+    }
+
+    fn parseNotification(self: *TerminalSession, payload: []const u8) void {
+        var notif: Notification = .{};
+        var it = std.mem.splitScalar(u8, payload, ';');
+        while (it.next()) |pair| {
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            const key = pair[0..eq];
+            const value = pair[eq + 1 ..];
+            if (std.mem.eql(u8, key, "title")) {
+                if (notif.title) |t| self.alloc.free(t);
+                notif.title = self.alloc.dupe(u8, value) catch null;
+            } else if (std.mem.eql(u8, key, "body")) {
+                if (notif.body) |b| self.alloc.free(b);
+                notif.body = self.alloc.dupe(u8, value) catch null;
+            }
+        }
+        if (notif.title == null and notif.body == null) return;
+        if (self.last_notification) |*old| old.deinit(self.alloc);
+        self.last_notification = notif;
     }
 
     pub fn resize(self: *TerminalSession, cols: u16, rows: u16) !void {
@@ -402,4 +519,90 @@ test "serializeTerminalState round trips visible content" {
 
     try std.testing.expect(std.mem.indexOf(u8, restored_plain, "hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, restored_plain, "world") != null);
+}
+
+test "OSC 133;D;0 in single chunk records exit code" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]133;D;0\x07");
+    try std.testing.expect(session.command_finished);
+    try std.testing.expectEqual(@as(?i32, 0), session.last_command_exit_code);
+}
+
+test "OSC 133;D;42 split across chunks with ST terminator" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]13");
+    try session.feed("3;D;42\x1b\\");
+    try std.testing.expect(session.command_finished);
+    try std.testing.expectEqual(@as(?i32, 42), session.last_command_exit_code);
+}
+
+test "BEL in ground state increments bell_count" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("hello\x07world");
+    try std.testing.expectEqual(@as(u64, 1), session.bell_count);
+    try std.testing.expectEqualStrings("hello\x07world", session.raw_buffer.items);
+}
+
+test "OSC 99 stores notification title and body" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]99;title=Build done;body=exit 0\x07");
+    try std.testing.expect(session.last_notification != null);
+    const n = session.last_notification.?;
+    try std.testing.expectEqualStrings("Build done", n.title.?);
+    try std.testing.expectEqualStrings("exit 0", n.body.?);
+}
+
+test "OSC overflow returns to ground without crashing" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]0;");
+    var i: usize = 0;
+    const big = "a" ** 1024;
+    while (i < 10) : (i += 1) {
+        try session.feed(big);
+    }
+    // No terminator yet; parser should be in osc_discard, no crash, no leak.
+    try std.testing.expect(session.osc_state == .osc_discard or session.osc_state == .osc_discard_esc);
+    // Sending a terminator returns us to ground.
+    try session.feed("\x07");
+    try std.testing.expect(session.osc_state == .ground);
+}
+
+test "OSC 0 title parses (regression for existing behavior)" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]0;my title\x07");
+    try std.testing.expectEqualStrings("my title", session.last_title.?);
+}
+
+test "OSC 7 cwd parses (regression for existing behavior)" {
+    var session = try TerminalSession.init(std.testing.allocator, .{
+        .cols = 16, .rows = 4, .max_scrollback = 1024,
+    });
+    defer session.deinit();
+
+    try session.feed("\x1b]7;file://host/Users/me/proj\x1b\\");
+    try std.testing.expectEqualStrings("/Users/me/proj", session.last_directory.?);
 }
