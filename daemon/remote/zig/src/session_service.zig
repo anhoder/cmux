@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_rpc = @import("json_rpc.zig");
+const outbound_queue = @import("outbound_queue.zig");
 const proxy_streams = @import("proxy_streams.zig");
 const pty_host = @import("pty_host.zig");
 const pty_pump = @import("pty_pump.zig");
@@ -16,6 +17,9 @@ pub const TerminalSubscription = struct {
     session_id: []const u8, // borrowed: hashmap key for the runtime
     stream: *std.net.Stream,
     stream_lock: *std.Thread.Mutex,
+    /// If set, push frames are enqueued (line-framed) into a per-connection
+    /// writer thread. Otherwise the WS sync framing path is used.
+    queue: ?*outbound_queue.OutboundQueue = null,
     last_offset: u64,
     seq: u64 = 0,
     dead: std.atomic.Value(bool) = .init(false),
@@ -357,6 +361,19 @@ pub const Service = struct {
         session_id: []const u8,
         requested_offset: ?u64,
     ) !SubscribeSnapshot {
+        return self.subscribeTerminalQueued(stream, stream_lock, null, session_id, requested_offset);
+    }
+
+    /// Same as `subscribeTerminal` but routes pushes through a per-connection
+    /// outbound queue (used by serve_unix; WS callers pass null).
+    pub fn subscribeTerminalQueued(
+        self: *Service,
+        stream: *std.net.Stream,
+        stream_lock: *std.Thread.Mutex,
+        queue: ?*outbound_queue.OutboundQueue,
+        session_id: []const u8,
+        requested_offset: ?u64,
+    ) !SubscribeSnapshot {
         const runtime = self.runtimes.get(session_id) orelse return error.TerminalSessionNotFound;
         const key_entry = self.runtimes.getEntry(session_id) orelse return error.TerminalSessionNotFound;
         const canonical_session_id = key_entry.key_ptr.*;
@@ -382,6 +399,7 @@ pub const Service = struct {
             .session_id = canonical_session_id,
             .stream = stream,
             .stream_lock = stream_lock,
+            .queue = queue,
             .last_offset = raw.offset,
             .seq = 0,
             .last_bell_count = runtime.terminal.bell_count,
@@ -577,8 +595,22 @@ pub const Service = struct {
             .eof = eof_now,
             .notifications = notifications_payload,
         });
-        defer self.alloc.free(event);
 
+        if (sub.queue) |q| {
+            // Newline-frame for line-delimited Unix transport. enqueue takes
+            // ownership of `line` on success.
+            const line = try self.alloc.alloc(u8, event.len + 1);
+            @memcpy(line[0..event.len], event);
+            line[event.len] = '\n';
+            self.alloc.free(event);
+            q.enqueueTerminal(line) catch |err| {
+                self.alloc.free(line);
+                return err;
+            };
+            return;
+        }
+
+        defer self.alloc.free(event);
         sub.stream_lock.lock();
         defer sub.stream_lock.unlock();
         try sendWsTextFrame(sub.stream, event);
@@ -730,6 +762,70 @@ test "terminal.subscribe snapshot + pump pushes terminal.output" {
     try std.testing.expect(got_later);
 
     _ = service.unsubscribeTerminal(&stream, "sub-smoke");
+}
+
+test "queued terminal.subscribe routes pushes through OutboundQueue" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal(
+        "queued-smoke",
+        "printf INITIAL; sleep 0.2; printf LATER",
+        80,
+        24,
+    );
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    std.Thread.sleep(80 * std.time.ns_per_ms);
+
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) {
+        return error.SocketPairFailed;
+    }
+    defer std.posix.close(fds[1]);
+    var stream = std.net.Stream{ .handle = fds[0] };
+    const flags = try std.posix.fcntl(fds[1], std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(fds[1], std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    var queue = outbound_queue.OutboundQueue.init(std.testing.allocator, fds[0]);
+    try queue.start();
+    defer queue.shutdown();
+
+    var write_mutex: std.Thread.Mutex = .{};
+    const snap = try service.subscribeTerminalQueued(&stream, &write_mutex, &queue, "queued-smoke", null);
+    std.testing.allocator.free(snap.data);
+
+    var buf: [4096]u8 = undefined;
+    var accum: std.ArrayListUnmanaged(u8) = .empty;
+    defer accum.deinit(std.testing.allocator);
+
+    const deadline = std.time.milliTimestamp() + 3000;
+    var got_event = false;
+    var got_later = false;
+    var got_newline = false;
+    while (std.time.milliTimestamp() < deadline) {
+        const n = std.posix.read(fds[1], &buf) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(15 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) break;
+        try accum.appendSlice(std.testing.allocator, buf[0..n]);
+        if (std.mem.indexOf(u8, accum.items, "\"event\":\"terminal.output\"") != null) got_event = true;
+        if (std.mem.indexOf(u8, accum.items, "TEFURVI") != null) got_later = true;
+        if (std.mem.indexOfScalar(u8, accum.items, '\n') != null) got_newline = true;
+        if (got_event and got_later and got_newline) break;
+    }
+    try std.testing.expect(got_event);
+    try std.testing.expect(got_later);
+    try std.testing.expect(got_newline);
+
+    _ = service.unsubscribeTerminal(&stream, "queued-smoke");
 }
 
 test "kqueue pump drains PTY without explicit read" {

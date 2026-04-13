@@ -1,5 +1,7 @@
 const std = @import("std");
+const json_rpc = @import("json_rpc.zig");
 const local_peer_auth = @import("local_peer_auth.zig");
+const outbound_queue = @import("outbound_queue.zig");
 const server_core = @import("server_core.zig");
 const session_service = @import("session_service.zig");
 const serve_ws = @import("serve_ws.zig");
@@ -71,36 +73,187 @@ fn handleClient(shared: *SharedService, client_fd: std.posix.fd_t) !void {
     defer std.posix.close(client_fd);
     try local_peer_auth.authorizeClient(client_fd);
 
-    var file = std.fs.File{ .handle = client_fd };
-    var output_buf: [64 * 1024]u8 = undefined;
-    var output_writer = file.writer(&output_buf);
-    const output = &output_writer.interface;
+    const service = &shared.service;
+    const alloc = service.alloc;
+
+    var stream = std.net.Stream{ .handle = client_fd };
+
+    // Per-connection writer thread + bounded outbound queue. All bytes
+    // sent to the client (RPC responses, terminal.output pushes,
+    // workspace.changed pushes) flow through this queue so the pump and
+    // workspace notifier never block on socket I/O.
+    var queue = outbound_queue.OutboundQueue.init(alloc, client_fd);
+    try queue.start();
+    defer queue.shutdown();
+
+    // Subscription cleanup on disconnect.
+    var workspace_subscribed = false;
+    defer if (workspace_subscribed) service.subscriptions.remove(&stream);
+    defer service.unsubscribeAllForStream(&stream);
+
+    // Stream lock satisfies TerminalSubscription's required type but is
+    // not actually used while `queue` is set (writer thread is the sole
+    // writer to the fd).
+    var write_mutex: std.Thread.Mutex = .{};
 
     var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(std.heap.page_allocator);
+    defer pending.deinit(alloc);
 
     var read_buf: [64 * 1024]u8 = undefined;
     while (true) {
-        const n = try file.read(&read_buf);
+        if (queue.isDead()) return;
+        const n = std.posix.read(client_fd, &read_buf) catch return;
         if (n == 0) break;
 
-        try pending.appendSlice(std.heap.page_allocator, read_buf[0..n]);
+        try pending.appendSlice(alloc, read_buf[0..n]);
         while (std.mem.indexOfScalar(u8, pending.items, '\n')) |newline_index| {
-            server_core.handleLine(&shared.service, output, pending.items[0..newline_index]) catch |err| {
-                return err;
-            };
+            try handleLine(
+                service,
+                &queue,
+                &stream,
+                &write_mutex,
+                &workspace_subscribed,
+                pending.items[0..newline_index],
+            );
 
             const remaining = pending.items[newline_index + 1 ..];
             std.mem.copyForwards(u8, pending.items[0..remaining.len], remaining);
             pending.items.len = remaining.len;
         }
     }
+}
 
-    if (pending.items.len > 0) {
-        server_core.handleLine(&shared.service, output, pending.items) catch |err| {
-            return err;
-        };
+fn handleLine(
+    service: *session_service.Service,
+    queue: *outbound_queue.OutboundQueue,
+    stream: *std.net.Stream,
+    write_mutex: *std.Thread.Mutex,
+    workspace_subscribed: *bool,
+    raw_line: []const u8,
+) !void {
+    const alloc = service.alloc;
+    const trimmed = std.mem.trimRight(u8, raw_line, "\r");
+    if (trimmed.len == 0) return;
+
+    var req = json_rpc.decodeRequest(alloc, trimmed) catch {
+        const resp = try json_rpc.encodeResponse(alloc, .{
+            .ok = false,
+            .@"error" = .{ .code = "invalid_request", .message = "invalid JSON request" },
+        });
+        return enqueueResponse(queue, alloc, resp);
+    };
+    defer req.deinit(alloc);
+
+    if (std.mem.eql(u8, req.method, "terminal.subscribe")) {
+        const resp = try handleTerminalSubscribe(service, queue, stream, write_mutex, &req);
+        return enqueueResponse(queue, alloc, resp);
     }
+    if (std.mem.eql(u8, req.method, "terminal.unsubscribe")) {
+        const resp = try handleTerminalUnsubscribe(service, stream, &req);
+        return enqueueResponse(queue, alloc, resp);
+    }
+    if (std.mem.eql(u8, req.method, "workspace.subscribe") and !workspace_subscribed.*) {
+        service.subscriptions.addQueued(alloc, stream, queue) catch {};
+        workspace_subscribed.* = true;
+        // Fall through so the snapshot is returned by server_core.dispatch.
+    }
+
+    const response = try server_core.dispatch(service, &req);
+    return enqueueResponse(queue, alloc, response);
+}
+
+fn enqueueResponse(queue: *outbound_queue.OutboundQueue, alloc: std.mem.Allocator, payload: []u8) !void {
+    // Newline-frame the response and hand ownership to the writer thread.
+    const line = try alloc.alloc(u8, payload.len + 1);
+    @memcpy(line[0..payload.len], payload);
+    line[payload.len] = '\n';
+    alloc.free(payload);
+    queue.enqueueControl(line) catch |err| {
+        alloc.free(line);
+        return err;
+    };
+}
+
+fn handleTerminalSubscribe(
+    service: *session_service.Service,
+    queue: *outbound_queue.OutboundQueue,
+    stream: *std.net.Stream,
+    write_mutex: *std.Thread.Mutex,
+    req: *const json_rpc.Request,
+) ![]u8 {
+    const alloc = service.alloc;
+    const params_value = req.parsed.value.object.get("params") orelse {
+        return errorResp(alloc, req.id, "invalid_params", "terminal.subscribe requires params");
+    };
+    if (params_value != .object) return errorResp(alloc, req.id, "invalid_params", "params must be object");
+    const session_id_v = params_value.object.get("session_id") orelse {
+        return errorResp(alloc, req.id, "invalid_params", "terminal.subscribe requires session_id");
+    };
+    if (session_id_v != .string) return errorResp(alloc, req.id, "invalid_params", "session_id must be string");
+    const session_id = session_id_v.string;
+
+    const requested_offset: ?u64 = blk: {
+        const off_v = params_value.object.get("offset") orelse break :blk null;
+        if (off_v != .integer) break :blk null;
+        if (off_v.integer < 0) break :blk null;
+        break :blk @intCast(off_v.integer);
+    };
+
+    const snap = service.subscribeTerminalQueued(stream, write_mutex, queue, session_id, requested_offset) catch |err| switch (err) {
+        error.TerminalSessionNotFound => return errorResp(alloc, req.id, "not_found", "terminal session not found"),
+        else => return errorResp(alloc, req.id, "internal_error", @errorName(err)),
+    };
+    defer alloc.free(snap.data);
+
+    const enc_len = std.base64.standard.Encoder.calcSize(snap.data.len);
+    const enc = try alloc.alloc(u8, enc_len);
+    defer alloc.free(enc);
+    _ = std.base64.standard.Encoder.encode(enc, snap.data);
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .session_id = session_id,
+            .seq = snap.seq,
+            .offset = snap.offset,
+            .base_offset = snap.base_offset,
+            .truncated = snap.truncated,
+            .eof = snap.eof,
+            .data = enc,
+        },
+    });
+}
+
+fn handleTerminalUnsubscribe(
+    service: *session_service.Service,
+    stream: *std.net.Stream,
+    req: *const json_rpc.Request,
+) ![]u8 {
+    const alloc = service.alloc;
+    const params_value = req.parsed.value.object.get("params") orelse {
+        return errorResp(alloc, req.id, "invalid_params", "terminal.unsubscribe requires params");
+    };
+    if (params_value != .object) return errorResp(alloc, req.id, "invalid_params", "params must be object");
+    const session_id_v = params_value.object.get("session_id") orelse {
+        return errorResp(alloc, req.id, "invalid_params", "terminal.unsubscribe requires session_id");
+    };
+    if (session_id_v != .string) return errorResp(alloc, req.id, "invalid_params", "session_id must be string");
+
+    const removed = service.unsubscribeTerminal(stream, session_id_v.string);
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .removed = removed },
+    });
+}
+
+fn errorResp(alloc: std.mem.Allocator, id: ?std.json.Value, code: []const u8, message: []const u8) ![]u8 {
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = id,
+        .ok = false,
+        .@"error" = .{ .code = code, .message = message },
+    });
 }
 
 fn createSocket(socket_path: []const u8) !std.posix.fd_t {

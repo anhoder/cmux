@@ -1004,7 +1004,7 @@ fn notifyWorkspaceSubscribers(service: *session_service.Service) void {
         },
     }) catch return;
     defer alloc.free(event);
-    service.subscriptions.notifyAll(event);
+    service.subscriptions.notifyAllAlloc(alloc, event);
 }
 
 fn errorResponse(alloc: std.mem.Allocator, id: ?std.json.Value, code: []const u8, message: []const u8) ![]u8 {

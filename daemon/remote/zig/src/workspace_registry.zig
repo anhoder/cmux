@@ -1,4 +1,5 @@
 const std = @import("std");
+const outbound_queue = @import("outbound_queue.zig");
 
 pub const PaneType = enum {
     terminal,
@@ -579,21 +580,38 @@ pub const Registry = struct {
 
 /// Thread-safe list of subscriber streams for workspace change events.
 /// Each subscriber is a WebSocket stream that receives push events.
+pub const Subscriber = struct {
+    stream: *std.net.Stream,
+    /// If set, control frames are enqueued (line-framed) into the
+    /// per-connection outbound queue. Otherwise the WS sync framing path
+    /// is used and the manager prunes failed connections.
+    queue: ?*outbound_queue.OutboundQueue = null,
+};
+
 pub const SubscriptionManager = struct {
     mutex: std.Thread.Mutex = .{},
-    streams: std.ArrayList(*std.net.Stream) = .empty,
+    streams: std.ArrayList(Subscriber) = .empty,
 
     pub fn add(self: *SubscriptionManager, alloc: std.mem.Allocator, stream: *std.net.Stream) !void {
+        return self.addQueued(alloc, stream, null);
+    }
+
+    pub fn addQueued(
+        self: *SubscriptionManager,
+        alloc: std.mem.Allocator,
+        stream: *std.net.Stream,
+        queue: ?*outbound_queue.OutboundQueue,
+    ) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        try self.streams.append(alloc, stream);
+        try self.streams.append(alloc, .{ .stream = stream, .queue = queue });
     }
 
     pub fn remove(self: *SubscriptionManager, stream: *std.net.Stream) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.streams.items, 0..) |s, i| {
-            if (s == stream) {
+            if (s.stream == stream) {
                 _ = self.streams.orderedRemove(i);
                 return;
             }
@@ -601,16 +619,47 @@ pub const SubscriptionManager = struct {
     }
 
     pub fn notifyAll(self: *SubscriptionManager, message: []const u8) void {
+        self.notifyAllAlloc(null, message);
+    }
+
+    /// `alloc` is required when any subscriber uses the queued path (it
+    /// owns the duplicated payload). May be null if all subscribers use
+    /// the WS sync path.
+    pub fn notifyAllAlloc(
+        self: *SubscriptionManager,
+        alloc: ?std.mem.Allocator,
+        message: []const u8,
+    ) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         var i: usize = 0;
         while (i < self.streams.items.len) {
-            sendWsText(self.streams.items[i], message) catch {
-                // Dead connection, remove it
-                _ = self.streams.orderedRemove(i);
-                continue;
-            };
-            i += 1;
+            const sub = self.streams.items[i];
+            if (sub.queue) |q| {
+                const a = alloc orelse {
+                    _ = self.streams.orderedRemove(i);
+                    continue;
+                };
+                // Newline frame for line-delimited transport.
+                const line = a.alloc(u8, message.len + 1) catch {
+                    _ = self.streams.orderedRemove(i);
+                    continue;
+                };
+                @memcpy(line[0..message.len], message);
+                line[message.len] = '\n';
+                q.enqueueControl(line) catch {
+                    a.free(line);
+                    _ = self.streams.orderedRemove(i);
+                    continue;
+                };
+                i += 1;
+            } else {
+                sendWsText(sub.stream, message) catch {
+                    _ = self.streams.orderedRemove(i);
+                    continue;
+                };
+                i += 1;
+            }
         }
     }
 
