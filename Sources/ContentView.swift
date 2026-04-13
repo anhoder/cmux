@@ -374,8 +374,18 @@ struct TitlebarLayerBackground: NSViewRepresentable {
 }
 
 final class SidebarState: ObservableObject {
-    @Published var isVisible: Bool
-    @Published var persistedWidth: CGFloat
+    @Published var isVisible: Bool {
+        didSet {
+            guard isVisible != oldValue else { return }
+            AppDelegate.requestSessionSnapshotDirty(reason: "sidebar.visibility")
+        }
+    }
+    @Published var persistedWidth: CGFloat {
+        didSet {
+            guard abs(persistedWidth - oldValue) > 0.5 else { return }
+            AppDelegate.requestSessionSnapshotDirty(reason: "sidebar.width")
+        }
+    }
 
     init(isVisible: Bool = true, persistedWidth: CGFloat = CGFloat(SessionPersistencePolicy.defaultSidebarWidth)) {
         self.isVisible = isVisible

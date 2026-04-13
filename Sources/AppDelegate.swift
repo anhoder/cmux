@@ -2218,12 +2218,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         Self.detectRunningUnderXCTest(env)
     }
 
+    nonisolated static func requestSessionSnapshotDirty(reason: String) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                AppDelegate.shared?.markSessionSnapshotDirty(reason: reason)
+            }
+            return
+        }
+
+        Task { @MainActor in
+            AppDelegate.shared?.markSessionSnapshotDirty(reason: reason)
+        }
+    }
+
     private final class MainWindowContext {
         let windowId: UUID
         let tabManager: TabManager
         let sidebarState: SidebarState
         let sidebarSelectionState: SidebarSelectionState
         weak var window: NSWindow?
+        var sessionSnapshotWindowObservers: [NSObjectProtocol] = []
 
         init(
             windowId: UUID,
@@ -2237,6 +2251,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             self.sidebarState = sidebarState
             self.sidebarSelectionState = sidebarSelectionState
             self.window = window
+        }
+
+        deinit {
+            sessionSnapshotWindowObservers.forEach(NotificationCenter.default.removeObserver)
         }
     }
 
@@ -2431,7 +2449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var isApplyingStartupSessionRestore = false
     private var sessionAutosaveTimer: DispatchSourceTimer?
     private var sessionAutosaveTickInFlight = false
-    private var sessionAutosaveDeferredRetryPending = false
+    private var sessionSnapshotIsDirty = false
     private let sessionPersistenceQueue = DispatchQueue(
         label: "com.cmuxterm.app.sessionPersistence",
         qos: .utility
@@ -2443,8 +2461,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private nonisolated static func enqueueLaunchServicesRegistrationWork(_ work: @escaping @Sendable () -> Void) {
         launchServicesRegistrationQueue.async(execute: work)
     }
-    private var lastSessionAutosaveFingerprint: Int?
-    private var lastSessionAutosavePersistedAt: Date = .distantPast
     private var lastTypingActivityAt: TimeInterval = 0
     private var didHandleExplicitOpenIntentAtStartup = false
     private var isTerminatingApp = false
@@ -3928,7 +3944,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func completeStartupSessionRestore() {
         startupSessionSnapshot = nil
         isApplyingStartupSessionRestore = false
-        _ = saveSessionSnapshot(includeScrollback: false)
+        markSessionSnapshotDirty(reason: "session.restore.completed")
     }
 
     private func applySessionWindowSnapshot(
@@ -4316,14 +4332,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         guard !isRunningUnderXCTest(env) else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        let interval = SessionPersistencePolicy.autosaveInterval
-        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .seconds(1))
+        timer.schedule(deadline: .distantFuture, leeway: .milliseconds(250))
         timer.setEventHandler { [weak self] in
             guard let self,
                   Self.shouldRunSessionAutosaveTick(isTerminatingApp: self.isTerminatingApp) else {
                 return
             }
-            self.runSessionAutosaveTick(source: "timer")
+            self.runSessionAutosaveTick(source: "debouncedTimer")
         }
         sessionAutosaveTimer = timer
         timer.resume()
@@ -4333,7 +4348,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         sessionAutosaveTimer?.cancel()
         sessionAutosaveTimer = nil
         sessionAutosaveTickInFlight = false
-        sessionAutosaveDeferredRetryPending = false
+    }
+
+    private func markSessionSnapshotDirty(reason: String) {
+        guard !isApplyingStartupSessionRestore else { return }
+        sessionSnapshotIsDirty = true
+        guard Self.shouldRunSessionAutosaveTick(isTerminatingApp: isTerminatingApp) else { return }
+        scheduleSessionAutosave(after: SessionPersistencePolicy.autosaveInterval, source: reason)
+    }
+
+    private func scheduleSessionAutosave(after delay: TimeInterval, source: String) {
+        guard sessionSnapshotIsDirty else { return }
+        guard delay.isFinite else { return }
+        startSessionAutosaveTimerIfNeeded()
+        guard let sessionAutosaveTimer else { return }
+
+        let clampedDelay = max(0, delay)
+        sessionAutosaveTimer.schedule(
+            deadline: .now() + clampedDelay,
+            leeway: .milliseconds(250)
+        )
+
+#if DEBUG
+        dlog(
+            "session.save.scheduled source=\(source) includeScrollback=0 delayMs=\(Int((clampedDelay * 1000).rounded()))"
+        )
+#endif
     }
 
     private func installLifecycleSnapshotObserversIfNeeded() {
@@ -4416,40 +4456,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         didDisableSuddenTermination = false
     }
 
-    private func sessionAutosaveFingerprint(includeScrollback: Bool) -> Int? {
-        guard !includeScrollback else { return nil }
-
-        var hasher = Hasher()
-        let contexts = mainWindowContexts.values.sorted { lhs, rhs in
-            lhs.windowId.uuidString < rhs.windowId.uuidString
-        }
-        hasher.combine(contexts.count)
-
-        for context in contexts.prefix(SessionPersistencePolicy.maxWindowsPerSnapshot) {
-            hasher.combine(context.windowId)
-            hasher.combine(context.tabManager.sessionAutosaveFingerprint())
-            hasher.combine(context.sidebarState.isVisible)
-            hasher.combine(
-                Int(SessionPersistencePolicy.sanitizedSidebarWidth(Double(context.sidebarState.persistedWidth)).rounded())
-            )
-
-            switch context.sidebarSelectionState.selection {
-            case .tabs:
-                hasher.combine(0)
-            case .notifications:
-                hasher.combine(1)
-            }
-
-            if let window = context.window ?? windowForMainWindowId(context.windowId) {
-                Self.hashFrame(window.frame, into: &hasher)
-            } else {
-                hasher.combine(-1)
-            }
-        }
-
-        return hasher.finalize()
-    }
-
     @discardableResult
     private func saveSessionSnapshot(includeScrollback: Bool, removeWhenEmpty: Bool = false) -> Bool {
         if Self.shouldSkipSessionSaveDuringStartupRestore(
@@ -4484,6 +4490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 persistedGeometryData: nil,
                 synchronously: writeSynchronously
             )
+            sessionSnapshotIsDirty = false
             return false
         }
 
@@ -4503,6 +4510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             persistedGeometryData: persistedGeometryData,
             synchronously: writeSynchronously
         )
+        sessionSnapshotIsDirty = false
         return true
     }
 
@@ -4536,22 +4544,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return Self.sessionAutosaveTypingQuietPeriod - elapsed
     }
 
-    private func scheduleDeferredSessionAutosaveRetry(after delay: TimeInterval) {
-        guard delay.isFinite, delay > 0 else { return }
-        guard !sessionAutosaveDeferredRetryPending else { return }
-        sessionAutosaveDeferredRetryPending = true
-        sessionPersistenceQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.sessionAutosaveDeferredRetryPending = false
-                self.runSessionAutosaveTick(source: "typingQuietRetry")
-            }
-        }
-    }
-
     private func runSessionAutosaveTick(source: String) {
         guard Self.shouldRunSessionAutosaveTick(isTerminatingApp: isTerminatingApp) else { return }
-        guard !sessionAutosaveTickInFlight else { return }
+        guard sessionSnapshotIsDirty else {
+#if DEBUG
+            dlog("session.save.skipped reason=clean includeScrollback=0 source=\(source)")
+#endif
+            return
+        }
+        guard !sessionAutosaveTickInFlight else {
+            scheduleSessionAutosave(after: 1, source: "inFlightRetry")
+            return
+        }
         if let remainingQuietPeriod = remainingSessionAutosaveTypingQuietPeriod() {
 #if DEBUG
             dlog(
@@ -4559,7 +4563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "retryMs=\(Int((remainingQuietPeriod * 1000).rounded()))"
             )
 #endif
-            scheduleDeferredSessionAutosaveRetry(after: remainingQuietPeriod)
+            scheduleSessionAutosave(after: remainingQuietPeriod, source: "typingQuietRetry")
             return
         }
 
@@ -4567,7 +4571,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #if DEBUG
         let timingStart = CmuxTypingTiming.start()
         let phaseStart = ProcessInfo.processInfo.systemUptime
-        var fingerprintMs: Double = 0
         var saveMs: Double = 0
         defer {
             sessionAutosaveTickInFlight = false
@@ -4577,7 +4580,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 totalMs: totalMs,
                 thresholdMs: 2.0,
                 parts: [
-                    ("fingerprintMs", fingerprintMs),
                     ("saveMs", saveMs),
                 ],
                 extra: "source=\(source)"
@@ -4592,30 +4594,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         defer { sessionAutosaveTickInFlight = false }
 #endif
 
-        let now = Date()
-#if DEBUG
-        let fingerprintStart = ProcessInfo.processInfo.systemUptime
-#endif
-        let autosaveFingerprint = sessionAutosaveFingerprint(includeScrollback: false)
-#if DEBUG
-        fingerprintMs = (ProcessInfo.processInfo.systemUptime - fingerprintStart) * 1000.0
-#endif
-        if Self.shouldSkipSessionAutosaveForUnchangedFingerprint(
-            isTerminatingApp: isTerminatingApp,
-            includeScrollback: false,
-            previousFingerprint: lastSessionAutosaveFingerprint,
-            currentFingerprint: autosaveFingerprint,
-            lastPersistedAt: lastSessionAutosavePersistedAt,
-            now: now
-        ) {
-#if DEBUG
-            dlog(
-                "session.save.skipped reason=unchanged_autosave_fingerprint includeScrollback=0 source=\(source)"
-            )
-#endif
-            return
-        }
-
 #if DEBUG
         let saveStart = ProcessInfo.processInfo.systemUptime
 #endif
@@ -4623,11 +4601,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #if DEBUG
         saveMs = (ProcessInfo.processInfo.systemUptime - saveStart) * 1000.0
 #endif
-        updateSessionAutosaveSaveState(
-            includeScrollback: false,
-            persistedAt: now,
-            fingerprint: autosaveFingerprint
-        )
     }
 
     fileprivate func recordTypingActivity() {
@@ -4639,47 +4612,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         includeScrollback: Bool
     ) -> Bool {
         isTerminatingApp && includeScrollback
-    }
-
-    nonisolated static func shouldSkipSessionAutosaveForUnchangedFingerprint(
-        isTerminatingApp: Bool,
-        includeScrollback: Bool,
-        previousFingerprint: Int?,
-        currentFingerprint: Int?,
-        lastPersistedAt: Date,
-        now: Date,
-        maximumAutosaveSkippableInterval: TimeInterval = 60
-    ) -> Bool {
-        guard !isTerminatingApp,
-              !includeScrollback,
-              let previousFingerprint,
-              let currentFingerprint,
-              previousFingerprint == currentFingerprint else {
-            return false
-        }
-
-        return now.timeIntervalSince(lastPersistedAt) < maximumAutosaveSkippableInterval
-    }
-
-    private func updateSessionAutosaveSaveState(
-        includeScrollback: Bool,
-        persistedAt: Date,
-        fingerprint: Int?
-    ) {
-        guard !isTerminatingApp, !includeScrollback else { return }
-        lastSessionAutosaveFingerprint = fingerprint
-        lastSessionAutosavePersistedAt = persistedAt
-    }
-
-    private nonisolated static func hashFrame(_ frame: NSRect, into hasher: inout Hasher) {
-        let standardized = frame.standardized
-        let quantized = [
-            standardized.origin.x,
-            standardized.origin.y,
-            standardized.size.width,
-            standardized.size.height,
-        ].map { Int(($0 * 2).rounded()) }
-        quantized.forEach { hasher.combine($0) }
     }
 
     private func persistSessionSnapshot(
@@ -4802,6 +4734,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NotificationCenter.default.post(name: .mainWindowContextsDidChange, object: self)
     }
 
+    private func installSessionSnapshotWindowObservers(for context: MainWindowContext, window: NSWindow) {
+        context.sessionSnapshotWindowObservers.forEach(NotificationCenter.default.removeObserver)
+        context.sessionSnapshotWindowObservers.removeAll()
+
+        let center = NotificationCenter.default
+        let observe: (Notification.Name, String) -> Void = { [weak self, weak window] name, reason in
+            guard let self else { return }
+            let observer = center.addObserver(
+                forName: name,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                MainActor.assumeIsolated {
+                    self.markSessionSnapshotDirty(reason: reason)
+                }
+            }
+            context.sessionSnapshotWindowObservers.append(observer)
+        }
+
+        observe(NSWindow.didMoveNotification, "window.move")
+        observe(NSWindow.didResizeNotification, "window.resize")
+        observe(NSWindow.didChangeScreenNotification, "window.screen")
+        observe(NSWindow.didChangeBackingPropertiesNotification, "window.backing")
+    }
+
     /// Register a terminal window with the AppDelegate so menu commands and socket control
     /// can target whichever window is currently active.
     func registerMainWindow(
@@ -4817,19 +4775,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         #if DEBUG
         let priorManagerToken = debugManagerToken(self.tabManager)
         #endif
+        let context: MainWindowContext
         if let existing = mainWindowContexts[key] {
             existing.window = window
+            context = existing
         } else if let existing = mainWindowContexts.values.first(where: { $0.windowId == windowId }) {
             existing.window = window
             reindexMainWindowContextIfNeeded(existing, for: window)
+            context = existing
         } else {
-            mainWindowContexts[key] = MainWindowContext(
+            let created = MainWindowContext(
                 windowId: windowId,
                 tabManager: tabManager,
                 sidebarState: sidebarState,
                 sidebarSelectionState: sidebarSelectionState,
                 window: window
             )
+            mainWindowContexts[key] = created
+            context = created
             NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
                 object: window,
@@ -4839,6 +4802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.unregisterMainWindow(closing)
             }
         }
+        installSessionSnapshotWindowObservers(for: context, window: window)
         commandPaletteVisibilityByWindowId[windowId] = false
         commandPaletteSelectionByWindowId[windowId] = 0
         commandPaletteSnapshotByWindowId[windowId] = .empty
@@ -4855,7 +4819,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         attemptStartupSessionRestoreIfNeeded(primaryWindow: window)
         if !isTerminatingApp {
-            _ = saveSessionSnapshot(includeScrollback: false)
+            markSessionSnapshotDirty(reason: "mainWindow.register")
         }
     }
 
