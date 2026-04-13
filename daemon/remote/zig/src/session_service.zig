@@ -1,6 +1,7 @@
 const std = @import("std");
 const proxy_streams = @import("proxy_streams.zig");
 const pty_host = @import("pty_host.zig");
+const pty_pump = @import("pty_pump.zig");
 const serialize = @import("serialize.zig");
 const session_registry = @import("session_registry.zig");
 const terminal_session = @import("terminal_session.zig");
@@ -29,6 +30,9 @@ pub const ReadTerminalResult = struct {
 const RuntimeSession = struct {
     pty: pty_host.PtyHost,
     terminal: terminal_session.TerminalSession,
+    /// Serializes pump-thread access to `pty`/`terminal` against any
+    /// foreground caller (read/write/history/resize/deinit).
+    lock: std.Thread.Mutex = .{},
 
     fn init(alloc: std.mem.Allocator, command: []const u8, cols: u16, rows: u16) !RuntimeSession {
         return .{
@@ -42,11 +46,15 @@ const RuntimeSession = struct {
     }
 
     fn deinit(self: *RuntimeSession) void {
+        self.lock.lock();
+        defer self.lock.unlock();
         self.terminal.deinit();
         self.pty.deinit();
     }
 
     fn resize(self: *RuntimeSession, cols: u16, rows: u16) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
         try self.pty.resize(cols, rows);
         try self.terminal.resize(cols, rows);
     }
@@ -55,15 +63,15 @@ const RuntimeSession = struct {
         const start_ms = std.time.milliTimestamp();
 
         while (true) {
+            self.lock.lock();
             try self.pty.pump(&self.terminal);
-
             const window = self.terminal.offsetWindow();
             var effective_offset = offset;
             const truncated = effective_offset < window.base_offset;
             if (effective_offset < window.base_offset) effective_offset = window.base_offset;
 
             if (effective_offset < window.next_offset) {
-                // Data available: return immediately. Don't wait for more.
+                defer self.lock.unlock();
                 const refreshed = self.terminal.offsetWindow();
                 const raw = try self.terminal.readRaw(alloc, offset, max_bytes);
                 return .{
@@ -76,6 +84,7 @@ const RuntimeSession = struct {
             }
 
             if (self.pty.isClosed()) {
+                defer self.lock.unlock();
                 return .{
                     .data = try alloc.dupe(u8, ""),
                     .offset = window.next_offset,
@@ -84,6 +93,7 @@ const RuntimeSession = struct {
                     .eof = true,
                 };
             }
+            self.lock.unlock();
 
             const wait_ms = if (timeout_ms <= 0) -1 else blk: {
                 const elapsed = std.time.milliTimestamp() - start_ms;
@@ -95,6 +105,19 @@ const RuntimeSession = struct {
             if (!ready) return error.ReadTimeout;
         }
     }
+
+    fn writeDraining(self: *RuntimeSession, data: []const u8) !void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.pty.writeDraining(&self.terminal, data);
+    }
+
+    fn historyDump(self: *RuntimeSession, alloc: std.mem.Allocator, format: serialize.HistoryFormat) ![]u8 {
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.pty.pump(&self.terminal);
+        return self.terminal.history(alloc, format);
+    }
 };
 
 pub const Service = struct {
@@ -104,18 +127,38 @@ pub const Service = struct {
     runtimes: std.StringHashMap(*RuntimeSession),
     workspace_reg: workspace_registry.Registry,
     subscriptions: workspace_registry.SubscriptionManager = .{},
+    pump: ?pty_pump.Pump = null,
 
     pub fn init(alloc: std.mem.Allocator) Service {
-        return .{
+        var service: Service = .{
             .alloc = alloc,
             .proxies = proxy_streams.Manager.init(alloc),
             .registry = session_registry.Registry.init(alloc),
             .runtimes = std.StringHashMap(*RuntimeSession).init(alloc),
             .workspace_reg = workspace_registry.Registry.init(alloc),
         };
+        if (pty_pump.supported) {
+            if (pty_pump.Pump.init(alloc)) |pump| {
+                service.pump = pump;
+                service.pump.?.start() catch |err| {
+                    std.log.warn("session_service: pump start failed: {s}", .{@errorName(err)});
+                    service.pump.?.deinit();
+                    service.pump = null;
+                };
+            } else |err| {
+                std.log.warn("session_service: kqueue pump unavailable: {s}", .{@errorName(err)});
+            }
+        }
+        return service;
     }
 
     pub fn deinit(self: *Service) void {
+        // Stop the pump first so it cannot touch sessions while we tear them
+        // down. Unregister each runtime fd before destroying it as belt-and-
+        // suspenders.
+        if (self.pump) |*pump| pump.deinit();
+        self.pump = null;
+
         var iter = self.runtimes.iterator();
         while (iter.next()) |runtime| {
             self.alloc.free(runtime.key_ptr.*);
@@ -205,6 +248,21 @@ pub const Service = struct {
         errdefer runtime.deinit();
 
         try self.runtimes.put(opened.session_id, runtime);
+
+        // Register PTY master fd with the kqueue pump so output drains
+        // proactively even when no client is calling terminal.read.
+        if (self.pump) |*pump| {
+            const entry: pty_pump.Entry = .{
+                .pty = &runtime.pty,
+                .terminal = &runtime.terminal,
+                .lock = &runtime.lock,
+                .session_id = opened.session_id,
+            };
+            pump.register(runtime.pty.master_fd, entry) catch |err| {
+                std.log.warn("session_service: pump.register failed: {s}", .{@errorName(err)});
+            };
+        }
+
         return .{
             .status = status,
             .attachment_id = opened.attachment_id,
@@ -219,14 +277,13 @@ pub const Service = struct {
 
     pub fn writeTerminal(self: *Service, session_id: []const u8, data: []const u8) !usize {
         const runtime = self.runtimes.getPtr(session_id) orelse return error.TerminalSessionNotFound;
-        try runtime.*.*.pty.writeDraining(&runtime.*.*.terminal, data);
+        try runtime.*.*.writeDraining(data);
         return data.len;
     }
 
     pub fn history(self: *Service, session_id: []const u8, format: serialize.HistoryFormat) ![]u8 {
         const runtime = self.runtimes.getPtr(session_id) orelse return error.TerminalSessionNotFound;
-        try runtime.*.*.pty.pump(&runtime.*.*.terminal);
-        return runtime.*.*.terminal.history(self.alloc, format);
+        return runtime.*.*.historyDump(self.alloc, format);
     }
 
     fn resizeRuntimeIfPresent(self: *Service, status: *const session_registry.SessionStatus) !void {
@@ -240,6 +297,7 @@ pub const Service = struct {
 
     fn removeRuntime(self: *Service, session_id: []const u8) void {
         const removed = self.runtimes.fetchRemove(session_id) orelse return;
+        if (self.pump) |*pump| pump.unregister(removed.value.pty.master_fd);
         self.alloc.free(removed.key);
         removed.value.deinit();
         self.alloc.destroy(removed.value);
@@ -304,6 +362,34 @@ test "list sessions retains last known size after final detach" {
     try std.testing.expectEqual(@as(usize, 0), listed[0].attachment_count);
     try std.testing.expectEqual(@as(u16, 120), listed[0].effective_cols);
     try std.testing.expectEqual(@as(u16, 40), listed[0].effective_rows);
+}
+
+test "kqueue pump drains PTY without explicit read" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal("pump-smoke", "printf 'hello-from-pump\\n'", 80, 24);
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    // Spin briefly waiting for the pump thread to drain output. We never
+    // call readTerminal/history; if next_offset grows the pump did its job.
+    const runtime_ptr = service.runtimes.get("pump-smoke") orelse return error.MissingRuntime;
+    const deadline = std.time.milliTimestamp() + 2000;
+    var grew = false;
+    while (std.time.milliTimestamp() < deadline) {
+        runtime_ptr.lock.lock();
+        const window = runtime_ptr.terminal.offsetWindow();
+        runtime_ptr.lock.unlock();
+        if (window.next_offset > 0) {
+            grew = true;
+            break;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(grew);
 }
 
 test "close session removes terminal runtime" {
