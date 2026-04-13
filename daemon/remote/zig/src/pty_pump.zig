@@ -11,7 +11,7 @@ pub const supported = switch (builtin.os.tag) {
 /// Per-session callback hook for Phase 1b. The pump thread calls this after
 /// each successful drain so subscriber lists can push to per-subscriber
 /// bounded queues. MUST be non-blocking — never do network I/O here.
-pub const NotifyFn = *const fn (ctx: ?*anyopaque, session_id: []const u8) void;
+pub const NotifyFn = *const fn (ctx: ?*anyopaque, entry: Entry) void;
 
 pub const Entry = struct {
     pty: *pty_host.PtyHost,
@@ -151,7 +151,7 @@ const KqueuePump = struct {
                 const closed = entry.pty.isClosed();
                 entry.lock.unlock();
 
-                if (self.notify_fn) |f| f(self.notify_ctx, entry.session_id);
+                if (self.notify_fn) |f| f(self.notify_ctx, entry);
 
                 if (closed) {
                     var changes = [_]std.posix.Kevent{.{

@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_rpc = @import("json_rpc.zig");
 const proxy_streams = @import("proxy_streams.zig");
 const pty_host = @import("pty_host.zig");
 const pty_pump = @import("pty_pump.zig");
@@ -6,6 +7,28 @@ const serialize = @import("serialize.zig");
 const session_registry = @import("session_registry.zig");
 const terminal_session = @import("terminal_session.zig");
 pub const workspace_registry = @import("workspace_registry.zig");
+
+/// One client subscription to a terminal session. Pump-driven push events
+/// get framed as WebSocket text frames and written to `stream` while
+/// `stream_lock` is held to serialize against any RPC response writer
+/// running on the connection's reader thread.
+pub const TerminalSubscription = struct {
+    session_id: []const u8, // borrowed: hashmap key for the runtime
+    stream: *std.net.Stream,
+    stream_lock: *std.Thread.Mutex,
+    last_offset: u64,
+    seq: u64 = 0,
+    dead: std.atomic.Value(bool) = .init(false),
+};
+
+pub const SubscribeSnapshot = struct {
+    data: []u8, // owned
+    offset: u64,
+    base_offset: u64,
+    truncated: bool,
+    eof: bool,
+    seq: u64,
+};
 
 pub const AttachmentResult = struct {
     attachment_id: []const u8,
@@ -128,6 +151,8 @@ pub const Service = struct {
     workspace_reg: workspace_registry.Registry,
     subscriptions: workspace_registry.SubscriptionManager = .{},
     pump: ?pty_pump.Pump = null,
+    sub_mutex: std.Thread.Mutex = .{},
+    terminal_subs: std.ArrayListUnmanaged(*TerminalSubscription) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) Service {
         var service: Service = .{
@@ -145,6 +170,12 @@ pub const Service = struct {
                     service.pump.?.deinit();
                     service.pump = null;
                 };
+                if (service.pump != null) {
+                    // Safe per Zig's result-location semantics: `service` is
+                    // constructed in the caller's destination, so &service is
+                    // already its final address.
+                    service.pump.?.setNotify(&service, pumpNotifyTrampoline);
+                }
             } else |err| {
                 std.log.warn("session_service: kqueue pump unavailable: {s}", .{@errorName(err)});
             }
@@ -153,11 +184,15 @@ pub const Service = struct {
     }
 
     pub fn deinit(self: *Service) void {
-        // Stop the pump first so it cannot touch sessions while we tear them
-        // down. Unregister each runtime fd before destroying it as belt-and-
-        // suspenders.
+        // Stop the pump first so it cannot touch sessions or subscriptions
+        // while we tear them down.
         if (self.pump) |*pump| pump.deinit();
         self.pump = null;
+
+        self.sub_mutex.lock();
+        for (self.terminal_subs.items) |sub| self.alloc.destroy(sub);
+        self.terminal_subs.deinit(self.alloc);
+        self.sub_mutex.unlock();
 
         var iter = self.runtimes.iterator();
         while (iter.next()) |runtime| {
@@ -298,11 +333,211 @@ pub const Service = struct {
     fn removeRuntime(self: *Service, session_id: []const u8) void {
         const removed = self.runtimes.fetchRemove(session_id) orelse return;
         if (self.pump) |*pump| pump.unregister(removed.value.pty.master_fd);
+        // Drop any subscriptions pointing at this session_id so their
+        // borrowed `session_id` pointer doesn't outlive the hashmap key.
+        self.removeSubscriptionsBySessionId(removed.key);
         self.alloc.free(removed.key);
         removed.value.deinit();
         self.alloc.destroy(removed.value);
     }
+
+    /// Atomically: snapshot bytes from `requested_offset` (default = current
+    /// next_offset, i.e. no replay) and register `stream` for push events.
+    /// Subsequent PTY output is delivered via the `terminal.output` event.
+    pub fn subscribeTerminal(
+        self: *Service,
+        stream: *std.net.Stream,
+        stream_lock: *std.Thread.Mutex,
+        session_id: []const u8,
+        requested_offset: ?u64,
+    ) !SubscribeSnapshot {
+        const runtime = self.runtimes.get(session_id) orelse return error.TerminalSessionNotFound;
+        const key_entry = self.runtimes.getEntry(session_id) orelse return error.TerminalSessionNotFound;
+        const canonical_session_id = key_entry.key_ptr.*;
+
+        runtime.lock.lock();
+        defer runtime.lock.unlock();
+
+        // Best-effort: drain any pending bytes so the snapshot is fresh.
+        runtime.pty.pump(&runtime.terminal) catch {};
+
+        const window = runtime.terminal.offsetWindow();
+        const start = requested_offset orelse window.next_offset;
+
+        const max_bytes: usize = 256 * 1024;
+        const raw = try runtime.terminal.readRaw(self.alloc, start, max_bytes);
+        errdefer self.alloc.free(raw.data);
+
+        const eof_now = runtime.pty.isClosed() and raw.offset >= window.next_offset;
+
+        const sub = try self.alloc.create(TerminalSubscription);
+        errdefer self.alloc.destroy(sub);
+        sub.* = .{
+            .session_id = canonical_session_id,
+            .stream = stream,
+            .stream_lock = stream_lock,
+            .last_offset = raw.offset,
+            .seq = 0,
+        };
+
+        self.sub_mutex.lock();
+        defer self.sub_mutex.unlock();
+        try self.terminal_subs.append(self.alloc, sub);
+
+        return .{
+            .data = raw.data,
+            .offset = raw.offset,
+            .base_offset = raw.base_offset,
+            .truncated = raw.truncated,
+            .eof = eof_now,
+            .seq = 0,
+        };
+    }
+
+    pub fn unsubscribeTerminal(
+        self: *Service,
+        stream: *std.net.Stream,
+        session_id: []const u8,
+    ) bool {
+        self.sub_mutex.lock();
+        defer self.sub_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.terminal_subs.items.len) : (i += 1) {
+            const s = self.terminal_subs.items[i];
+            if (s.stream == stream and std.mem.eql(u8, s.session_id, session_id)) {
+                _ = self.terminal_subs.orderedRemove(i);
+                self.alloc.destroy(s);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Called by the WS handler when a connection closes.
+    pub fn unsubscribeAllForStream(self: *Service, stream: *std.net.Stream) void {
+        self.sub_mutex.lock();
+        defer self.sub_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.terminal_subs.items.len) {
+            const s = self.terminal_subs.items[i];
+            if (s.stream == stream) {
+                _ = self.terminal_subs.orderedRemove(i);
+                self.alloc.destroy(s);
+            } else i += 1;
+        }
+    }
+
+    fn removeSubscriptionsBySessionId(self: *Service, session_id: []const u8) void {
+        self.sub_mutex.lock();
+        defer self.sub_mutex.unlock();
+        var i: usize = 0;
+        while (i < self.terminal_subs.items.len) {
+            const s = self.terminal_subs.items[i];
+            if (std.mem.eql(u8, s.session_id, session_id)) {
+                _ = self.terminal_subs.orderedRemove(i);
+                self.alloc.destroy(s);
+            } else i += 1;
+        }
+    }
+
+    fn pumpNotifyTrampoline(ctx: ?*anyopaque, entry: pty_pump.Entry) void {
+        const self: *Service = @ptrCast(@alignCast(ctx orelse return));
+        self.deliverTerminalPushes(entry);
+    }
+
+    fn deliverTerminalPushes(self: *Service, entry: pty_pump.Entry) void {
+        // Snapshot matching subscriber pointers so we don't hold sub_mutex
+        // across PTY/terminal locking and network writes.
+        var matching: std.ArrayListUnmanaged(*TerminalSubscription) = .empty;
+        defer matching.deinit(self.alloc);
+
+        self.sub_mutex.lock();
+        for (self.terminal_subs.items) |sub| {
+            if (sub.dead.load(.seq_cst)) continue;
+            if (std.mem.eql(u8, sub.session_id, entry.session_id)) {
+                matching.append(self.alloc, sub) catch break;
+            }
+        }
+        self.sub_mutex.unlock();
+
+        for (matching.items) |sub| {
+            if (sub.dead.load(.seq_cst)) continue;
+            self.pushOneSubscriber(entry, sub) catch {
+                sub.dead.store(true, .seq_cst);
+            };
+        }
+    }
+
+    fn pushOneSubscriber(self: *Service, entry: pty_pump.Entry, sub: *TerminalSubscription) !void {
+        entry.lock.lock();
+        const window = entry.terminal.offsetWindow();
+        const eof_flag = entry.pty.isClosed();
+        var start = sub.last_offset;
+        var truncated = false;
+        if (start < window.base_offset) {
+            start = window.base_offset;
+            truncated = true;
+        }
+        if (start >= window.next_offset) {
+            entry.lock.unlock();
+            return;
+        }
+        const want = window.next_offset - start;
+        const max_chunk: usize = 256 * 1024;
+        const take: usize = if (want > max_chunk) max_chunk else @as(usize, @intCast(want));
+        const raw = entry.terminal.readRaw(self.alloc, start, take) catch |err| {
+            entry.lock.unlock();
+            return err;
+        };
+        sub.last_offset = raw.offset;
+        sub.seq += 1;
+        const seq_now = sub.seq;
+        const eof_now = eof_flag and raw.offset >= window.next_offset;
+        entry.lock.unlock();
+        defer self.alloc.free(raw.data);
+
+        const enc_len = std.base64.standard.Encoder.calcSize(raw.data.len);
+        const enc = try self.alloc.alloc(u8, enc_len);
+        defer self.alloc.free(enc);
+        _ = std.base64.standard.Encoder.encode(enc, raw.data);
+
+        const event = try json_rpc.encodeResponse(self.alloc, .{
+            .event = "terminal.output",
+            .seq = seq_now,
+            .session_id = sub.session_id,
+            .data = enc,
+            .offset = raw.offset,
+            .base_offset = raw.base_offset,
+            .truncated = truncated or raw.truncated,
+            .eof = eof_now,
+            .notifications = @as(?[]const u8, null),
+        });
+        defer self.alloc.free(event);
+
+        sub.stream_lock.lock();
+        defer sub.stream_lock.unlock();
+        try sendWsTextFrame(sub.stream, event);
+    }
 };
+
+fn sendWsTextFrame(stream: *std.net.Stream, data: []const u8) !void {
+    var header: [10]u8 = undefined;
+    header[0] = 0x81; // FIN + text
+    var header_len: usize = 2;
+    if (data.len <= 125) {
+        header[1] = @intCast(data.len);
+    } else if (data.len <= 65535) {
+        header[1] = 126;
+        std.mem.writeInt(u16, header[2..4], @intCast(data.len), .big);
+        header_len = 4;
+    } else {
+        header[1] = 127;
+        std.mem.writeInt(u64, header[2..10], @intCast(data.len), .big);
+        header_len = 10;
+    }
+    _ = try stream.write(header[0..header_len]);
+    if (data.len > 0) _ = try stream.write(data);
+}
 
 test "open terminal returns named session when requested" {
     var service = Service.init(std.testing.allocator);
@@ -362,6 +597,74 @@ test "list sessions retains last known size after final detach" {
     try std.testing.expectEqual(@as(usize, 0), listed[0].attachment_count);
     try std.testing.expectEqual(@as(u16, 120), listed[0].effective_cols);
     try std.testing.expectEqual(@as(u16, 40), listed[0].effective_rows);
+}
+
+test "terminal.subscribe snapshot + pump pushes terminal.output" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    var service = Service.init(std.testing.allocator);
+    defer service.deinit();
+
+    var opened = try service.openTerminal(
+        "sub-smoke",
+        "printf INITIAL; sleep 0.2; printf LATER",
+        80,
+        24,
+    );
+    defer opened.status.deinit(std.testing.allocator);
+    defer std.testing.allocator.free(opened.attachment_id);
+
+    // Give the first printf time to land before subscribing so we can verify
+    // subscribing at the current offset returns no replay (snap.data empty).
+    std.Thread.sleep(80 * std.time.ns_per_ms);
+
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) {
+        return error.SocketPairFailed;
+    }
+    defer std.posix.close(fds[1]);
+    var stream = std.net.Stream{ .handle = fds[0] };
+    // Make the read side non-blocking so the polling loop below doesn't wedge.
+    const flags = try std.posix.fcntl(fds[1], std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(fds[1], std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    var write_mutex: std.Thread.Mutex = .{};
+
+    const snap = try service.subscribeTerminal(&stream, &write_mutex, "sub-smoke", null);
+    std.testing.allocator.free(snap.data);
+
+    // Wait until the pump pushes a terminal.output frame containing LATER.
+    var buf: [4096]u8 = undefined;
+    var accum: std.ArrayListUnmanaged(u8) = .empty;
+    defer accum.deinit(std.testing.allocator);
+
+    const deadline = std.time.milliTimestamp() + 3000;
+    var got_event = false;
+    var got_later = false;
+    while (std.time.milliTimestamp() < deadline) {
+        const n = std.posix.read(fds[1], &buf) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(15 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) break;
+        try accum.appendSlice(std.testing.allocator, buf[0..n]);
+        if (std.mem.indexOf(u8, accum.items, "\"event\":\"terminal.output\"") != null) {
+            got_event = true;
+        }
+        if (std.mem.indexOf(u8, accum.items, "TEFURVI=") != null or // base64("LATER")
+            std.mem.indexOf(u8, accum.items, "TEFURVI") != null)
+        {
+            got_later = true;
+        }
+        if (got_event and got_later) break;
+    }
+    try std.testing.expect(got_event);
+    try std.testing.expect(got_later);
+
+    _ = service.unsubscribeTerminal(&stream, "sub-smoke");
 }
 
 test "kqueue pump drains PTY without explicit read" {

@@ -97,6 +97,15 @@ fn dispatchInner(service: *session_service.Service, req: *const json_rpc.Request
     if (std.mem.eql(u8, req.method, "terminal.open")) return handleTerminalOpen(service, req);
     if (std.mem.eql(u8, req.method, "terminal.read")) return handleTerminalRead(service, req);
     if (std.mem.eql(u8, req.method, "terminal.write")) return handleTerminalWrite(service, req);
+    // terminal.subscribe / terminal.unsubscribe must be handled by the
+    // transport (serve_ws.zig) because they need the connection's stream
+    // pointer + per-stream write lock for atomic snapshot+register and for
+    // pump-driven push delivery.
+    if (std.mem.eql(u8, req.method, "terminal.subscribe") or
+        std.mem.eql(u8, req.method, "terminal.unsubscribe"))
+    {
+        return errorResponse(alloc, req.id, "transport_required", "terminal.subscribe/unsubscribe requires WebSocket transport");
+    }
 
     return try json_rpc.encodeResponse(alloc, .{
         .id = req.id,

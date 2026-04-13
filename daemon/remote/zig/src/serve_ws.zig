@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_rpc = @import("json_rpc.zig");
 const server_core = @import("server_core.zig");
 const session_service = @import("session_service.zig");
 
@@ -74,9 +75,13 @@ fn handleClient(service: *session_service.Service, secret: []const u8, stream: s
     }
 
     var subscribed = false;
+    var write_mutex: std.Thread.Mutex = .{};
     defer if (subscribed) {
         service.subscriptions.remove(&mutable_stream);
     };
+    // Always sweep terminal subscriptions on disconnect so the pump thread
+    // doesn't push to a closed fd.
+    defer service.unsubscribeAllForStream(&mutable_stream);
 
     // Request loop
     while (true) {
@@ -91,24 +96,127 @@ fn handleClient(service: *session_service.Service, secret: []const u8, stream: s
             subscribed = true;
         }
 
-        const response = blk: {
-            const alloc = service.alloc;
-            var req = @import("json_rpc.zig").decodeRequest(alloc, msg) catch {
-                break :blk try @import("json_rpc.zig").encodeResponse(alloc, .{
-                    .ok = false,
-                    .@"error" = .{
-                        .code = "invalid_request",
-                        .message = "invalid JSON request",
-                    },
-                });
-            };
-            defer req.deinit(alloc);
-            break :blk try server_core.dispatch(service, &req);
+        // terminal.subscribe / terminal.unsubscribe need the stream pointer
+        // and per-stream write lock, so they bypass server_core.dispatch.
+        const alloc = service.alloc;
+        var req = json_rpc.decodeRequest(alloc, msg) catch {
+            const err_resp = try json_rpc.encodeResponse(alloc, .{
+                .ok = false,
+                .@"error" = .{
+                    .code = "invalid_request",
+                    .message = "invalid JSON request",
+                },
+            });
+            defer alloc.free(err_resp);
+            try sendWsTextMessageLocked(&write_mutex, stream, err_resp);
+            continue;
         };
-        defer service.alloc.free(response);
+        defer req.deinit(alloc);
 
-        try sendWsTextMessage(stream, response);
+        if (std.mem.eql(u8, req.method, "terminal.subscribe")) {
+            const response = try handleTerminalSubscribe(service, &mutable_stream, &write_mutex, &req);
+            defer alloc.free(response);
+            try sendWsTextMessageLocked(&write_mutex, stream, response);
+            continue;
+        }
+        if (std.mem.eql(u8, req.method, "terminal.unsubscribe")) {
+            const response = try handleTerminalUnsubscribe(service, &mutable_stream, &req);
+            defer alloc.free(response);
+            try sendWsTextMessageLocked(&write_mutex, stream, response);
+            continue;
+        }
+
+        const response = try server_core.dispatch(service, &req);
+        defer alloc.free(response);
+        try sendWsTextMessageLocked(&write_mutex, stream, response);
     }
+}
+
+fn sendWsTextMessageLocked(lock: *std.Thread.Mutex, stream: std.net.Stream, data: []const u8) !void {
+    lock.lock();
+    defer lock.unlock();
+    try sendWsTextMessage(stream, data);
+}
+
+fn handleTerminalSubscribe(
+    service: *session_service.Service,
+    stream: *std.net.Stream,
+    write_mutex: *std.Thread.Mutex,
+    req: *const json_rpc.Request,
+) ![]u8 {
+    const alloc = service.alloc;
+    const params_value = req.parsed.value.object.get("params") orelse {
+        return try errorResp(alloc, req.id, "invalid_params", "terminal.subscribe requires params");
+    };
+    if (params_value != .object) return try errorResp(alloc, req.id, "invalid_params", "params must be object");
+    const session_id_v = params_value.object.get("session_id") orelse {
+        return try errorResp(alloc, req.id, "invalid_params", "terminal.subscribe requires session_id");
+    };
+    if (session_id_v != .string) return try errorResp(alloc, req.id, "invalid_params", "session_id must be string");
+    const session_id = session_id_v.string;
+
+    const requested_offset: ?u64 = blk: {
+        const off_v = params_value.object.get("offset") orelse break :blk null;
+        if (off_v != .integer) break :blk null;
+        if (off_v.integer < 0) break :blk null;
+        break :blk @intCast(off_v.integer);
+    };
+
+    const snap = service.subscribeTerminal(stream, write_mutex, session_id, requested_offset) catch |err| switch (err) {
+        error.TerminalSessionNotFound => return try errorResp(alloc, req.id, "not_found", "terminal session not found"),
+        else => return try errorResp(alloc, req.id, "internal_error", @errorName(err)),
+    };
+    defer alloc.free(snap.data);
+
+    const enc_len = std.base64.standard.Encoder.calcSize(snap.data.len);
+    const enc = try alloc.alloc(u8, enc_len);
+    defer alloc.free(enc);
+    _ = std.base64.standard.Encoder.encode(enc, snap.data);
+
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{
+            .session_id = session_id,
+            .seq = snap.seq,
+            .offset = snap.offset,
+            .base_offset = snap.base_offset,
+            .truncated = snap.truncated,
+            .eof = snap.eof,
+            .data = enc,
+        },
+    });
+}
+
+fn handleTerminalUnsubscribe(
+    service: *session_service.Service,
+    stream: *std.net.Stream,
+    req: *const json_rpc.Request,
+) ![]u8 {
+    const alloc = service.alloc;
+    const params_value = req.parsed.value.object.get("params") orelse {
+        return try errorResp(alloc, req.id, "invalid_params", "terminal.unsubscribe requires params");
+    };
+    if (params_value != .object) return try errorResp(alloc, req.id, "invalid_params", "params must be object");
+    const session_id_v = params_value.object.get("session_id") orelse {
+        return try errorResp(alloc, req.id, "invalid_params", "terminal.unsubscribe requires session_id");
+    };
+    if (session_id_v != .string) return try errorResp(alloc, req.id, "invalid_params", "session_id must be string");
+
+    const removed = service.unsubscribeTerminal(stream, session_id_v.string);
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = req.id,
+        .ok = true,
+        .result = .{ .removed = removed },
+    });
+}
+
+fn errorResp(alloc: std.mem.Allocator, id: ?std.json.Value, code: []const u8, message: []const u8) ![]u8 {
+    return try json_rpc.encodeResponse(alloc, .{
+        .id = id,
+        .ok = false,
+        .@"error" = .{ .code = code, .message = message },
+    });
 }
 
 // --- HTTP upgrade ---
