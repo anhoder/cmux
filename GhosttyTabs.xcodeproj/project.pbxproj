@@ -44,6 +44,7 @@
 			A5001093 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001090 /* AppDelegate.swift */; };
 		A5001661 /* WorkspaceDaemonBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001660 /* WorkspaceDaemonBridge.swift */; };
 		A50016D1 /* DaemonTerminalBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50016D0 /* DaemonTerminalBridge.swift */; };
+		A50016E1 /* DaemonConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A50016E0 /* DaemonConnection.swift */; };
 		A5001673 /* AuthSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001672 /* AuthSettingsStore.swift */; };
 		A5001675 /* AuthCallbackRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001674 /* AuthCallbackRouter.swift */; };
 			A5001094 /* NotificationsPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001091 /* NotificationsPage.swift */; };
@@ -251,6 +252,7 @@
 		A5001090 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A5001660 /* WorkspaceDaemonBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/WorkspaceDaemonBridge.swift; sourceTree = "<group>"; };
 		A50016D0 /* DaemonTerminalBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/DaemonTerminalBridge.swift; sourceTree = "<group>"; };
+		A50016E0 /* DaemonConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sync/DaemonConnection.swift; sourceTree = "<group>"; };
 		A5001672 /* AuthSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth/AuthSettingsStore.swift; sourceTree = "<group>"; };
 		A5001674 /* AuthCallbackRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth/AuthCallbackRouter.swift; sourceTree = "<group>"; };
 		A5001091 /* NotificationsPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsPage.swift; sourceTree = "<group>"; };
@@ -495,6 +497,7 @@
 				A5001090 /* AppDelegate.swift */,
 				A5001660 /* WorkspaceDaemonBridge.swift */,
 				A50016D0 /* DaemonTerminalBridge.swift */,
+				A50016E0 /* DaemonConnection.swift */,
 				A5001672 /* AuthSettingsStore.swift */,
 				A5001674 /* AuthCallbackRouter.swift */,
 				A5001091 /* NotificationsPage.swift */,
@@ -825,6 +828,7 @@
 				A5001093 /* AppDelegate.swift in Sources */,
 				A5001661 /* WorkspaceDaemonBridge.swift in Sources */,
 				A50016D1 /* DaemonTerminalBridge.swift in Sources */,
+				A50016E1 /* DaemonConnection.swift in Sources */,
 				A5001673 /* AuthSettingsStore.swift in Sources */,
 				A5001675 /* AuthCallbackRouter.swift in Sources */,
 				A5001094 /* NotificationsPage.swift in Sources */,
