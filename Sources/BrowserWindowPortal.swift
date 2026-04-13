@@ -2004,10 +2004,9 @@ final class WindowBrowserSlotView: NSView {
             return
         }
 
-        dropZoneOverlayAnimationGeneration &+= 1
-        dropZoneOverlayView.layer?.removeAllAnimations()
-
         if dropZoneOverlayView.isHidden {
+            dropZoneOverlayAnimationGeneration &+= 1
+            dropZoneOverlayView.layer?.removeAllAnimations()
             applyDropZoneOverlayFrame(targetFrame)
             dropZoneOverlayView.alphaValue = 0
             dropZoneOverlayView.isHidden = false
@@ -2021,10 +2020,18 @@ final class WindowBrowserSlotView: NSView {
         }
 
         bringInteractionLayersToFrontIfNeeded()
-        // Keep drag-follow updates immediate so the overlay stays anchored to the
-        // current drop zone without animation lag.
         if needsFrameUpdate {
-            applyDropZoneOverlayFrame(targetFrame)
+            if zoneChanged {
+                // Animate discrete drop-zone transitions for smoother visual movement.
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.12
+                    context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    dropZoneOverlayView.animator().frame = targetFrame
+                }
+            } else {
+                // Keep same-zone geometry churn immediate so drag tracking stays tight.
+                applyDropZoneOverlayFrame(targetFrame)
+            }
         }
         if dropZoneOverlayView.alphaValue < 1 {
             dropZoneOverlayView.alphaValue = 1
