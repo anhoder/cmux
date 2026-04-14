@@ -194,6 +194,9 @@ function apply(cmd: OutboundCommand): void {
         isDark: cmd.isDark,
         backgroundHex: cmd.backgroundHex,
         foregroundHex: cmd.foregroundHex,
+        cursorHex: cmd.cursorHex,
+        selectionBackgroundHex: cmd.selectionBackgroundHex,
+        ansi: cmd.ansi,
       });
       return;
     case "setLanguage": {

@@ -44,6 +44,10 @@ export type OutboundCommand =
       isDark: boolean;
       backgroundHex: string;
       foregroundHex: string;
+      cursorHex?: string;
+      selectionBackgroundHex?: string;
+      /** Ghostty ANSI palette (indices 0..15), lowercase `#rrggbb` strings. Optional. */
+      ansi?: string[];
     }
   | {
       kind: "setLanguage";

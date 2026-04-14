@@ -186,6 +186,14 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
                 self?.syncContentIfNeeded()
             }
             .store(in: &panelSubscriptions)
+
+        // Rebroadcast theme whenever the Ghostty config reloads so Monaco stays
+        // in sync with terminal color edits (theme switch, palette override…).
+        NotificationCenter.default.publisher(for: .ghosttyConfigDidReload)
+            .sink { [weak self] _ in
+                self?.sendTheme()
+            }
+            .store(in: &panelSubscriptions)
     }
 
     // MARK: - Bridge inbound
@@ -284,16 +292,17 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
     }
 
     private func sendTheme() {
-        let effective = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
-        let isDark = effective == .darkAqua
-        let background = MonacoThemeResolver.editorBackgroundHex(isDark: isDark)
-        let foreground = MonacoThemeResolver.editorForegroundHex(isDark: isDark)
-        send(command: [
+        let palette = MonacoThemeResolver.currentPalette()
+        var payload: [String: Any] = [
             "kind": "setTheme",
-            "isDark": isDark,
-            "backgroundHex": background,
-            "foregroundHex": foreground,
-        ])
+            "isDark": palette.isDark,
+            "backgroundHex": palette.backgroundHex,
+            "foregroundHex": palette.foregroundHex,
+        ]
+        if let cursor = palette.cursorHex { payload["cursorHex"] = cursor }
+        if let selection = palette.selectionBackgroundHex { payload["selectionBackgroundHex"] = selection }
+        if let ansi = palette.ansi, !ansi.isEmpty { payload["ansi"] = ansi }
+        send(command: payload)
     }
 
     private func send(command: [String: Any]) {
@@ -425,11 +434,47 @@ enum MonacoLanguageResolver {
     }
 }
 
+/// Snapshot of a theme pushed to Monaco.
+struct MonacoPalette {
+    let isDark: Bool
+    let backgroundHex: String
+    let foregroundHex: String
+    let cursorHex: String?
+    let selectionBackgroundHex: String?
+    /// ANSI indices 0..15 as lowercase `#rrggbb`. Empty when Ghostty hasn't
+    /// provided a palette (falls back to Monaco built-in theme colors).
+    let ansi: [String]?
+}
+
 enum MonacoThemeResolver {
-    static func editorBackgroundHex(isDark: Bool) -> String {
-        isDark ? "#1e1e1e" : "#fafafa"
-    }
-    static func editorForegroundHex(isDark: Bool) -> String {
-        isDark ? "#d4d4d4" : "#1e1e1e"
+    /// Build a MonacoPalette from the currently loaded GhosttyConfig so
+    /// Monaco matches the terminal surfaces visually.
+    @MainActor
+    static func currentPalette() -> MonacoPalette {
+        let config = GhosttyConfig.load()
+        let isDark = !config.backgroundColor.isLightColor
+        let bg = config.backgroundColor.hexString()
+        let fg = config.foregroundColor.hexString()
+        let cursor = config.cursorColor.hexString()
+        let selection = config.selectionBackground.hexString(includeAlpha: false)
+
+        var ansi: [String] = []
+        ansi.reserveCapacity(16)
+        for index in 0..<16 {
+            guard let color = config.palette[index] else {
+                ansi.removeAll()
+                break
+            }
+            ansi.append(color.hexString())
+        }
+
+        return MonacoPalette(
+            isDark: isDark,
+            backgroundHex: bg,
+            foregroundHex: fg,
+            cursorHex: cursor,
+            selectionBackgroundHex: selection,
+            ansi: ansi.isEmpty ? nil : ansi
+        )
     }
 }
