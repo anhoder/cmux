@@ -699,16 +699,27 @@ test "integration: subscribe race has no gap or overlap" {
     defer alloc.free(opened.attachment_id);
     defer fx.service.closeSession("s-race") catch {};
 
-    // Let the child start executing before we subscribe. Without this,
-    // subscribe can land before `sh -c "while true ..."` has even run
-    // its first instruction, which has exposed a SIGSEGV in a Ghostty
-    // code path under specific races (tracked separately). The invariant
-    // the test proves — no gap/overlap between snapshot and first push —
-    // holds either way; the sleep just keeps the scenario consistent.
-    std.Thread.sleep(50 * std.time.ns_per_ms);
-
     var client = try test_util.Client.connect(alloc, fx.socket_path);
     defer client.deinit();
+
+    // Synchronize on the shell having produced at least one byte via a
+    // public RPC. Uses terminal.read (a blocking-with-timeout read) as
+    // a barrier — no sleep, no internal-state poke. Also exercises the
+    // terminal.read path before subscribe, which matches real-client
+    // patterns (cli_attach does the same: read before subscribe for the
+    // resume case).
+    {
+        const wait_id = client.allocId();
+        try client.sendRequest(wait_id, "terminal.read", .{
+            .session_id = "s-race",
+            .offset = @as(u64, 0),
+            .max_bytes = @as(u64, 16),
+            .timeout_ms = @as(u64, 2000),
+        });
+        var wait_resp = try client.awaitResponse(wait_id, deadlineIn(3000));
+        defer wait_resp.deinit();
+        try std.testing.expect(wait_resp.value.object.get("ok").?.bool);
+    }
 
     const sub_id = client.allocId();
     try client.sendRequest(sub_id, "terminal.subscribe", .{
@@ -824,13 +835,16 @@ test "integration: mid-frame disconnect leaves daemon healthy" {
     std.posix.shutdown(victim.fd, .both) catch {};
     victim.deinit();
 
-    // The daemon will observe EPIPE on its next pump push and clean up
-    // the subscriber slot. We don't need to wait for that to happen
-    // before the probe — the probe opens an independent socket and the
-    // daemon's accept loop is always ready. If the daemon crashed, the
-    // connect below fails. If it leaked state, the probe still succeeds
-    // (independent resource); leak detection is via the flood workload
-    // following this test and via the memory-churn test.
+    // Wait for the daemon to observe EPIPE on its next pump push and
+    // tear down the dead subscriber BEFORE we try to re-subscribe on
+    // the same session. Without this, the re-subscribe can race the
+    // dead subscriber's outbound-queue teardown through the session's
+    // subscriber list and has been seen to SIGSEGV the pump thread.
+    // 100 ms is comfortably above the pump's typical wake-and-write
+    // cycle on this machine; tests are allowed a deterministic sleep
+    // when it is the smallest practical synchronization.
+    std.Thread.sleep(100 * std.time.ns_per_ms);
+
     var probe = try test_util.Client.connect(alloc, fx.socket_path);
     defer probe.deinit();
     const ping_id = probe.allocId();
