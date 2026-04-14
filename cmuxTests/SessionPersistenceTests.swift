@@ -490,56 +490,36 @@ final class SessionPersistenceTests: XCTestCase {
         )
     }
 
-    func testUnchangedAutosaveFingerprintSkipsWithinStalenessWindow() {
-        let now = Date()
+    func testSessionAutosaveUsesThirtySecondDefaultInterval() {
+        XCTAssertEqual(SessionPersistencePolicy.autosaveInterval, 30.0, accuracy: 0.001)
+    }
+
+    func testSessionAutosaveScheduleKeepsExistingDeadlineWhenDelayExtensionIsDisabled() {
         XCTAssertTrue(
-            AppDelegate.shouldSkipSessionAutosaveForUnchangedFingerprint(
-                isTerminatingApp: false,
-                includeScrollback: false,
-                previousFingerprint: 1234,
-                currentFingerprint: 1234,
-                lastPersistedAt: now.addingTimeInterval(-5),
-                now: now,
-                maximumAutosaveSkippableInterval: 60
+            AppDelegate.shouldKeepExistingSessionAutosaveSchedule(
+                allowDelayExtension: false,
+                existingDeadlineUptime: 200,
+                targetDeadlineUptime: 230
             )
         )
     }
 
-    func testUnchangedAutosaveFingerprintDoesNotSkipAfterStalenessWindow() {
-        let now = Date()
+    func testSessionAutosaveScheduleAcceptsEarlierDeadlineWhenDelayExtensionIsDisabled() {
         XCTAssertFalse(
-            AppDelegate.shouldSkipSessionAutosaveForUnchangedFingerprint(
-                isTerminatingApp: false,
-                includeScrollback: false,
-                previousFingerprint: 1234,
-                currentFingerprint: 1234,
-                lastPersistedAt: now.addingTimeInterval(-120),
-                now: now,
-                maximumAutosaveSkippableInterval: 60
+            AppDelegate.shouldKeepExistingSessionAutosaveSchedule(
+                allowDelayExtension: false,
+                existingDeadlineUptime: 200,
+                targetDeadlineUptime: 170
             )
         )
     }
 
-    func testUnchangedAutosaveFingerprintNeverSkipsTerminatingOrScrollbackWrites() {
-        let now = Date()
+    func testSessionAutosaveScheduleAllowsDelayExtensionWhenRequested() {
         XCTAssertFalse(
-            AppDelegate.shouldSkipSessionAutosaveForUnchangedFingerprint(
-                isTerminatingApp: true,
-                includeScrollback: false,
-                previousFingerprint: 1234,
-                currentFingerprint: 1234,
-                lastPersistedAt: now.addingTimeInterval(-1),
-                now: now
-            )
-        )
-        XCTAssertFalse(
-            AppDelegate.shouldSkipSessionAutosaveForUnchangedFingerprint(
-                isTerminatingApp: false,
-                includeScrollback: true,
-                previousFingerprint: 1234,
-                currentFingerprint: 1234,
-                lastPersistedAt: now.addingTimeInterval(-1),
-                now: now
+            AppDelegate.shouldKeepExistingSessionAutosaveSchedule(
+                allowDelayExtension: true,
+                existingDeadlineUptime: 200,
+                targetDeadlineUptime: 230
             )
         )
     }

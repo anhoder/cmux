@@ -4378,13 +4378,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let clampedDelay = max(0, delay)
         let targetDeadlineUptime = ProcessInfo.processInfo.systemUptime + clampedDelay
-        if !allowDelayExtension,
-           let existingDeadlineUptime = sessionAutosaveScheduledDeadlineUptime,
-           targetDeadlineUptime >= existingDeadlineUptime {
+        if Self.shouldKeepExistingSessionAutosaveSchedule(
+            allowDelayExtension: allowDelayExtension,
+            existingDeadlineUptime: sessionAutosaveScheduledDeadlineUptime,
+            targetDeadlineUptime: targetDeadlineUptime
+        ) {
 #if DEBUG
             dlog(
                 "session.save.schedule.kept source=\(source) includeScrollback=0 " +
-                "existingDelayMs=\(Int(max(0, (existingDeadlineUptime - ProcessInfo.processInfo.systemUptime) * 1000).rounded()))"
+                "existingDelayMs=\(Int(max(0, ((sessionAutosaveScheduledDeadlineUptime ?? targetDeadlineUptime) - ProcessInfo.processInfo.systemUptime) * 1000).rounded()))"
             )
 #endif
             return
@@ -4561,6 +4563,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     nonisolated static func shouldRunSessionAutosaveTick(isTerminatingApp: Bool) -> Bool {
         !isTerminatingApp
+    }
+
+    nonisolated static func shouldKeepExistingSessionAutosaveSchedule(
+        allowDelayExtension: Bool,
+        existingDeadlineUptime: TimeInterval?,
+        targetDeadlineUptime: TimeInterval
+    ) -> Bool {
+        guard !allowDelayExtension, let existingDeadlineUptime else { return false }
+        return targetDeadlineUptime >= existingDeadlineUptime
     }
 
     private func remainingSessionAutosaveTypingQuietPeriod(
