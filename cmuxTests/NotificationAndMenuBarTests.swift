@@ -1268,6 +1268,7 @@ final class WorkspaceNotificationPresentationStoreTests: XCTestCase {
         let update = try XCTUnwrap(updates.last)
         XCTAssertEqual(update.tabId, workspaceId)
         XCTAssertEqual(update.unreadCount, 1)
+        XCTAssertTrue(update.hasUnreadNotification(surfaceId: workspacePanelId))
         XCTAssertTrue(update.hasVisibleNotificationIndicator(surfaceId: workspacePanelId))
     }
 
@@ -1292,6 +1293,7 @@ final class WorkspaceNotificationPresentationStoreTests: XCTestCase {
 
         XCTAssertEqual(presentation.latestNotification, latestNotification)
         XCTAssertEqual(presentation.focusedReadIndicatorSurfaceId, panelId)
+        XCTAssertFalse(presentation.hasUnreadNotification(surfaceId: panelId))
         XCTAssertTrue(presentation.hasVisibleNotificationIndicator(surfaceId: panelId))
         XCTAssertFalse(presentation.hasUnreadNotifications)
         XCTAssertTrue(presentation.hasReadNotifications)

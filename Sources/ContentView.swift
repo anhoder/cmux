@@ -6483,11 +6483,15 @@ struct ContentView: View {
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceHasUnread,
-                notificationStore.notifications.contains { $0.tabId == workspace.id && !$0.isRead }
+                selectedWorkspaceNotificationSnapshot.tabId == workspace.id
+                    ? selectedWorkspaceNotificationSnapshot.hasUnreadNotifications
+                    : notificationStore.workspaceSnapshot(forTabId: workspace.id).hasUnreadNotifications
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceHasRead,
-                notificationStore.notifications.contains { $0.tabId == workspace.id && $0.isRead }
+                selectedWorkspaceNotificationSnapshot.tabId == workspace.id
+                    ? selectedWorkspaceNotificationSnapshot.hasReadNotifications
+                    : notificationStore.workspaceSnapshot(forTabId: workspace.id).hasReadNotifications
             )
         }
 
@@ -6504,8 +6508,12 @@ struct ContentView: View {
             snapshot.setBool(CommandPaletteContextKeys.panelIsTerminal, panelIsTerminal)
             snapshot.setBool(CommandPaletteContextKeys.panelHasCustomName, workspace.panelCustomTitles[panelId] != nil)
             snapshot.setBool(CommandPaletteContextKeys.panelShouldPin, !workspace.isPanelPinned(panelId))
+            let workspaceNotificationSnapshot =
+                selectedWorkspaceNotificationSnapshot.tabId == workspace.id
+                ? selectedWorkspaceNotificationSnapshot
+                : notificationStore.workspaceSnapshot(forTabId: workspace.id)
             let hasUnread = workspace.manualUnreadPanelIds.contains(panelId)
-                || notificationStore.hasUnreadNotification(forTabId: workspace.id, surfaceId: panelId)
+                || workspaceNotificationSnapshot.hasUnreadNotification(surfaceId: panelId)
             snapshot.setBool(CommandPaletteContextKeys.panelHasUnread, hasUnread)
 
             if panelIsTerminal {

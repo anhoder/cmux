@@ -671,6 +671,7 @@ struct TerminalNotificationWorkspaceSnapshot: Equatable, Sendable {
     let tabId: UUID?
     let unreadCount: Int
     let hasRead: Bool
+    let unreadSurfaceIds: Set<UUID>
     let visibleSurfaceIds: Set<UUID>
     let latestNotification: TerminalNotification?
     let focusedReadIndicatorSurfaceId: UUID?
@@ -679,6 +680,7 @@ struct TerminalNotificationWorkspaceSnapshot: Equatable, Sendable {
         tabId: nil,
         unreadCount: 0,
         hasRead: false,
+        unreadSurfaceIds: [],
         visibleSurfaceIds: [],
         latestNotification: nil,
         focusedReadIndicatorSurfaceId: nil
@@ -690,6 +692,11 @@ struct TerminalNotificationWorkspaceSnapshot: Equatable, Sendable {
 
     var hasReadNotifications: Bool {
         hasRead
+    }
+
+    func hasUnreadNotification(surfaceId: UUID?) -> Bool {
+        guard let surfaceId else { return false }
+        return unreadSurfaceIds.contains(surfaceId)
     }
 
     func hasVisibleNotificationIndicator(surfaceId: UUID?) -> Bool {
@@ -994,6 +1001,7 @@ final class TerminalNotificationStore: ObservableObject {
     ) -> TerminalNotificationWorkspaceSnapshot {
         var unreadCount = 0
         var hasRead = false
+        var unreadSurfaceIds = Set<UUID>()
         var visibleSurfaceIds = Set<UUID>()
         let focusedReadIndicatorSurfaceId = focusedReadIndicatorByTabId[tabId]
         var latestNotification: TerminalNotification?
@@ -1006,6 +1014,7 @@ final class TerminalNotificationStore: ObservableObject {
                 hasRead = true
             } else if let surfaceId = notification.surfaceId {
                 unreadCount += 1
+                unreadSurfaceIds.insert(surfaceId)
                 visibleSurfaceIds.insert(surfaceId)
             } else {
                 unreadCount += 1
@@ -1020,6 +1029,7 @@ final class TerminalNotificationStore: ObservableObject {
             tabId: tabId,
             unreadCount: unreadCount,
             hasRead: hasRead,
+            unreadSurfaceIds: unreadSurfaceIds,
             visibleSurfaceIds: visibleSurfaceIds,
             latestNotification: latestNotification,
             focusedReadIndicatorSurfaceId: focusedReadIndicatorSurfaceId
