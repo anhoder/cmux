@@ -6007,6 +6007,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return true
     }
 
+    // The Cmd+W tab-close preference must not weaken explicit Close Window actions
+    // such as Cmd+Ctrl+W or palette.closeWindow.
     private func confirmCloseMainWindow(_ window: NSWindow) -> Bool {
 #if DEBUG
         if let debugCloseMainWindowConfirmationHandler {

@@ -1368,7 +1368,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         XCTAssertNil(self.window(withId: windowId), "Confirming Cmd+Ctrl+W should close the window")
     }
 
-    func testCmdCtrlWStillPromptsWhenWarnBeforeClosingTabIsDisabled() {
+    func testCmdCtrlWPreservesCloseWindowConfirmationWhenWarnBeforeClosingTabIsDisabled() {
         guard let appDelegate = AppDelegate.shared else {
             XCTFail("Expected AppDelegate.shared")
             return
@@ -1386,6 +1386,8 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
             return false
         }
 
+        // warnBeforeClosingTab only scopes Cmd+W tab closes; Cmd+Ctrl+W is an
+        // explicit Close Window action and keeps its dedicated confirmation.
         UserDefaults.standard.set(false, forKey: CloseTabWarningSettings.warnBeforeClosingTabKey)
 
         guard let event = makeKeyDownEvent(
@@ -1406,7 +1408,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
 
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
 
-        XCTAssertEqual(promptCallCount, 1, "Disabling the tab-close warning must not bypass the window-close confirmation dialog")
+        XCTAssertEqual(promptCallCount, 1, "Disabling the tab-close warning must not bypass the dedicated Close Window confirmation")
         XCTAssertNotNil(self.window(withId: windowId), "Rejecting the close-window confirmation should keep the window open")
     }
 
