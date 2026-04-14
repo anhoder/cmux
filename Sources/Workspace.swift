@@ -7227,6 +7227,12 @@ final class Workspace: Identifiable, ObservableObject {
 
 
     private func installBrowserPanelSubscription(_ browserPanel: BrowserPanel) {
+        browserPanel.onSessionPersistenceStateChange = { [weak self, weak browserPanel] reason in
+            guard let self, let browserPanel else { return }
+            guard self.panels[browserPanel.id] != nil else { return }
+            self.markSessionSnapshotDirty(reason: "browser.\(reason)")
+        }
+
         let subscription = Publishers.CombineLatest3(
             browserPanel.$pageTitle.removeDuplicates(),
             browserPanel.$isLoading.removeDuplicates(),

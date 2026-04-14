@@ -2450,6 +2450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private var sessionAutosaveTimer: DispatchSourceTimer?
     private var sessionAutosaveTickInFlight = false
     private var sessionSnapshotIsDirty = false
+    private var sessionAutosaveScheduledDeadlineUptime: TimeInterval?
     private let sessionPersistenceQueue = DispatchQueue(
         label: "com.cmuxterm.app.sessionPersistence",
         qos: .utility
@@ -4334,8 +4335,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .distantFuture, leeway: .milliseconds(250))
         timer.setEventHandler { [weak self] in
-            guard let self,
-                  Self.shouldRunSessionAutosaveTick(isTerminatingApp: self.isTerminatingApp) else {
+            guard let self else {
+                return
+            }
+            self.sessionAutosaveScheduledDeadlineUptime = nil
+            guard Self.shouldRunSessionAutosaveTick(isTerminatingApp: self.isTerminatingApp) else {
                 return
             }
             self.runSessionAutosaveTick(source: "debouncedTimer")
@@ -4348,22 +4352,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         sessionAutosaveTimer?.cancel()
         sessionAutosaveTimer = nil
         sessionAutosaveTickInFlight = false
+        sessionAutosaveScheduledDeadlineUptime = nil
     }
 
     private func markSessionSnapshotDirty(reason: String) {
         guard !isApplyingStartupSessionRestore else { return }
         sessionSnapshotIsDirty = true
         guard Self.shouldRunSessionAutosaveTick(isTerminatingApp: isTerminatingApp) else { return }
-        scheduleSessionAutosave(after: SessionPersistencePolicy.autosaveInterval, source: reason)
+        scheduleSessionAutosave(
+            after: SessionPersistencePolicy.autosaveInterval,
+            source: reason,
+            allowDelayExtension: false
+        )
     }
 
-    private func scheduleSessionAutosave(after delay: TimeInterval, source: String) {
+    private func scheduleSessionAutosave(
+        after delay: TimeInterval,
+        source: String,
+        allowDelayExtension: Bool = true
+    ) {
         guard sessionSnapshotIsDirty else { return }
         guard delay.isFinite else { return }
         startSessionAutosaveTimerIfNeeded()
         guard let sessionAutosaveTimer else { return }
 
         let clampedDelay = max(0, delay)
+        let targetDeadlineUptime = ProcessInfo.processInfo.systemUptime + clampedDelay
+        if !allowDelayExtension,
+           let existingDeadlineUptime = sessionAutosaveScheduledDeadlineUptime,
+           targetDeadlineUptime >= existingDeadlineUptime {
+#if DEBUG
+            dlog(
+                "session.save.schedule.kept source=\(source) includeScrollback=0 " +
+                "existingDelayMs=\(Int(max(0, (existingDeadlineUptime - ProcessInfo.processInfo.systemUptime) * 1000).rounded()))"
+            )
+#endif
+            return
+        }
+        sessionAutosaveScheduledDeadlineUptime = targetDeadlineUptime
         sessionAutosaveTimer.schedule(
             deadline: .now() + clampedDelay,
             leeway: .milliseconds(250)
@@ -4491,6 +4517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 synchronously: writeSynchronously
             )
             sessionSnapshotIsDirty = false
+            sessionAutosaveScheduledDeadlineUptime = nil
             return false
         }
 
@@ -4511,6 +4538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             synchronously: writeSynchronously
         )
         sessionSnapshotIsDirty = false
+        sessionAutosaveScheduledDeadlineUptime = nil
         return true
     }
 

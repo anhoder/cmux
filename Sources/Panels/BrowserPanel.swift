@@ -1883,7 +1883,12 @@ final class BrowserPanel: Panel, ObservableObject {
     /// The workspace ID this panel belongs to
     private(set) var workspaceId: UUID
 
-    @Published private(set) var profileID: UUID
+    @Published private(set) var profileID: UUID {
+        didSet {
+            guard oldValue != profileID else { return }
+            noteSessionPersistenceStateChanged(reason: "profile")
+        }
+    }
     @Published private(set) var historyStore: BrowserHistoryStore
 
     /// The underlying web view
@@ -2128,11 +2133,21 @@ final class BrowserPanel: Panel, ObservableObject {
     """
 
     /// Published URL being displayed
-    @Published private(set) var currentURL: URL?
+    @Published private(set) var currentURL: URL? {
+        didSet {
+            guard oldValue?.absoluteString != currentURL?.absoluteString else { return }
+            noteSessionPersistenceStateChanged(reason: "url")
+        }
+    }
 
     /// Whether the browser panel should render its WKWebView in the content area.
     /// New browser tabs stay in an empty "new tab" state until first navigation.
-    @Published private(set) var shouldRenderWebView: Bool = false
+    @Published private(set) var shouldRenderWebView: Bool = false {
+        didSet {
+            guard oldValue != shouldRenderWebView else { return }
+            noteSessionPersistenceStateChanged(reason: "renderability")
+        }
+    }
 
     /// True when the browser is showing the internal empty new-tab page (no WKWebView attached yet).
     var isShowingNewTabPage: Bool {
@@ -2152,10 +2167,20 @@ final class BrowserPanel: Panel, ObservableObject {
     @Published private(set) var isDownloading: Bool = false
 
     /// Published can go back state
-    @Published private(set) var canGoBack: Bool = false
+    @Published private(set) var canGoBack: Bool = false {
+        didSet {
+            guard oldValue != canGoBack else { return }
+            noteSessionPersistenceStateChanged(reason: "historyAvailability.back")
+        }
+    }
 
     /// Published can go forward state
-    @Published private(set) var canGoForward: Bool = false
+    @Published private(set) var canGoForward: Bool = false {
+        didSet {
+            guard oldValue != canGoForward else { return }
+            noteSessionPersistenceStateChanged(reason: "historyAvailability.forward")
+        }
+    }
 
     private var nativeCanGoBack: Bool = false
     private var nativeCanGoForward: Bool = false
@@ -2292,6 +2317,7 @@ final class BrowserPanel: Panel, ObservableObject {
     private var preferredAttachedDeveloperToolsWidth: CGFloat?
     private var preferredAttachedDeveloperToolsWidthFraction: CGFloat?
     private var browserThemeMode: BrowserThemeMode
+    var onSessionPersistenceStateChange: ((String) -> Void)?
 
     var displayTitle: String {
         if !pageTitle.isEmpty {
@@ -3005,6 +3031,7 @@ final class BrowserPanel: Panel, ObservableObject {
             restoredForwardHistoryStack = Array(Self.sanitizedSessionHistoryURLs(newForward).reversed())
             restoredHistoryCurrentURL = liveCurrent
             refreshNavigationAvailability()
+            noteSessionPersistenceStateChanged(reason: "history.realign")
             return
         }
 
@@ -3020,6 +3047,7 @@ final class BrowserPanel: Panel, ObservableObject {
             restoredForwardHistoryStack = Array(Self.sanitizedSessionHistoryURLs(newForward).reversed())
             restoredHistoryCurrentURL = liveCurrent
             refreshNavigationAvailability()
+            noteSessionPersistenceStateChanged(reason: "history.realign")
             return
         }
 
@@ -3032,6 +3060,7 @@ final class BrowserPanel: Panel, ObservableObject {
 #endif
         restoredForwardHistoryStack.removeAll(keepingCapacity: false)
         refreshNavigationAvailability()
+        noteSessionPersistenceStateChanged(reason: "history.realign")
     }
 
     func restoreSessionNavigationHistory(
@@ -3050,6 +3079,7 @@ final class BrowserPanel: Panel, ObservableObject {
         restoredForwardHistoryStack = Array(restoredForward.reversed())
         restoredHistoryCurrentURL = restoredCurrent
         refreshNavigationAvailability()
+        noteSessionPersistenceStateChanged(reason: "history.restore")
     }
 
     func restoreSessionSnapshot(_ snapshot: SessionBrowserPanelSnapshot) {
@@ -3969,6 +3999,7 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     deinit {
+        onSessionPersistenceStateChange = nil
         developerToolsRestoreRetryWorkItem?.cancel()
         developerToolsRestoreRetryWorkItem = nil
         developerToolsTransitionSettleWorkItem?.cancel()
@@ -4311,6 +4342,7 @@ extension BrowserPanel {
     private func setPreferredDeveloperToolsVisible(_ next: Bool) {
         guard preferredDeveloperToolsVisible != next else { return }
         preferredDeveloperToolsVisible = next
+        noteSessionPersistenceStateChanged(reason: "developerTools")
     }
 
     private func syncDeveloperToolsPresentationPreferenceFromUI() {
@@ -5489,6 +5521,7 @@ extension BrowserPanel {
         restoredForwardHistoryStack.removeAll(keepingCapacity: false)
         restoredHistoryCurrentURL = nil
         refreshNavigationAvailability()
+        noteSessionPersistenceStateChanged(reason: "history.abandon")
     }
 
     private static func serializableSessionHistoryURLString(_ url: URL?) -> String? {
@@ -5630,7 +5663,12 @@ private extension BrowserPanel {
             return false
         }
         webView.pageZoom = clamped
+        noteSessionPersistenceStateChanged(reason: "zoom")
         return true
+    }
+
+    func noteSessionPersistenceStateChanged(reason: String) {
+        onSessionPersistenceStateChange?(reason)
     }
 
     static func responderChainContains(_ start: NSResponder?, target: NSResponder) -> Bool {
