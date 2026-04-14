@@ -129,6 +129,11 @@ const KqueuePump = struct {
         while (!self.shutdown.load(.seq_cst)) {
             const n = std.posix.kevent(self.kq, &.{}, &events, null) catch |err| {
                 std.log.warn("pty_pump: kevent failed: {s}", .{@errorName(err)});
+                // Back off so a persistent failure (kq closed, ESRCH quirk
+                // on Darwin when an fd is torn down concurrently, etc.)
+                // does not spin at 100% CPU. The shutdown check on the
+                // next loop header still reacts within 10 ms.
+                std.Thread.sleep(10 * std.time.ns_per_ms);
                 continue;
             };
             if (self.shutdown.load(.seq_cst)) return;

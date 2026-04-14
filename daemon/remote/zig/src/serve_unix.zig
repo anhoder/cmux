@@ -36,6 +36,9 @@ pub fn serve(cfg: Config) !void {
     };
     defer shared.service.deinit();
     shared.service.on_workspace_changed = &server_core.notifyWorkspaceSubscribers;
+    // Service is now at its final stable address inside `shared`; start the
+    // kqueue pump thread so it captures the correct `&shared.service`.
+    shared.service.ensurePumpStarted();
 
     // Start WebSocket listener on a separate thread if configured
     if (cfg.ws_port) |ws_port| {

@@ -217,32 +217,41 @@ pub const Service = struct {
     push_shutting_down: std.atomic.Value(bool) = .init(false),
 
     pub fn init(alloc: std.mem.Allocator) Service {
-        var service: Service = .{
+        // NOTE: we intentionally do NOT start the kqueue pump thread here.
+        // Zig's result-location semantics do not guarantee that `&service`
+        // inside this function equals `&caller_destination` — so a pump
+        // thread started here would capture a stale pointer into a local
+        // stack slot that is about to be copied and overwritten. Callers
+        // must invoke `ensurePumpStarted(&service)` once the Service value
+        // is in its final (stable) memory location.
+        return .{
             .alloc = alloc,
             .proxies = proxy_streams.Manager.init(alloc),
             .registry = session_registry.Registry.init(alloc),
             .runtimes = std.StringHashMap(*RuntimeSession).init(alloc),
             .workspace_reg = workspace_registry.Registry.init(alloc),
         };
-        if (pty_pump.supported) {
-            if (pty_pump.Pump.init(alloc)) |pump| {
-                service.pump = pump;
-                service.pump.?.start() catch |err| {
-                    std.log.warn("session_service: pump start failed: {s}", .{@errorName(err)});
-                    service.pump.?.deinit();
-                    service.pump = null;
-                };
-                if (service.pump != null) {
-                    // Safe per Zig's result-location semantics: `service` is
-                    // constructed in the caller's destination, so &service is
-                    // already its final address.
-                    service.pump.?.setNotify(&service, pumpNotifyTrampoline);
-                }
-            } else |err| {
-                std.log.warn("session_service: kqueue pump unavailable: {s}", .{@errorName(err)});
-            }
+    }
+
+    /// Start the kqueue PTY pump thread and wire up the notify trampoline.
+    /// Safe to call multiple times; subsequent calls are no-ops. MUST be
+    /// called with `self` at its final memory location — the pump thread
+    /// and notify callback capture `self` by pointer.
+    pub fn ensurePumpStarted(self: *Service) void {
+        if (!pty_pump.supported) return;
+        if (self.pump != null) return;
+        if (pty_pump.Pump.init(self.alloc)) |pump| {
+            self.pump = pump;
+            self.pump.?.start() catch |err| {
+                std.log.warn("session_service: pump start failed: {s}", .{@errorName(err)});
+                self.pump.?.deinit();
+                self.pump = null;
+                return;
+            };
+            self.pump.?.setNotify(self, pumpNotifyTrampoline);
+        } else |err| {
+            std.log.warn("session_service: kqueue pump unavailable: {s}", .{@errorName(err)});
         }
-        return service;
     }
 
     pub fn deinit(self: *Service) void {
@@ -1061,50 +1070,159 @@ fn postPushBody(job: *PushJob) !void {
     const body = try encodePushBody(alloc, job);
     defer alloc.free(body);
 
-    // zig 0.15.2's std.http.Client cannot be cleanly time-boxed: its
-    // connection pool's `resize` helper has a latent compile-time error
-    // (ziglang/zig issue around DoublyLinkedList.Node.data) that trips
-    // whenever any code path instantiates it, making the usual "kick the
-    // pool shut from a watchdog" pattern unbuildable. Rather than ship a
-    // known-broken timeout, we drive the HTTPS/HTTP POST through a
-    // hand-rolled client built on std.net + std.crypto.tls where we can
-    // apply SO_RCVTIMEO/SO_SNDTIMEO directly. See `simpleHttpPost` below.
-    simpleHttpPost(alloc, job.endpoint, job.bearer_token, body) catch |err| return err;
+    // Scheme dispatch:
+    //   http://   -> hand-rolled HTTP/1.1 over std.net.Stream (in-process,
+    //                no fork, fastest path; see `simpleHttpPost`).
+    //   https://  -> shell out to `curl`. zig 0.15.2's std.http.Client
+    //                cannot be cleanly time-boxed: its ConnectionPool.resize
+    //                helper has a latent compile-time error (DoublyLinkedList
+    //                .Node.data) that trips whenever any code path
+    //                instantiates it, making the usual std.http path
+    //                unbuildable, and std.crypto.tls + root-store loading
+    //                is more plumbing than this push path warrants. `curl`
+    //                handles both TLS and the 5s timeout via --max-time.
+    //                See `curlHttpsPost`.
+    //   anything else: log + drop.
+    const uri = std.Uri.parse(job.endpoint) catch {
+        std.log.warn(
+            "session_service: remote push dropped, invalid endpoint URI: {s}",
+            .{job.endpoint},
+        );
+        return error.InvalidUri;
+    };
+    const scheme = uri.scheme;
+    if (std.ascii.eqlIgnoreCase(scheme, "http")) {
+        return simpleHttpPost(alloc, job.endpoint, uri, job.bearer_token, body);
+    }
+    if (std.ascii.eqlIgnoreCase(scheme, "https")) {
+        return curlHttpsPost(alloc, job.endpoint, job.bearer_token, body);
+    }
+    std.log.warn(
+        "session_service: remote push dropped, unsupported scheme '{s}' (endpoint={s})",
+        .{ scheme, job.endpoint },
+    );
+    return error.UnsupportedScheme;
 }
 
-/// Minimal HTTP/1.1 POST helper with a 5-second total timeout. Only handles
-/// the path the daemon needs: POST `application/json` + bearer auth, body
-/// via Content-Length, status-only response parsing. Supports `http://` out
-/// of the box and is hooked up to TLS for `https://` via std.crypto.tls in
-/// a follow-up (currently https endpoints fall through to a zig-std TLS
-/// handshake if available; otherwise the POST is dropped with a warning
-/// and APNs delivery is considered best-effort).
-fn simpleHttpPost(
+/// Latched-on first miss so we don't spam logs every push when curl is
+/// missing on PATH. HTTPS pushes still get dropped on every attempt; we
+/// just stop logging after the first one.
+var curl_missing_logged: std.atomic.Value(bool) = .init(false);
+
+/// HTTPS push path: pipe the JSON body to `curl --data-binary @-` and let
+/// curl handle TLS, redirects (we don't follow), and the 5s timeout via
+/// `--max-time 5`. Stderr is inherited so curl's diagnostics surface in
+/// daemon logs in dev. Stdout is discarded; we only care about the exit
+/// code (0 on 2xx + transport success).
+fn curlHttpsPost(
     alloc: std.mem.Allocator,
     endpoint: []const u8,
     bearer_token: []const u8,
     body: []const u8,
 ) !void {
-    const uri = std.Uri.parse(endpoint) catch return error.InvalidUri;
-    const scheme = uri.scheme;
-    const is_http = std.ascii.eqlIgnoreCase(scheme, "http");
-    const is_https = std.ascii.eqlIgnoreCase(scheme, "https");
-    if (!is_http and !is_https) return error.UnsupportedScheme;
+    const auth_header = try std.fmt.allocPrint(
+        alloc,
+        "Authorization: Bearer {s}",
+        .{bearer_token},
+    );
+    defer alloc.free(auth_header);
 
-    if (is_https) {
-        // Phase 4.3 ships plain-HTTP delivery for the test + local-dev path.
-        // Production will front the push endpoint with a Vercel (HTTPS)
-        // deployment; wiring that through here requires std.crypto.tls +
-        // root-cert loading, which is deferred to Phase 4.4. Until then
-        // the daemon logs + drops https pushes rather than silently
-        // misrouting them.
-        std.log.warn(
-            "session_service: remote push skipped, https endpoint not yet supported in zig http client (endpoint={s})",
-            .{endpoint},
-        );
-        return error.HttpsNotYetSupported;
+    const argv = [_][]const u8{
+        "curl",
+        "-sS",
+        "--fail",
+        "--max-time",
+        "5",
+        "-X",
+        "POST",
+        "-H",
+        auth_header,
+        "-H",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        endpoint,
+    };
+
+    var child = std.process.Child.init(&argv, alloc);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch |err| switch (err) {
+        error.FileNotFound => {
+            const already = curl_missing_logged.swap(true, .seq_cst);
+            if (!already) {
+                std.log.warn(
+                    "session_service: remote push dropped, `curl` not found on PATH; HTTPS pushes will be silently dropped (endpoint={s})",
+                    .{endpoint},
+                );
+            }
+            return error.CurlNotFound;
+        },
+        else => return err,
+    };
+
+    // Stream the body in. If curl exits early (e.g. resolution failure),
+    // writes hit EPIPE; treat that as a soft error and proceed to wait()
+    // so we still observe the real exit code.
+    if (child.stdin) |stdin| {
+        stdin.writeAll(body) catch |err| {
+            std.log.warn(
+                "session_service: remote push curl stdin write failed: {s}",
+                .{@errorName(err)},
+            );
+        };
+        stdin.close();
+        child.stdin = null;
     }
 
+    const term = child.wait() catch |err| {
+        std.log.warn(
+            "session_service: remote push curl wait failed: {s}",
+            .{@errorName(err)},
+        );
+        return err;
+    };
+
+    switch (term) {
+        .Exited => |code| {
+            if (code != 0) {
+                std.log.warn(
+                    "session_service: remote push to {s} failed, curl exit {d}",
+                    .{ endpoint, code },
+                );
+                return error.RemotePushNon2xx;
+            }
+        },
+        .Signal => |sig| {
+            std.log.warn(
+                "session_service: remote push to {s} failed, curl killed by signal {d}",
+                .{ endpoint, sig },
+            );
+            return error.RemotePushCurlSignaled;
+        },
+        else => {
+            std.log.warn(
+                "session_service: remote push to {s} failed, curl terminated abnormally",
+                .{endpoint},
+            );
+            return error.RemotePushCurlAbnormal;
+        },
+    }
+}
+
+/// Minimal HTTP/1.1 POST helper with a 5-second total timeout. Only handles
+/// the path the daemon needs: POST `application/json` + bearer auth, body
+/// via Content-Length, status-only response parsing. Plain `http://` only;
+/// `https://` is routed through `curlHttpsPost` upstream.
+fn simpleHttpPost(
+    alloc: std.mem.Allocator,
+    endpoint: []const u8,
+    uri: std.Uri,
+    bearer_token: []const u8,
+    body: []const u8,
+) !void {
     const host_component = uri.host orelse return error.InvalidUri;
     const host = switch (host_component) {
         .raw => |s| s,
@@ -1401,6 +1519,7 @@ test "kqueue pump drains PTY without explicit read" {
 
     var service = Service.init(std.testing.allocator);
     defer service.deinit();
+    service.ensurePumpStarted();
 
     var opened = try service.openTerminal("pump-smoke", "printf 'hello-from-pump\\n'", 80, 24);
     defer opened.status.deinit(std.testing.allocator);
@@ -1790,4 +1909,54 @@ test "daemon.configure_notifications disables remote push on empty endpoint" {
     // Give any (non-)thread time to land before deinit.
     std.Thread.sleep(50 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 0), service.push_inflight.load(.seq_cst));
+}
+
+test "https remote push spawns curl, fails fast on unreachable, releases push_inflight" {
+    if (!pty_pump.supported) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    var service = Service.init(alloc);
+    defer service.deinit();
+
+    // Point at an unreachable HTTPS endpoint. Port 1 is in the IANA
+    // reserved range and almost universally closed, so curl gets
+    // connection-refused (or fails the TLS handshake) well within
+    // --max-time 5 and exits non-zero. We only care that the dispatcher
+    // path went through curlHttpsPost (push_inflight bumped) and that
+    // the worker thread cleaned up (push_inflight back to zero, deinit
+    // doesn't hang).
+    const tokens = [_][]const u8{"abcd"};
+    try service.configureNotifications(
+        "https://127.0.0.1:1/never",
+        "shhh-secret",
+        &tokens,
+    );
+
+    var opened = try service.openTerminal("https-smoke", "sleep 5", 80, 24);
+    defer opened.status.deinit(alloc);
+    defer alloc.free(opened.attachment_id);
+
+    const runtime = service.runtimes.get("https-smoke") orelse return error.MissingRuntime;
+    runtime.lock.lock();
+    try runtime.terminal.feed("\x07");
+    runtime.lock.unlock();
+
+    const entry: pty_pump.Entry = .{
+        .pty = &runtime.pty,
+        .terminal = &runtime.terminal,
+        .lock = &runtime.lock,
+        .session_id = "https-smoke",
+    };
+    service.deliverTerminalPushes(entry);
+
+    // Wait for the dispatcher worker to finish. Cap at 6s to account for
+    // the worst-case curl --max-time 5 plus spawn/wait overhead. Most
+    // platforms drop port-1 connection attempts in under a millisecond.
+    const deadline = std.time.milliTimestamp() + 6_000;
+    while (std.time.milliTimestamp() < deadline) {
+        if (service.push_inflight.load(.seq_cst) == 0) break;
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(@as(usize, 0), service.push_inflight.load(.seq_cst));
+    return error.SanityTempFailure; // SANITY-temp
 }

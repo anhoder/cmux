@@ -25,6 +25,7 @@ pub fn serve(cfg: Config) !void {
     var service = session_service.Service.init(alloc);
     defer service.deinit();
     service.on_workspace_changed = &server_core.notifyWorkspaceSubscribers;
+    service.ensurePumpStarted();
 
     var verifier = ticket_auth.TicketVerifier.init(alloc, cfg.server_id, cfg.ticket_secret);
     defer verifier.deinit();

@@ -38,7 +38,7 @@ pub fn encodeResponse(alloc: std.mem.Allocator, response: anytype) ![]u8 {
 
 test "decode hello request" {
     const raw = "{\"id\":1,\"method\":\"hello\",\"params\":{}}";
-    const req = try decodeRequest(std.testing.allocator, raw);
+    var req = try decodeRequest(std.testing.allocator, raw);
     defer req.deinit(std.testing.allocator);
 
     try std.testing.expectEqualStrings("hello", req.method);

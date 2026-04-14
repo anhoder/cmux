@@ -185,9 +185,9 @@ Content-Length: <n>
 - `notification` is the OSC 99 payload (or null if not advanced).
 - `workspace_id` is the workspace that currently contains the session, or `null` if the session is not bound to any workspace (e.g. during bootstrap).
 
-Timeout: 5 seconds on both send and receive (via `SO_SNDTIMEO`/`SO_RCVTIMEO`). Non-2xx status, network error, or timeout is logged and dropped without retry. APNs retry policy is the endpoint's responsibility.
+Timeout: 5 seconds on both send and receive (via `SO_SNDTIMEO`/`SO_RCVTIMEO` for `http://`, via `curl --max-time 5` for `https://`). Non-2xx status, network error, or timeout is logged and dropped without retry. APNs retry policy is the endpoint's responsibility.
 
-Current daemon implementation: the Zig 0.15.2 `std.http.Client` has a latent compile-time bug in `ConnectionPool.resize` which blocks a clean watchdog-based timeout on top of `fetch`. Until that is fixed upstream, the daemon ships a hand-rolled minimal HTTP/1.1 POST over `std.net.Stream` and only supports `http://` endpoints (HTTPS delivery lands in Phase 4.4 with `std.crypto.tls`). Production deployments must either terminate TLS at a same-host proxy or wait for Phase 4.4.
+Current daemon implementation: the Zig 0.15.2 `std.http.Client` has a latent compile-time bug in `ConnectionPool.resize` which blocks a clean watchdog-based timeout on top of `fetch`. Until that is fixed upstream, the daemon ships a hand-rolled minimal HTTP/1.1 POST over `std.net.Stream` for `http://` endpoints. HTTPS endpoints are supported via a bundled `curl` subprocess (`curl -sS --fail --max-time 5 -X POST -H "Authorization: Bearer ..." -H "Content-Type: application/json" --data-binary @- <endpoint>`), which handles TLS and timeout enforcement outside the daemon process. The daemon requires `curl` on `PATH`; if it is missing, HTTPS pushes are logged once and silently dropped.
 
 ## Implementation pointers
 
