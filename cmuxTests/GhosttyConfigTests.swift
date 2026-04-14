@@ -1105,7 +1105,6 @@ final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
         XCTAssertEqual(merged["CUSTOM_FLAG"], "1")
     }
 
-<<<<<<< HEAD
     func testStartupEnvironmentOverridesDumbTermAndSetsGhosttyTerminalIdentity() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-ghostty-startup-env-\(UUID().uuidString)")
@@ -1224,7 +1223,8 @@ final class GhosttyAppEnvironmentOverrideTests: XCTestCase {
             overrides["XDG_DATA_DIRS"],
             "\(resourcesDir.path):/Applications/Ghostty.app/Contents/Resources:/usr/local/share:/usr/share"
         )
-=======
+    }
+
     func testMergedStartupEnvironmentProtectsManagedTerminalIdentity() {
         var baseEnvironment = [
             "PATH": "/usr/bin"
@@ -1253,7 +1253,6 @@ final class GhosttyAppEnvironmentOverrideTests: XCTestCase {
         XCTAssertEqual(merged["TERM"], TerminalSurface.managedTerminalType)
         XCTAssertEqual(merged["COLORTERM"], TerminalSurface.managedColorTerm)
         XCTAssertEqual(merged["TERM_PROGRAM"], TerminalSurface.managedTerminalProgram)
->>>>>>> origin/main
     }
 }
 
