@@ -333,6 +333,12 @@ pub const Client = struct {
         );
         errdefer std.posix.close(fd);
         try std.posix.connect(fd, &unix_addr.any, unix_addr.getOsSockLen());
+        // Mark the fd non-blocking so `posix.read` cannot block past the
+        // `waitReadable` poll deadline. Without this, a stale poll wakeup
+        // (or a poll-timeout that the caller failed to check) would cause
+        // readLine to hang forever instead of returning error.Timeout.
+        const flags = try std.posix.fcntl(fd, std.posix.F.GETFL, 0);
+        _ = try std.posix.fcntl(fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
         return .{ .alloc = alloc, .fd = fd };
     }
 
@@ -348,18 +354,22 @@ pub const Client = struct {
     }
 
     pub fn sendLine(self: *Client, line: []const u8) !void {
+        try self.writeAll(line);
+        try self.writeAll("\n");
+    }
+
+    fn writeAll(self: *Client, data: []const u8) !void {
         var written: usize = 0;
-        while (written < line.len) {
-            const n = try std.posix.write(self.fd, line[written..]);
+        while (written < data.len) {
+            const n = std.posix.write(self.fd, data[written..]) catch |err| switch (err) {
+                error.WouldBlock => {
+                    try waitWritable(self.fd, 2000);
+                    continue;
+                },
+                else => return err,
+            };
             if (n == 0) return error.ConnectionClosed;
             written += n;
-        }
-        var nl: [1]u8 = .{'\n'};
-        var nl_written: usize = 0;
-        while (nl_written < nl.len) {
-            const n = try std.posix.write(self.fd, nl[nl_written..]);
-            if (n == 0) return error.ConnectionClosed;
-            nl_written += n;
         }
     }
 
@@ -438,6 +448,15 @@ fn waitReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
     var pfd = [_]std.posix.pollfd{.{
         .fd = fd,
         .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    _ = try std.posix.poll(&pfd, timeout_ms);
+}
+
+fn waitWritable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+    var pfd = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.OUT,
         .revents = 0,
     }};
     _ = try std.posix.poll(&pfd, timeout_ms);
