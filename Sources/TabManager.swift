@@ -418,6 +418,7 @@ private final class WorkspaceGitEventWatcher {
     }
 
     private func flushPendingPaths() {
+        let firedTimer: DispatchSourceTimer?
         stateLock.lock()
         guard !isInvalidated else {
             stateLock.unlock()
@@ -425,8 +426,14 @@ private final class WorkspaceGitEventWatcher {
         }
         let paths = pendingPaths.sorted()
         pendingPaths.removeAll(keepingCapacity: true)
+        firedTimer = debounceTimer
         debounceTimer = nil
         stateLock.unlock()
+        // The one-shot timer has fired, but GCD dispatch sources should still
+        // be cancelled before their last strong reference is dropped; clear
+        // the handler to break any retain cycle and cancel explicitly.
+        firedTimer?.setEventHandler {}
+        firedTimer?.cancel()
         guard !paths.isEmpty else { return }
         onChange(paths)
     }

@@ -2423,13 +2423,16 @@ struct ContentView: View {
         targetWorkspaces: [Workspace],
         globalDisabled: Bool
     ) -> WorkspaceGitMetadataWatcherContextMenuMode {
-        guard !globalDisabled,
-              !targetWorkspaces.isEmpty,
-              targetWorkspaces.allSatisfy({ !$0.isRemoteWorkspace }) else {
+        // The watcher toggle only controls the local FS watcher, so in a
+        // mixed local+remote multi-select we want to derive the action from
+        // the eligible (local) workspaces only instead of hiding the entry
+        // outright.
+        let eligibleWorkspaces = targetWorkspaces.filter { !$0.isRemoteWorkspace }
+        guard !globalDisabled, !eligibleWorkspaces.isEmpty else {
             return .hidden
         }
 
-        let allEffectivelyDisabled = targetWorkspaces.allSatisfy { workspace in
+        let allEffectivelyDisabled = eligibleWorkspaces.allSatisfy { workspace in
             workspace.gitMetadataWatcherDisabled
         }
         return allEffectivelyDisabled ? .enable : .disable
@@ -10190,6 +10193,9 @@ struct VerticalTabsSidebar: View {
                                     ? selectedContextTargetIds
                                     : [tab.id]
                                 let contextMenuTargetWorkspaces = contextMenuWorkspaceIds.compactMap { tabById[$0] }
+                                let gitMetadataWatcherWorkspaceIds = contextMenuTargetWorkspaces
+                                    .filter { !$0.isRemoteWorkspace }
+                                    .map(\.id)
                                 let remoteContextMenuWorkspaceIds = usesSelectedContextMenuTargets
                                     ? selectedRemoteContextMenuWorkspaceIds
                                     : (tab.isRemoteWorkspace ? [tab.id] : [])
@@ -10252,6 +10258,7 @@ struct VerticalTabsSidebar: View {
                                     dropIndicator: $dropIndicator,
                                     contextMenuWorkspaceIds: contextMenuWorkspaceIds,
                                     gitMetadataWatcherMenuMode: gitMetadataWatcherMenuMode,
+                                    gitMetadataWatcherWorkspaceIds: gitMetadataWatcherWorkspaceIds,
                                     remoteContextMenuWorkspaceIds: remoteContextMenuWorkspaceIds,
                                     allRemoteContextMenuTargetsConnecting: allRemoteContextMenuTargetsConnecting,
                                     allRemoteContextMenuTargetsDisconnected: allRemoteContextMenuTargetsDisconnected,
@@ -12666,6 +12673,7 @@ private struct TabItemView: View, Equatable {
         lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints &&
         lhs.contextMenuWorkspaceIds == rhs.contextMenuWorkspaceIds &&
         lhs.gitMetadataWatcherMenuMode == rhs.gitMetadataWatcherMenuMode &&
+        lhs.gitMetadataWatcherWorkspaceIds == rhs.gitMetadataWatcherWorkspaceIds &&
         lhs.remoteContextMenuWorkspaceIds == rhs.remoteContextMenuWorkspaceIds &&
         lhs.allRemoteContextMenuTargetsConnecting == rhs.allRemoteContextMenuTargetsConnecting &&
         lhs.allRemoteContextMenuTargetsDisconnected == rhs.allRemoteContextMenuTargetsDisconnected &&
@@ -12698,6 +12706,10 @@ private struct TabItemView: View, Equatable {
     @Binding var dropIndicator: SidebarDropIndicator?
     let contextMenuWorkspaceIds: [UUID]
     let gitMetadataWatcherMenuMode: ContentView.WorkspaceGitMetadataWatcherContextMenuMode
+    // Subset of contextMenuWorkspaceIds limited to local workspaces so the
+    // "Enable/Disable Git Metadata Watcher" button never acts on remote
+    // workspaces (which don't have a local watcher to toggle).
+    let gitMetadataWatcherWorkspaceIds: [UUID]
     let remoteContextMenuWorkspaceIds: [UUID]
     let allRemoteContextMenuTargetsConnecting: Bool
     let allRemoteContextMenuTargetsDisconnected: Bool
@@ -13494,8 +13506,11 @@ private struct TabItemView: View, Equatable {
                     ? String(localized: "contextMenu.enableGitMetadataWatcher", defaultValue: "Enable Git Metadata Watcher")
                     : String(localized: "contextMenu.disableGitMetadataWatcher", defaultValue: "Disable Git Metadata Watcher")
             ) {
+                // Use the local-only subset of the context-menu selection so
+                // remote workspace IDs are never forwarded to the local
+                // watcher toggle (remote workspaces have no local watcher).
                 tabManager.setWorkspaceGitMetadataWatcherDisabled(
-                    workspaceIds: targetIds,
+                    workspaceIds: gitMetadataWatcherWorkspaceIds,
                     disabled: gitMetadataWatcherMenuMode == .disable
                 )
             }

@@ -1049,11 +1049,24 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
             return
         }
 
-        // Disable the watcher while the workspace is still local, then promote
-        // to remote. `configureRemoteConnection` is expected to clear any
-        // local-origin git metadata AND reset the disabled flag so remote git
-        // state is not accidentally suppressed going forward.
+        // Flip the flag first so its didSet-driven clear happens now, then
+        // seed local-origin git state as if the local FS watcher re-populated
+        // sidebar metadata while the flag remained true.
         workspace.gitMetadataWatcherDisabled = true
+        workspace.updatePanelGitBranch(panelId: panelId, branch: "feature/local-stale", isDirty: false)
+        workspace.updatePanelPullRequest(
+            panelId: panelId,
+            number: 111,
+            label: "PR",
+            url: try XCTUnwrap(URL(string: "https://github.com/manaflow-ai/cmux/pull/111")),
+            status: .open,
+            branch: "feature/local-stale"
+        )
+        XCTAssertEqual(workspace.panelGitBranches[panelId]?.branch, "feature/local-stale")
+
+        // Promoting local → remote must clear local-origin cached sidebar git
+        // metadata AND reset the disabled flag so remote git state is not
+        // accidentally suppressed going forward.
         workspace.configureRemoteConnection(
             WorkspaceRemoteConfiguration(
                 destination: "cmux-macmini",
@@ -1071,8 +1084,8 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         )
 
         XCTAssertFalse(workspace.gitMetadataWatcherDisabled)
-        XCTAssertTrue(workspace.panelGitBranches.isEmpty)
-        XCTAssertTrue(workspace.panelPullRequests.isEmpty)
+        XCTAssertTrue(workspace.panelGitBranches.isEmpty, "local-origin git branches should be cleared on promotion")
+        XCTAssertTrue(workspace.panelPullRequests.isEmpty, "local-origin PRs should be cleared on promotion")
 
         // Seed git state the way the remote daemon would push it down after
         // the promotion completes.

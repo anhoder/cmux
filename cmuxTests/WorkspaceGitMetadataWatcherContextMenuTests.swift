@@ -64,7 +64,7 @@ final class WorkspaceGitMetadataWatcherContextMenuTests: XCTestCase {
         )
     }
 
-    func testContextMenuModeHidesToggleWhenAnyTargetWorkspaceIsRemote() {
+    func testContextMenuModeDerivesFromLocalSubsetInMixedSelection() {
         let manager = TabManager()
         guard let localWorkspace = manager.selectedWorkspace else {
             XCTFail("Expected local workspace")
@@ -73,9 +73,36 @@ final class WorkspaceGitMetadataWatcherContextMenuTests: XCTestCase {
 
         let remoteWorkspace = makeRemoteWorkspace(in: manager)
 
+        // Local workspace has watcher enabled → mixed selection should offer
+        // .disable (the remote workspace is filtered out, not blocking).
         XCTAssertEqual(
             ContentView.workspaceGitMetadataWatcherContextMenuMode(
                 targetWorkspaces: [localWorkspace, remoteWorkspace],
+                globalDisabled: false
+            ),
+            .disable
+        )
+
+        // With the local workspace disabled, the same mixed selection should
+        // offer .enable, still deriving from the local subset.
+        localWorkspace.gitMetadataWatcherDisabled = true
+        XCTAssertEqual(
+            ContentView.workspaceGitMetadataWatcherContextMenuMode(
+                targetWorkspaces: [localWorkspace, remoteWorkspace],
+                globalDisabled: false
+            ),
+            .enable
+        )
+    }
+
+    func testContextMenuModeHidesToggleWhenAllTargetsAreRemote() {
+        let manager = TabManager()
+        let remote1 = makeRemoteWorkspace(in: manager)
+        let remote2 = makeRemoteWorkspace(in: manager)
+
+        XCTAssertEqual(
+            ContentView.workspaceGitMetadataWatcherContextMenuMode(
+                targetWorkspaces: [remote1, remote2],
                 globalDisabled: false
             ),
             .hidden

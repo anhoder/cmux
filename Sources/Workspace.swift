@@ -8293,6 +8293,11 @@ final class Workspace: Identifiable, ObservableObject {
         remoteLastDaemonErrorFingerprint = nil
         remoteLastPortConflictFingerprint = nil
         if clearConfiguration {
+            // Mirror the local→remote clear: when we demote back to local, any
+            // sidebar git/PR badges that were populated by the remote daemon
+            // should be cleared so stale remote state isn't serialized (or
+            // visible) before the local watcher refreshes.
+            clearCachedSidebarGitMetadata()
             remoteConfiguration = nil
             skipControlMasterCleanupAfterDetachedRemoteTransfer = false
         }
