@@ -39,6 +39,7 @@ struct FileExplorerPanelView: NSViewRepresentable {
         weak var containerView: FileExplorerContainerView?
         weak var outlineView: NSOutlineView?
         private var lastRootNodeCount: Int = -1
+        private var lastRootNodeIdentities: [ObjectIdentifier] = []
         private var observationCancellable: AnyCancellable?
         private var styleObserver: Any?
 
@@ -81,7 +82,17 @@ struct FileExplorerPanelView: NSViewRepresentable {
             containerView?.updateVisibility(hasContent: !store.rootPath.isEmpty, isLoading: store.isRootLoading)
 
             let newCount = store.rootNodes.count
-            if newCount != lastRootNodeCount {
+            let newIdentities = store.rootNodes.map { ObjectIdentifier($0) }
+            let identitiesChanged = newIdentities != lastRootNodeIdentities
+            lastRootNodeIdentities = newIdentities
+
+            if newCount != lastRootNodeCount || identitiesChanged {
+                // Either the root count changed or one or more root nodes got
+                // replaced in place (e.g. a file ↔ directory type swap, or a
+                // rename that mergeChildren allocated a fresh node for).
+                // reloadData preserves expansion via restoreExpansionState below;
+                // there is no surgical outline-view API to reload specific rows
+                // when the backing node reference changed.
                 lastRootNodeCount = newCount
                 let expandedPaths = store.expandedPaths
                 outlineView.reloadData()
