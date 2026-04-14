@@ -148,7 +148,10 @@ private struct MonacoWebViewRepresentable: NSViewRepresentable {
         webView.onClickRequestFocus = { [weak coordinator = context.coordinator] in
             coordinator?.requestExternalFocusAcknowledgement()
         }
-        webView.setValue(false, forKey: "drawsBackground")
+        // Keep the webview opaque so WindowServer can composite it direct-to-
+        // screen. Transparent WKWebViews fall back to an alpha-blended path
+        // that adds perceptible input lag during typing. Ghostty-themed
+        // background is painted by the HTML body so there's no visible flash.
         webView.allowsBackForwardNavigationGestures = false
         webView.navigationDelegate = context.coordinator
 
@@ -166,12 +169,12 @@ private struct MonacoWebViewRepresentable: NSViewRepresentable {
         context.coordinator.panel = panel
         context.coordinator.onRequestPanelFocus = onRequestPanelFocus
         context.coordinator.syncContentIfNeeded()
-        if isFocused {
-            context.coordinator.focusEditor()
-        }
-        #if DEBUG
-        context.coordinator.noteUpdateNSView()
-        #endif
+        // Do NOT refocus on every updateNSView — SwiftUI re-evaluates this view
+        // on every panel.content change, and calling makeFirstResponder +
+        // evaluateJavaScript("cmux.focus") per keystroke blocks the main
+        // thread while WebKit is trying to render. Only apply focus on a
+        // false→true transition via updatedFocusIfChanged.
+        context.coordinator.updateFocusIfChanged(newValue: isFocused)
     }
 }
 
@@ -187,15 +190,24 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
     private var isReady = false
     private var lastSyncedContent: String?
     private var panelSubscriptions: Set<AnyCancellable> = []
+    private var lastIsFocused: Bool = false
 
     init(panel: EditorPanel, onRequestPanelFocus: @escaping () -> Void) {
         self.panel = panel
         self.onRequestPanelFocus = onRequestPanelFocus
         super.init()
+        // Only observe content changes that were NOT originated by Monaco
+        // itself. When Monaco posts a `changed` message and we set
+        // `panel.content = value`, this sink would fire and push the same
+        // content back into the webview via evaluateJavaScript. The Combine
+        // round-trip happens on every keystroke and colides with WebKit
+        // rendering, which is where the jank comes from.
         panel.$content
             .dropFirst()
-            .sink { [weak self] _ in
-                self?.syncContentIfNeeded()
+            .sink { [weak self] newValue in
+                guard let self else { return }
+                if self.lastSyncedContent == newValue { return }
+                self.syncContentIfNeeded()
             }
             .store(in: &panelSubscriptions)
 
@@ -232,6 +244,8 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
         case "viewState":
             handleViewState(payload: dict)
         case "debugLog":
+            // JS-side console forwarding is off by default; if re-enabled for
+            // debugging, messages land here.
             #if DEBUG
             if let msg = dict["msg"] as? String {
                 dlog("monaco.js \(msg)")
@@ -250,15 +264,11 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
 
     private func handleChanged(payload: [String: Any]) {
         guard let value = payload["value"] as? String else { return }
-        #if DEBUG
-        let t0 = CFAbsoluteTimeGetCurrent()
-        let valueBytes = value.utf8.count
-        var diffed = false
-        #endif
         if panel.content != value {
-            #if DEBUG
-            diffed = true
-            #endif
+            // Set lastSyncedContent BEFORE publishing content so the
+            // `panel.$content` subscriber can short-circuit without doing a
+            // full-string compare — we just wrote the value, no need to
+            // re-push it back into Monaco.
             lastSyncedContent = value
             panel.content = value
             panel.markDirty()
@@ -267,10 +277,6 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
             if let offset = cursor["offset"] as? Int { panel.cursorLocation = offset }
             if let length = cursor["length"] as? Int { panel.cursorLength = length }
         }
-        #if DEBUG
-        let elapsedMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
-        dlog("monaco.changed bytes=\(valueBytes) diffed=\(diffed) isDirty=\(panel.isDirty) elapsed=\(String(format: "%.2f", elapsedMs))ms")
-        #endif
     }
 
     func requestExternalFocusAcknowledgement() {
@@ -303,31 +309,28 @@ final class MonacoEditorCoordinator: NSObject, WKScriptMessageHandler, WKNavigat
 
     func focusEditor() {
         guard let webView else { return }
-        // Make the WKWebView the AppKit first responder so Cmd+A, Cmd+C, arrow
-        // navigation, etc. reach Monaco. Without this the webview receives no
-        // key events even though it is mounted and visible.
-        guard webView.window?.firstResponder !== webView else { return }
+        // WKWebView's real responder is typically an internal descendant view
+        // (WKWebViewDerivedResponder). Walk the responder chain and skip if
+        // any ancestor of the current first responder is our webview — we are
+        // already focused, just into a subview.
+        if let current = webView.window?.firstResponder as? NSView,
+           current.isDescendant(of: webView) {
+            return
+        }
         webView.window?.makeFirstResponder(webView)
         guard isReady else { return }
-        send(command: [
-            "kind": "focus",
-        ])
+        send(command: ["kind": "focus"])
     }
 
-    #if DEBUG
-    private var updateNSViewCount = 0
-    private var lastUpdateNSViewLogAt: CFAbsoluteTime = 0
-
-    func noteUpdateNSView() {
-        updateNSViewCount += 1
-        let now = CFAbsoluteTimeGetCurrent()
-        if now - lastUpdateNSViewLogAt >= 1.0 {
-            dlog("monaco.updateNSView count=\(updateNSViewCount) window=1s")
-            updateNSViewCount = 0
-            lastUpdateNSViewLogAt = now
-        }
+    func updateFocusIfChanged(newValue: Bool) {
+        defer { lastIsFocused = newValue }
+        // Only apply focus on a transition into focused state. Same-state
+        // SwiftUI invalidations (driven by @Published panel.content updates
+        // during typing) must not re-run makeFirstResponder + evaluateJavaScript.
+        guard newValue, newValue != lastIsFocused else { return }
+        focusEditor()
     }
-    #endif
+
 
     private func sendInitialState() {
         sendSetText(preserveViewState: false)

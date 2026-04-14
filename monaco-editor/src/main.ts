@@ -13,21 +13,9 @@ import {
 } from "./bridge";
 import { applyCmuxPalette, registerCmuxThemes } from "./theme";
 
-// Forward console.log into the Swift tagged debug log. Gives us a single place
-// (cmux-debug-<tag>.log) to read timings that happen inside the WKWebView
-// without needing to open the webview inspector.
-const originalConsoleLog = console.log.bind(console);
-console.log = (...args: unknown[]): void => {
-  originalConsoleLog(...args);
-  try {
-    const msg = args
-      .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-      .join(" ");
-    postToSwift({ type: "debugLog", msg });
-  } catch {
-    /* noop */
-  }
-};
+// Intentionally do NOT forward every console.log to Swift: running
+// postMessage on every log during typing adds cross-process work to the
+// hot path. If you need JS timings, attach the webview inspector.
 
 // Route Monaco worker requests to the bundled workers.
 self.MonacoEnvironment = {
@@ -63,14 +51,20 @@ const editor = monaco.editor.create(container, {
   value: "",
   language: "plaintext",
   theme: "cmux-dark",
-  automaticLayout: true,
+  // automaticLayout polls the container every 100ms and forces synchronous
+  // layout, which fights with SwiftUI + WKWebView compositing. A ResizeObserver
+  // on the host element is the low-overhead path.
+  automaticLayout: false,
   fontFamily:
     "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
   fontSize: 13,
   lineNumbers: "on",
   minimap: { enabled: false },
   scrollBeyondLastLine: true,
-  smoothScrolling: true,
+  // Smooth-scroll/caret animations read as input lag during rapid typing.
+  smoothScrolling: false,
+  cursorSmoothCaretAnimation: "off",
+  cursorBlinking: "solid",
   renderLineHighlight: "line",
   wordWrap: "off",
   tabSize: 2,
@@ -78,6 +72,14 @@ const editor = monaco.editor.create(container, {
   renderWhitespace: "selection",
   bracketPairColorization: { enabled: true },
 });
+
+// Replace Monaco's polling `automaticLayout` with a ResizeObserver. Fires at
+// most once per actual size change, avoids the 100ms timer, and doesn't
+// re-enter WebKit layout during typing.
+const resizeObserver = new ResizeObserver(() => {
+  editor.layout();
+});
+resizeObserver.observe(container);
 
 // --- Outbound events ---------------------------------------------------------
 
@@ -91,23 +93,15 @@ function flushChanged(): void {
   }
   const model = editor.getModel();
   if (!model) return;
-  const t0 = performance.now();
   const sel = editor.getSelection();
   const offset = sel ? model.getOffsetAt(sel.getStartPosition()) : 0;
   const end = sel ? model.getOffsetAt(sel.getEndPosition()) : offset;
-  const value = model.getValue();
-  const t1 = performance.now();
   postToSwift({
     type: "changed",
-    value,
+    value: model.getValue(),
     cursor: { offset, length: Math.max(0, end - offset) },
     versionId: model.getVersionId(),
   });
-  const t2 = performance.now();
-  // eslint-disable-next-line no-console
-  console.log(
-    `cmux.monaco.flush getValue=${(t1 - t0).toFixed(1)}ms post=${(t2 - t1).toFixed(1)}ms bytes=${value.length} version=${model.getVersionId()}`,
-  );
 }
 
 function scheduleChangedFlush(): void {
@@ -120,41 +114,13 @@ function scheduleChangedFlush(): void {
   }, 120);
 }
 
-let keystrokeCount = 0;
-let keystrokeStart = 0;
 editor.onDidChangeModelContent(() => {
   if (ignoreNextChange) {
     ignoreNextChange = false;
     return;
   }
-  if (keystrokeCount === 0) keystrokeStart = performance.now();
-  keystrokeCount += 1;
   scheduleChangedFlush();
 });
-
-// Measure input lag: how long between keydown and the first model change.
-document.addEventListener(
-  "keydown",
-  (event) => {
-    if (event.metaKey || event.ctrlKey || event.altKey) return;
-    const t = performance.now();
-    requestAnimationFrame(() => {
-      // eslint-disable-next-line no-console
-      console.log(
-        `cmux.monaco.keydown key=${event.key} rafLag=${(performance.now() - t).toFixed(1)}ms keystrokesInWindow=${keystrokeCount}`,
-      );
-      if (keystrokeCount > 0) {
-        const elapsed = performance.now() - keystrokeStart;
-        // eslint-disable-next-line no-console
-        console.log(
-          `cmux.monaco.window ${keystrokeCount} keystrokes in ${elapsed.toFixed(1)}ms (${(keystrokeCount / elapsed * 1000).toFixed(0)}/s)`,
-        );
-        keystrokeCount = 0;
-      }
-    });
-  },
-  { passive: true, capture: true },
-);
 
 // Debounced snapshot of cursor + scroll + Monaco view state.
 let snapshotHandle: number | null = null;
@@ -181,6 +147,9 @@ function publishViewState(): void {
   const start = sel ? model.getOffsetAt(sel.getStartPosition()) : 0;
   const end = sel ? model.getOffsetAt(sel.getEndPosition()) : start;
   const monacoViewState = editor.saveViewState();
+  // Intentionally omit the buffer: `changed` already owns content sync. This
+  // message is pure view-state (cursor, selections, folds, scroll). Sending
+  // the full value on every 250ms snapshot during typing was wasted JSON work.
   postToSwift({
     type: "viewState",
     cursor: { offset: start, length: Math.max(0, end - start) },
