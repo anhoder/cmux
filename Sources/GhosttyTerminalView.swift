@@ -4587,11 +4587,18 @@ final class TerminalSurface: Identifiable, ObservableObject {
     /// Apply a daemon-reported `effective_cols × effective_rows` pin to the
     /// ghostty surface. Clients call this in response to RPC responses
     /// (terminal.open / session.attach / session.resize) and the
-    /// `session.size_changed` push event. Idempotent — a repeat with the
-    /// same cols/rows is skipped.
+    /// `session.size_changed` push event. We only STORE the pin when
+    /// `effective` is strictly smaller than our own natural capacity on
+    /// either axis — otherwise the daemon is just echoing back a value we
+    /// reported (e.g. terminal.open response includes the effective size
+    /// which equals the cols/rows we just asked for on a single-attachment
+    /// session). Letting that echo pin us shrinks the Ghostty surface to
+    /// its own default initial grid (56×21 in current runtime), which
+    /// then never un-shrinks even after AppKit lays out the real
+    /// container. That's the "weird resize on new terminal" symptom.
     func applyDaemonEffectiveGrid(cols: Int, rows: Int) {
         let next: (cols: Int, rows: Int)?
-        if cols > 0, rows > 0 {
+        if cols > 0, rows > 0, isEffectiveSmallerThanNatural(cols: cols, rows: rows) {
             next = (cols, rows)
         } else {
             next = nil
@@ -4599,9 +4606,23 @@ final class TerminalSurface: Identifiable, ObservableObject {
         guard effectiveGridPin?.cols != next?.cols || effectiveGridPin?.rows != next?.rows else { return }
         effectiveGridPin = next
         #if DEBUG
-        dlog("effectiveGrid.apply surface=\(id.uuidString.prefix(8)) cols=\(cols) rows=\(rows)")
+        dlog("effectiveGrid.apply surface=\(id.uuidString.prefix(8)) cols=\(cols) rows=\(rows) stored=\(next != nil ? 1 : 0) naturalCell=\(cachedCellPixelSize.width)x\(cachedCellPixelSize.height) natContainer=\(naturalContainerPixelSize.width)x\(naturalContainerPixelSize.height)")
         #endif
         reapplyEffectiveGridPinIfNeeded()
+    }
+
+    /// True when (cols × cellW, rows × cellH) is smaller than the natural
+    /// container on at least one axis. When both cell metrics and natural
+    /// container pixel size aren't known yet (first layout hasn't run),
+    /// we defer the judgment to false — avoids pinning to a tiny startup
+    /// value before AppKit has told us how big we really are.
+    private func isEffectiveSmallerThanNatural(cols: Int, rows: Int) -> Bool {
+        guard cachedCellPixelSize.width > 0, cachedCellPixelSize.height > 0 else { return false }
+        guard naturalContainerPixelSize.width > 0, naturalContainerPixelSize.height > 0 else { return false }
+        let pinnedW = CGFloat(cols) * cachedCellPixelSize.width
+        let pinnedH = CGFloat(rows) * cachedCellPixelSize.height
+        return pinnedW + 0.5 < naturalContainerPixelSize.width
+            || pinnedH + 0.5 < naturalContainerPixelSize.height
     }
 
     /// Re-run the set_size call with the pinned pixel box when a pin is
