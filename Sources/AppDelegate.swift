@@ -4524,7 +4524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     wroteAsynchronously: !writeSynchronously,
                     source: "empty"
                 )
-            )
+            }
             return false
         }
 
@@ -4552,7 +4552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 wroteAsynchronously: !writeSynchronously,
                 source: includeScrollback ? "snapshot.scrollback" : "snapshot"
             )
-        )
+        }
         return true
     }
 
