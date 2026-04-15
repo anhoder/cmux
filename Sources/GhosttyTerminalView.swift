@@ -4566,20 +4566,45 @@ final class TerminalSurface: Identifiable, ObservableObject {
     /// Re-run the set_size call with the pinned pixel box when a pin is
     /// set and we have measured cell metrics. This runs after the natural
     /// set_size in `updateSize` and whenever the daemon changes the pin.
+    /// Also computes the letterbox rect (in points, centered in the host
+    /// view) and pushes it to GhosttyNSView so the user sees a 1 pt
+    /// separator border around the active terminal area whenever this
+    /// device is larger than the smallest attached sibling.
     private func reapplyEffectiveGridPinIfNeeded() {
-        guard let surface,
-              let pin = effectiveGridPin,
+        guard let surface else { return }
+        guard let pin = effectiveGridPin,
               pin.cols > 0, pin.rows > 0,
               cachedCellPixelSize.width > 0, cachedCellPixelSize.height > 0 else {
+            attachedView?.letterboxRect = nil
             return
         }
         let pinnedPxW = UInt32(max(1, Int((CGFloat(pin.cols) * cachedCellPixelSize.width).rounded(.down))))
         let pinnedPxH = UInt32(max(1, Int((CGFloat(pin.rows) * cachedCellPixelSize.height).rounded(.down))))
         // If the pin would meet or exceed the container's natural size,
         // no letterboxing is needed (this device is the smallest or size
-        // race landed out of order). Leave the natural set_size in place.
-        if pinnedPxW >= lastPixelWidth && pinnedPxH >= lastPixelHeight { return }
+        // race landed out of order). Leave the natural set_size in place
+        // and clear the border.
+        if pinnedPxW >= lastPixelWidth && pinnedPxH >= lastPixelHeight {
+            attachedView?.letterboxRect = nil
+            return
+        }
         ghostty_surface_set_size(surface, pinnedPxW, pinnedPxH)
+        // Convert pixel dimensions back to points and center inside the
+        // attached view's bounds so the visible Ghostty cells (which
+        // start at the layer origin in points) are framed by the border.
+        if let view = attachedView {
+            let scale = max(view.window?.backingScaleFactor ?? 2.0, 1.0)
+            let widthPts = CGFloat(pinnedPxW) / scale
+            let heightPts = CGFloat(pinnedPxH) / scale
+            let bounds = view.bounds
+            let originX = max(0, ((bounds.width - widthPts) / 2).rounded())
+            // Ghostty renders from the top of the view; keep the pinned
+            // rect anchored at the top so the prompt stays in the
+            // expected location while the bottom letterboxes.
+            let originY: CGFloat = 0
+            let rect = CGRect(x: originX, y: originY, width: min(widthPts, bounds.width), height: min(heightPts, bounds.height))
+            view.letterboxRect = rect
+        }
         #if DEBUG
         dlog("effectiveGrid.pin surface=\(id.uuidString.prefix(8)) container=\(lastPixelWidth)x\(lastPixelHeight) pinned=\(pinnedPxW)x\(pinnedPxH) cols=\(pin.cols) rows=\(pin.rows)")
         #endif
@@ -5357,6 +5382,53 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         registerForDraggedTypes(Array(Self.dropTypes))
     }
 
+    /// Pinned region (in this view's coordinate space, points) where the
+    /// daemon-effective grid is being rendered. When set, a 1 pt
+    /// `NSColor.separatorColor` stroke is drawn around it to indicate
+    /// to the user that the active terminal area is smaller than the
+    /// view because another (smaller) device is attached to the same
+    /// shared session. Set to nil to remove the border (we are the
+    /// smallest attached device, or the only one).
+    var letterboxRect: CGRect? {
+        didSet {
+            guard letterboxRect != oldValue else { return }
+            updateLetterboxBorderLayer()
+        }
+    }
+    private var letterboxBorderLayer: CAShapeLayer?
+
+    private func updateLetterboxBorderLayer() {
+        guard let hostLayer = layer else { return }
+        guard let rect = letterboxRect else {
+            letterboxBorderLayer?.removeFromSuperlayer()
+            letterboxBorderLayer = nil
+            return
+        }
+        let border: CAShapeLayer = {
+            if let existing = letterboxBorderLayer { return existing }
+            let b = CAShapeLayer()
+            b.fillColor = NSColor.clear.cgColor
+            b.lineWidth = 1.0
+            b.zPosition = 1000 // above the Metal sublayer
+            // Decorative; let mouse / key events pass through to the
+            // Ghostty renderer underneath.
+            b.actions = ["path": NSNull(), "frame": NSNull()]
+            hostLayer.addSublayer(b)
+            letterboxBorderLayer = b
+            return b
+        }()
+        border.strokeColor = NSColor.separatorColor.cgColor
+        border.contentsScale = hostLayer.contentsScale
+        let outline = rect.insetBy(dx: -1.5, dy: -1.5)
+        let path = CGPath(rect: outline, transform: nil)
+        if border.path != path {
+            border.path = path
+        }
+        if border.frame != hostLayer.bounds {
+            border.frame = hostLayer.bounds
+        }
+    }
+
     private func effectiveBackgroundColor() -> NSColor {
         let base = backgroundColor ?? GhosttyApp.shared.defaultBackgroundColor
         let opacity = GhosttyApp.shared.defaultBackgroundOpacity
@@ -5595,6 +5667,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         super.layout()
         updateSurfaceSize()
         invalidateTextInputCoordinates()
+        updateLetterboxBorderLayer()
     }
 
     override var isOpaque: Bool { false }
