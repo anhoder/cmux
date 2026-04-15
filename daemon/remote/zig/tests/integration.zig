@@ -680,13 +680,14 @@ test "integration: multi-subscriber delivery" {
 }
 
 // ---------------------------------------------------------------------------
-// Test: session.size_changed fan-out — when a new attachment arrives with a
-// smaller grid than the current effective size, every subscribed client
-// receives a session.size_changed push carrying the new min. When that
-// smaller attachment detaches, they receive another with the larger size.
+// Test: session.view_size fan-out — the daemon is the single source of
+// truth for the rendering grid. Broadcasts unconditionally on every
+// attach / resize / detach so late-joining or previously-missed clients
+// converge on their next size-relevant RPC. Clients don't infer; they
+// apply.
 // ---------------------------------------------------------------------------
 
-test "integration: size_changed broadcasts min-across-attachments to all subscribers" {
+test "integration: view_size broadcasts unconditionally on every size-affecting event" {
     if (!pty_pump.supported) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
@@ -727,7 +728,7 @@ test "integration: size_changed broadcasts min-across-attachments to all subscri
     }
 
     // Client B attaches at a smaller grid. This should shrink effective size
-    // and produce a session.size_changed push that lands on A's socket.
+    // and produce a session.view_size push that lands on A's socket.
     var client_b = try test_util.Client.connect(alloc, fx.socket_path);
     defer client_b.deinit();
     {
@@ -745,9 +746,10 @@ test "integration: size_changed broadcasts min-across-attachments to all subscri
         try std.testing.expectEqual(@as(i64, 20), result.get("effective_rows").?.integer);
     }
 
-    // Poll A for the size_changed push (may be interleaved with unrelated
-    // terminal.output frames from the `sleep 60` process).
-    const shrink_cols: i64 = try expectSizeChanged(alloc, &client_a, deadlineIn(2000));
+    // Poll A for the view_size push (may be interleaved with unrelated
+    // terminal.output frames from the `sleep 60` process). We expect the
+    // daemon to have broadcast the new min on B's attach.
+    const shrink_cols: i64 = try expectViewSize(alloc, &client_a, deadlineIn(2000));
     try std.testing.expectEqual(@as(i64, 40), shrink_cols);
 
     // Now detach B. Effective size should grow back to A's 100x30 and both
@@ -774,16 +776,16 @@ test "integration: size_changed broadcasts min-across-attachments to all subscri
         defer resp.deinit();
     }
 
-    const grow_a: i64 = try expectSizeChanged(alloc, &client_a, deadlineIn(2000));
+    const grow_a: i64 = try expectViewSize(alloc, &client_a, deadlineIn(2000));
     try std.testing.expectEqual(@as(i64, 100), grow_a);
-    const grow_c: i64 = try expectSizeChanged(alloc, &client_c, deadlineIn(2000));
+    const grow_c: i64 = try expectViewSize(alloc, &client_c, deadlineIn(2000));
     try std.testing.expectEqual(@as(i64, 100), grow_c);
 }
 
-/// Read frames from `client` until a `session.size_changed` event arrives;
-/// return its `effective_cols`. Other event frames (terminal.output etc.)
-/// are discarded. Times out via `deadline` with `error.Timeout`.
-fn expectSizeChanged(alloc: std.mem.Allocator, client: *test_util.Client, deadline: i64) !i64 {
+/// Read frames from `client` until a `session.view_size` event arrives;
+/// return its `cols`. Other event frames (terminal.output etc.) are
+/// discarded. Times out via `deadline` with `error.Timeout`.
+fn expectViewSize(alloc: std.mem.Allocator, client: *test_util.Client, deadline: i64) !i64 {
     _ = alloc;
     while (std.time.milliTimestamp() < deadline) {
         var parsed = client.readFrame(deadline) catch |err| switch (err) {
@@ -794,8 +796,8 @@ fn expectSizeChanged(alloc: std.mem.Allocator, client: *test_util.Client, deadli
         if (parsed.value != .object) continue;
         const ev = parsed.value.object.get("event") orelse continue;
         if (ev != .string) continue;
-        if (!std.mem.eql(u8, ev.string, "session.size_changed")) continue;
-        return parsed.value.object.get("effective_cols").?.integer;
+        if (!std.mem.eql(u8, ev.string, "session.view_size")) continue;
+        return parsed.value.object.get("cols").?.integer;
     }
     return error.Timeout;
 }

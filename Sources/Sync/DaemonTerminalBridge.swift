@@ -13,10 +13,11 @@ final class DaemonTerminalBridge: @unchecked Sendable {
 
     var onOutput: ((_ data: Data) -> Void)?
     var onDisconnect: ((_ error: String?) -> Void)?
-    /// Invoked whenever the daemon reports a new effective grid for this
-    /// session. Callers use this to letterbox / re-size the Ghostty surface
-    /// so multi-device sessions render at min-across-attachments.
-    var onEffectiveSize: ((_ cols: Int, _ rows: Int) -> Void)?
+    /// Authoritative `session.view_size` delivery from the daemon.
+    /// Callers apply this directly to the Ghostty surface without
+    /// inference or thresholding — the daemon's value is the rendering
+    /// grid for every attached client.
+    var onViewSize: ((_ cols: Int, _ rows: Int) -> Void)?
 
     init(socketPath: String, sessionID: String, shellCommand: String) {
         // socketPath is ignored — DaemonConnection owns the socket path.
@@ -63,7 +64,7 @@ final class DaemonTerminalBridge: @unchecked Sendable {
             rows: rows,
             onOutput: { [weak self] data in self?.onOutput?(data) },
             onDisconnect: { [weak self] err in self?.onDisconnect?(err) },
-            onEffectiveSize: { [weak self] c, r in self?.onEffectiveSize?(c, r) }
+            onViewSize: { [weak self] c, r in self?.onViewSize?(c, r) }
         )
     }
 

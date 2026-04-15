@@ -12,22 +12,18 @@ protocol TerminalSurfaceHosting: AnyObject {
     func processOutput(_ data: Data)
     func focusInput()
     func updateRemotePlatform(_ platform: RemotePlatform)
-    /// Pin the Ghostty surface to this (cols, rows) grid regardless of the
-    /// container's natural capacity. Emitted by the daemon whenever the
-    /// min-across-attachments changes (either another device joined at a
-    /// smaller grid or the smallest device detached). Containers larger
-    /// than the effective grid letterbox the surface and draw a subtle
-    /// border around the active region; containers matching the effective
-    /// grid (the smallest device) fill the full area with no border.
-    /// Pass `cols = 0` or `rows = 0` to clear the pin and revert to the
-    /// container-driven sizing.
-    func applyEffectiveGrid(cols: Int, rows: Int)
+    /// Apply the daemon's authoritative rendering grid. Unconditional —
+    /// implementations render at exactly cols × rows and letterbox any
+    /// remaining container area. The daemon broadcasts this on every
+    /// attach/resize/detach/open, plus inlined in RPC responses, so
+    /// every attached device converges on the same grid.
+    func applyViewSize(cols: Int, rows: Int)
 }
 
 extension TerminalSurfaceHosting {
     func focusInput() {}
     func updateRemotePlatform(_ platform: RemotePlatform) {}
-    func applyEffectiveGrid(cols _: Int, rows _: Int) {}
+    func applyViewSize(cols _: Int, rows _: Int) {}
 }
 
 final class GhosttySurfaceBridge {
@@ -911,15 +907,10 @@ final class GhosttySurfaceView: UIView, TerminalSurfaceHosting {
         ghostty_surface_set_occlusion(surface, visible)
     }
 
-    func applyEffectiveGrid(cols: Int, rows: Int) {
-        let next: (cols: Int, rows: Int)?
-        if cols > 0 && rows > 0 {
-            next = (cols, rows)
-        } else {
-            next = nil
-        }
-        guard effectiveGrid?.cols != next?.cols || effectiveGrid?.rows != next?.rows else { return }
-        effectiveGrid = next
+    func applyViewSize(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        if effectiveGrid?.cols == cols && effectiveGrid?.rows == rows { return }
+        effectiveGrid = (cols, rows)
         setNeedsLayout()
         if window != nil {
             syncSurfaceGeometry()

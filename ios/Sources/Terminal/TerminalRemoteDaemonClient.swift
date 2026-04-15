@@ -228,13 +228,12 @@ enum TerminalPushEvent: Sendable {
         notifications: TerminalNotificationsPayload?
     )
     case eof
-    /// Daemon fanout of a new effective grid for a session. Emitted when
-    /// the min-across-attachments changes (another device attached with a
-    /// smaller grid, or the smallest device detached). Clients snap the
-    /// local Ghostty surface to this size so every attached device renders
-    /// at the same grid, with larger devices letterboxing the surface in a
-    /// bordered frame.
-    case sizeChanged(effectiveCols: Int, effectiveRows: Int)
+    /// Daemon-authoritative rendering grid. Emitted unconditionally by
+    /// the daemon on every attach/resize/detach/open (and also inlined
+    /// in RPC responses), so this is the single source of truth for
+    /// how big the local Ghostty surface should be. Clients apply it
+    /// directly; any remaining container area is letterboxed.
+    case viewSize(cols: Int, rows: Int)
 }
 
 protocol TerminalRemoteDaemonPushSubscribing: Sendable {
@@ -604,16 +603,17 @@ actor TerminalRemoteDaemonClient {
             handler(pushEvent)
         case "terminal.eof":
             handler(.eof)
-        case "session.size_changed":
-            // Top-level fields (see daemon session_service.broadcastSessionSizeChanged).
-            // A zero means the daemon hasn't settled on a real size yet, skip.
-            let cols = (json["effective_cols"] as? Int) ?? (json["effective_cols"] as? NSNumber)?.intValue ?? 0
-            let rows = (json["effective_rows"] as? Int) ?? (json["effective_rows"] as? NSNumber)?.intValue ?? 0
+        case "session.view_size":
+            // Top-level cols/rows. Daemon broadcasts unconditionally on
+            // every attach/resize/detach/open; client applies directly
+            // (see session_service.broadcastViewSize).
+            let cols = (json["cols"] as? Int) ?? (json["cols"] as? NSNumber)?.intValue ?? 0
+            let rows = (json["rows"] as? Int) ?? (json["rows"] as? NSNumber)?.intValue ?? 0
             guard cols > 0, rows > 0 else {
-                NSLog("📱 dispatcher: malformed session.size_changed for %@", sessionID)
+                NSLog("📱 dispatcher: malformed session.view_size for %@", sessionID)
                 return
             }
-            handler(.sizeChanged(effectiveCols: cols, effectiveRows: rows))
+            handler(.viewSize(cols: cols, rows: rows))
         default:
             NSLog("📱 dispatcher: ignoring unknown event %@ for %@", event, sessionID)
         }

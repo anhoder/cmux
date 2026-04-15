@@ -118,7 +118,7 @@ final class TerminalRemoteDaemonSessionTransport: @unchecked Sendable, TerminalT
             rows: max(1, size.rows)
         )
         if let result {
-            eventHandler?(.effectiveSize(cols: result.effectiveCols, rows: result.effectiveRows))
+            emitEffectiveSize(cols: result.effectiveCols, rows: result.effectiveRows)
         }
     }
 
@@ -235,14 +235,14 @@ final class TerminalRemoteDaemonSessionTransport: @unchecked Sendable, TerminalT
         emitEffectiveSize(cols: openResult.effectiveCols, rows: openResult.effectiveRows)
     }
 
-    /// Forward the daemon's authoritative `(effective_cols, effective_rows)`
-    /// to the event handler whenever the backend reports a real size
-    /// (nonzero on both axes). Zero on either axis means the daemon hasn't
-    /// settled yet, likely because no attachment has reported geometry —
-    /// skip so we don't collapse the local Ghostty surface to 0 cols.
+    /// Forward the daemon's authoritative view size to the event
+    /// handler whenever the backend reports a real size (nonzero on
+    /// both axes). Zero on either axis means the daemon hasn't settled
+    /// yet, likely because no attachment has reported geometry — skip
+    /// so we don't collapse the local Ghostty surface to 0 cols.
     private func emitEffectiveSize(cols: Int, rows: Int) {
         guard cols > 0, rows > 0 else { return }
-        eventHandler?(.effectiveSize(cols: cols, rows: rows))
+        eventHandler?(.viewSize(cols: cols, rows: rows))
     }
 
     private func startReadLoop() {
@@ -299,8 +299,8 @@ final class TerminalRemoteDaemonSessionTransport: @unchecked Sendable, TerminalT
         case .eof:
             clearSessionState()
             finishDisconnect(error: nil)
-        case .sizeChanged(let cols, let rows):
-            eventHandler?(.effectiveSize(cols: cols, rows: rows))
+        case .viewSize(let cols, let rows):
+            eventHandler?(.viewSize(cols: cols, rows: rows))
         }
     }
 

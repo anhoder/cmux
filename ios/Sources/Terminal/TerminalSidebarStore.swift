@@ -1519,8 +1519,8 @@ final class TerminalSessionController: ObservableObject {
                 liveAnchormuxLog("controller.event trusted_host_key key=\(hostKey)")
             case .remotePlatform(let platform):
                 liveAnchormuxLog("controller.event remote_platform os=\(platform.goOS) arch=\(platform.goArch)")
-            case .effectiveSize(let cols, let rows):
-                liveAnchormuxLog("controller.event effective_size cols=\(cols) rows=\(rows)")
+            case .viewSize(let cols, let rows):
+                liveAnchormuxLog("controller.event view_size cols=\(cols) rows=\(rows)")
             }
         }
         switch event {
@@ -1557,11 +1557,10 @@ final class TerminalSessionController: ObservableObject {
             onUpdate?(.trustedHostKey(hostKey))
         case .remotePlatform(let platform):
             terminalSurface?.updateRemotePlatform(platform)
-        case .effectiveSize(let cols, let rows):
-            // Daemon's min-across-attachments grid. Snap the local surface
-            // so every attached device renders at the same size; the
-            // surface view letterboxes if its container is bigger.
-            terminalSurface?.applyEffectiveGrid(cols: cols, rows: rows)
+        case .viewSize(let cols, let rows):
+            // Daemon is authoritative for the rendering grid. Apply
+            // unconditionally; surface lets-boxes if container bigger.
+            terminalSurface?.applyViewSize(cols: cols, rows: rows)
         }
     }
 

@@ -883,8 +883,8 @@ private final class LiveAnchormuxFixtureTransport: @unchecked Sendable, Terminal
             liveAnchormuxLog("transport.event trusted_host_key session=\(sessionID) key=\(hostKey)")
         case .remotePlatform(let platform):
             liveAnchormuxLog("transport.event remote_platform session=\(sessionID) os=\(platform.goOS) arch=\(platform.goArch)")
-        case .effectiveSize(let cols, let rows):
-            liveAnchormuxLog("transport.event effective_size session=\(sessionID) cols=\(cols) rows=\(rows)")
+        case .viewSize(let cols, let rows):
+            liveAnchormuxLog("transport.event view_size session=\(sessionID) cols=\(cols) rows=\(rows)")
         }
         if let snapshotting = transport as? TerminalRemoteDaemonResumeStateSnapshotting {
             updateResumeState(snapshotting.remoteDaemonResumeStateSnapshot())

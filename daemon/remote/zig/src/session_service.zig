@@ -401,51 +401,30 @@ pub const Service = struct {
     }
 
     pub fn attachSession(self: *Service, session_id: []const u8, attachment_id: []const u8, cols: u16, rows: u16) !session_registry.SessionStatus {
-        const prev = self.registry.effectiveSize(session_id);
         try self.registry.attach(session_id, attachment_id, cols, rows);
         var status = try self.registry.status(session_id);
         errdefer status.deinit(self.alloc);
         try self.resizeRuntimeIfPresent(&status);
-        self.maybeBroadcastSize(prev, &status);
+        self.broadcastViewSize(status.session_id, status.effective_cols, status.effective_rows);
         return status;
     }
 
     pub fn resizeSession(self: *Service, session_id: []const u8, attachment_id: []const u8, cols: u16, rows: u16) !session_registry.SessionStatus {
-        const prev = self.registry.effectiveSize(session_id);
         try self.registry.resize(session_id, attachment_id, cols, rows);
         var status = try self.registry.status(session_id);
         errdefer status.deinit(self.alloc);
         try self.resizeRuntimeIfPresent(&status);
-        self.maybeBroadcastSize(prev, &status);
+        self.broadcastViewSize(status.session_id, status.effective_cols, status.effective_rows);
         return status;
     }
 
     pub fn detachSession(self: *Service, session_id: []const u8, attachment_id: []const u8) !session_registry.SessionStatus {
-        const prev = self.registry.effectiveSize(session_id);
         try self.registry.detach(session_id, attachment_id);
         var status = try self.registry.status(session_id);
         errdefer status.deinit(self.alloc);
         try self.resizeRuntimeIfPresent(&status);
-        self.maybeBroadcastSize(prev, &status);
+        self.broadcastViewSize(status.session_id, status.effective_cols, status.effective_rows);
         return status;
-    }
-
-    /// Compare pre/post effective size; broadcast `session.size_changed` to
-    /// every live subscriber of the session if either axis changed. A null
-    /// `prev` means the session was newly created by the mutation, in which
-    /// case we don't broadcast (no prior subscribers could be waiting on it).
-    fn maybeBroadcastSize(
-        self: *Service,
-        prev: ?session_registry.EffectiveSize,
-        status: *const session_registry.SessionStatus,
-    ) void {
-        const p = prev orelse return;
-        if (p.cols == status.effective_cols and p.rows == status.effective_rows) return;
-        self.broadcastSessionSizeChanged(
-            status.session_id,
-            status.effective_cols,
-            status.effective_rows,
-        );
     }
 
     pub fn sessionStatus(self: *Service, session_id: []const u8) !session_registry.SessionStatus {
@@ -777,20 +756,23 @@ pub const Service = struct {
         }
     }
 
-    /// Fan out a `session.size_changed` event to every live subscriber of
-    /// `session_id`. Uses the same in_flight + snapshot pattern as
-    /// `deliverTerminalPushes` so an unsubscribe racing with this broadcast
-    /// cannot free a sub we're still writing to. Callers invoke this after
-    /// a registry mutation (attach/resize/detach) whose `recompute` produced
-    /// a new effective_cols or effective_rows. Wire format matches the
-    /// existing top-level-fields contract used by `terminal.output`:
-    ///   {"event":"session.size_changed","session_id":"...",
-    ///    "effective_cols":N,"effective_rows":M}
-    fn broadcastSessionSizeChanged(
+    /// Fan out a `session.view_size` event to every live subscriber of
+    /// `session_id`. This is the AUTHORITATIVE rendering grid — clients
+    /// render at exactly these cols × rows and letterbox any remaining
+    /// container area. Called from every attach/resize/detach/open path
+    /// whether or not the value actually changed, so late-joining clients
+    /// and clients that missed a prior broadcast always converge to the
+    /// current truth on their next size-relevant RPC. Uses the same
+    /// in_flight + snapshot pattern as `deliverTerminalPushes` so an
+    /// unsubscribe racing with this broadcast cannot free a sub we're
+    /// still writing to. Wire format:
+    ///   {"event":"session.view_size","session_id":"...",
+    ///    "cols":N,"rows":M}
+    fn broadcastViewSize(
         self: *Service,
         session_id: []const u8,
-        effective_cols: u16,
-        effective_rows: u16,
+        cols: u16,
+        rows: u16,
     ) void {
         var matching: std.ArrayListUnmanaged(*TerminalSubscription) = .empty;
         defer matching.deinit(self.alloc);
@@ -808,10 +790,10 @@ pub const Service = struct {
         if (matching.items.len == 0) return;
 
         const event = json_rpc.encodeResponse(self.alloc, .{
-            .event = "session.size_changed",
+            .event = "session.view_size",
             .session_id = session_id,
-            .effective_cols = effective_cols,
-            .effective_rows = effective_rows,
+            .cols = cols,
+            .rows = rows,
         }) catch {
             for (matching.items) |sub| _ = sub.in_flight.fetchSub(1, .seq_cst);
             return;

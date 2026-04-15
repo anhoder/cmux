@@ -3392,31 +3392,25 @@ final class TerminalSurface: Identifiable, ObservableObject {
     private var lastPixelHeight: UInt32 = 0
     private var lastXScale: CGFloat = 0
     private var lastYScale: CGFloat = 0
-    /// Daemon-authoritative effective grid (min across all attached
-    /// clients). When set, `updateSize` pins ghostty_surface_set_size
-    /// to this grid in pixels regardless of the view's own bounds, so
-    /// every attached device renders at the same cols×rows. Larger
-    /// containers letterbox around the pinned rect; the renderer layer
-    /// is centered inside the view.
-    private var effectiveGridPin: (cols: Int, rows: Int)?
-    /// Cached cell pixel metrics from the last un-pinned size measurement.
-    /// Used to convert a pinned (cols, rows) into a pixel rect without
-    /// a second set_size round-trip.
+    /// Current authoritative view grid from the daemon. The daemon
+    /// broadcasts `session.view_size` on every attach/resize/detach,
+    /// and also inlines it in RPC responses. The client applies these
+    /// unconditionally — no inference, no echo-detection, no threshold
+    /// comparison. This is the single source of truth for the
+    /// rendering grid. Nil until the daemon has reported a size (very
+    /// brief window at startup before the first RPC round-trip).
+    private var daemonViewSize: (cols: Int, rows: Int)?
+    /// Cell pixel metrics cached from the most recent natural layout
+    /// measurement. Used to convert the daemon's (cols, rows) into a
+    /// pixel rect for `ghostty_surface_set_size` and the surrounding
+    /// `surfaceView.frame`. Independent of `daemonViewSize` — the
+    /// cell size only changes when the font does.
     private var cachedCellPixelSize: CGSize = .zero
-    /// The true natural container pixel size — what AppKit would hand us
-    /// if no pin were active. `lastPixelWidth`/`lastPixelHeight` get
-    /// clobbered by the pinned set_size call, so we need a separate
-    /// record to decide whether a pin is actually smaller than our
-    /// capacity. Updated only on non-pin-driven layout passes.
-    private var naturalContainerPixelSize: CGSize = .zero
-    /// Last (cols, rows) this surface reported to the daemon via
-    /// `bridge.resize`. Used in `applyDaemonEffectiveGrid` to detect
-    /// daemon-echoed values: if effective == lastReported on both axes,
-    /// the daemon is just returning what we asked for (no smaller
-    /// sibling), so we shouldn't pin. If effective is smaller than
-    /// lastReported on either axis, a smaller sibling is attached and
-    /// we genuinely need to letterbox.
-    private var lastReportedToDaemon: (cols: Int, rows: Int)?
+    /// Most recent container pixel size reported by the enclosing
+    /// GhosttySurfaceScrollView. Purely for letterbox/border
+    /// calculations: if `daemonViewSize × cell < container`, we
+    /// letterbox + draw a border. Never used to decide whether to pin.
+    private var containerPixelSize: CGSize = .zero
     private let debugMetadataLock = NSLock()
     private let createdAt: Date = Date()
     private var runtimeSurfaceCreatedAt: Date?
@@ -4355,9 +4349,9 @@ final class TerminalSurface: Identifiable, ObservableObject {
                     }
                 }
             }
-            bridge.onEffectiveSize = { [weak self] cols, rows in
+            bridge.onViewSize = { [weak self] cols, rows in
                 DispatchQueue.main.async {
-                    self?.applyDaemonEffectiveGrid(cols: cols, rows: rows)
+                    self?.applyViewSize(cols: cols, rows: rows)
                 }
             }
             let size = ghostty_surface_size(surface)
@@ -4524,213 +4518,102 @@ final class TerminalSurface: Identifiable, ObservableObject {
         }
 
         if sizeChanged {
-            // Distinguish AppKit-driven natural container updates from our
-            // own pin-driven layout bounces. When the pin shrinks
-            // surfaceView.frame, AppKit re-invokes layout() which calls
-            // updateSize again with the PINNED pixel values. If we treat
-            // that path as a natural update, we'd cache cell metrics from
-            // a smaller grid, report pinned cols/rows to the daemon
-            // (making the daemon think this device's capacity IS the
-            // pinned size), and the min-across-attachments aggregation
-            // collapses. Detect by comparing incoming px to pin px.
-            let incomingMatchesPin: Bool = {
-                guard let pin = effectiveGridPin,
-                      pin.cols > 0, pin.rows > 0,
-                      cachedCellPixelSize.width > 0, cachedCellPixelSize.height > 0 else {
-                    return false
-                }
-                let pinnedPxW = UInt32(max(1, Int((CGFloat(pin.cols) * cachedCellPixelSize.width).rounded(.down))))
-                let pinnedPxH = UInt32(max(1, Int((CGFloat(pin.rows) * cachedCellPixelSize.height).rounded(.down))))
-                return abs(Int(wpx) - Int(pinnedPxW)) <= 1 && abs(Int(hpx) - Int(pinnedPxH)) <= 1
-            }()
-
-            ghostty_surface_set_size(surface, wpx, hpx)
             lastPixelWidth = wpx
             lastPixelHeight = hpx
+            containerPixelSize = CGSize(width: CGFloat(wpx), height: CGFloat(hpx))
 
-            let natural = ghostty_surface_size(surface)
-
-            #if DEBUG
-            dlog("surface.updateSize surface=\(id.uuidString.prefix(8)) incoming=\(wpx)x\(hpx) grid=\(natural.columns)x\(natural.rows) naturalPx=\(natural.width_px)x\(natural.height_px) fromPin=\(incomingMatchesPin ? 1 : 0) pin=\(effectiveGridPin.map { "\($0.cols)x\($0.rows)" } ?? "none") cachedCell=\(cachedCellPixelSize.width)x\(cachedCellPixelSize.height) natContainer=\(naturalContainerPixelSize.width)x\(naturalContainerPixelSize.height)")
-            #endif
-
-            if !incomingMatchesPin {
-                if natural.columns > 0, natural.rows > 0,
-                   natural.width_px > 0, natural.height_px > 0 {
-                    cachedCellPixelSize = CGSize(
-                        width: CGFloat(natural.width_px) / CGFloat(natural.columns),
-                        height: CGFloat(natural.height_px) / CGFloat(natural.rows)
-                    )
-                    naturalContainerPixelSize = CGSize(
-                        width: CGFloat(natural.width_px),
-                        height: CGFloat(natural.height_px)
-                    )
-                }
-                if let bridge = daemonBridge, natural.columns > 0, natural.rows > 0 {
-                    bridge.resize(cols: Int(natural.columns), rows: Int(natural.rows))
-                    lastReportedToDaemon = (Int(natural.columns), Int(natural.rows))
-                }
+            // Ask Ghostty to lay out at the container size just to
+            // measure cell metrics — immediately follow with the
+            // authoritative view_size from the daemon below. This one
+            // measurement is enough because the font (and therefore
+            // cell size) is stable unless config changes.
+            ghostty_surface_set_size(surface, wpx, hpx)
+            let measured = ghostty_surface_size(surface)
+            if measured.columns > 0, measured.rows > 0,
+               measured.width_px > 0, measured.height_px > 0 {
+                cachedCellPixelSize = CGSize(
+                    width: CGFloat(measured.width_px) / CGFloat(measured.columns),
+                    height: CGFloat(measured.height_px) / CGFloat(measured.rows)
+                )
             }
 
-            reapplyEffectiveGridPinIfNeeded()
+            #if DEBUG
+            dlog("surface.updateSize surface=\(id.uuidString.prefix(8)) containerPx=\(wpx)x\(hpx) containerGrid=\(measured.columns)x\(measured.rows) daemonViewSize=\(daemonViewSize.map { "\($0.cols)x\($0.rows)" } ?? "nil") cachedCell=\(cachedCellPixelSize.width)x\(cachedCellPixelSize.height)")
+            #endif
+
+            // One-way reporting: tell the daemon this device's natural
+            // capacity. The daemon aggregates and pushes the resulting
+            // view_size back via `applyViewSize`. We never read the
+            // response to decide how to render.
+            if let bridge = daemonBridge, measured.columns > 0, measured.rows > 0 {
+                bridge.resize(cols: Int(measured.columns), rows: Int(measured.rows))
+            }
+
+            // Apply whatever the daemon most recently said. On the very
+            // first layout this is still nil and we leave the surface at
+            // the container grid (one frame of transient) until the
+            // daemon response arrives and calls `applyViewSize`.
+            applyCurrentViewSize()
         }
 
         // Let Ghostty continue rendering on its own wakeups for steady-state frames.
         return true
     }
 
-    /// Pushed from GhosttySurfaceScrollView.synchronizeGeometryAndContent
-    /// on every layout pass with the true container px (ignoring any pin).
-    /// reapplyEffectiveGridPinIfNeeded uses this, not lastPixelWidth, to
-    /// decide whether the pin is actually smaller than our capacity.
-    func updateNaturalContainerPixelSize(_ size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        if naturalContainerPixelSize != size {
-            #if DEBUG
-            dlog("surface.naturalContainer surface=\(id.uuidString.prefix(8)) was=\(naturalContainerPixelSize.width)x\(naturalContainerPixelSize.height) now=\(size.width)x\(size.height)")
-            #endif
-            naturalContainerPixelSize = size
-        }
-    }
-
-    /// Apply a daemon-reported `effective_cols × effective_rows` pin to the
-    /// ghostty surface. Clients call this in response to RPC responses
-    /// (terminal.open / session.attach / session.resize) and the
-    /// `session.size_changed` push event. We only STORE the pin when
-    /// `effective` is strictly smaller than our own natural capacity on
-    /// either axis — otherwise the daemon is just echoing back a value we
-    /// reported (e.g. terminal.open response includes the effective size
-    /// which equals the cols/rows we just asked for on a single-attachment
-    /// session). Letting that echo pin us shrinks the Ghostty surface to
-    /// its own default initial grid (56×21 in current runtime), which
-    /// then never un-shrinks even after AppKit lays out the real
-    /// container. That's the "weird resize on new terminal" symptom.
-    func applyDaemonEffectiveGrid(cols: Int, rows: Int) {
-        let next: (cols: Int, rows: Int)?
-        if cols > 0, rows > 0, isEffectiveSmallerThanNatural(cols: cols, rows: rows) {
-            next = (cols, rows)
-        } else {
-            next = nil
-        }
-        guard effectiveGridPin?.cols != next?.cols || effectiveGridPin?.rows != next?.rows else { return }
-        effectiveGridPin = next
+    /// Entry point called by the daemon plumbing (RPC response or
+    /// `session.view_size` push) with the authoritative rendering grid.
+    /// Unconditional: whatever the daemon says, we render at. No
+    /// thresholding, no comparison to our local container. If the
+    /// daemon is wrong, the next `bridge.resize` we send will cause
+    /// the daemon to recompute and push back a correct value.
+    func applyViewSize(cols: Int, rows: Int) {
+        guard cols > 0, rows > 0 else { return }
+        if let current = daemonViewSize,
+           current.cols == cols, current.rows == rows { return }
+        daemonViewSize = (cols, rows)
         #if DEBUG
-        dlog("effectiveGrid.apply surface=\(id.uuidString.prefix(8)) cols=\(cols) rows=\(rows) stored=\(next != nil ? 1 : 0) lastReported=\(lastReportedToDaemon.map { "\($0.cols)x\($0.rows)" } ?? "nil") naturalCell=\(cachedCellPixelSize.width)x\(cachedCellPixelSize.height) natContainer=\(naturalContainerPixelSize.width)x\(naturalContainerPixelSize.height)")
+        dlog("viewSize.apply surface=\(id.uuidString.prefix(8)) cols=\(cols) rows=\(rows)")
         #endif
-        reapplyEffectiveGridPinIfNeeded()
+        applyCurrentViewSize()
     }
 
-    /// True when the daemon's effective (cols, rows) represents an
-    /// actual-smaller-sibling situation — i.e. we should letterbox.
-    ///
-    /// The check compares against whichever reference we have:
-    ///
-    /// - Our last reported size via `bridge.resize` if we've reported
-    ///   one. If effective < lastReported on either axis, someone
-    ///   smaller is attached. If effective == lastReported on both
-    ///   axes, the daemon is just echoing us (no sibling, no pin).
-    /// - Otherwise, fall back to comparing (cols, rows) in pixels
-    ///   against the natural container pixel size.
-    /// - If we don't know either reference yet (very early lifecycle),
-    ///   default to false. We'd rather miss the first apply and catch
-    ///   it on the next one than pin prematurely to a stale / startup
-    ///   Ghostty default grid (the "weird resize on new terminal" bug).
-    private func isEffectiveSmallerThanNatural(cols: Int, rows: Int) -> Bool {
-        if let last = lastReportedToDaemon {
-            if cols == last.cols && rows == last.rows { return false }
-            return cols < last.cols || rows < last.rows
-        }
-        guard cachedCellPixelSize.width > 0, cachedCellPixelSize.height > 0,
-              naturalContainerPixelSize.width > 0, naturalContainerPixelSize.height > 0 else {
-            return false
-        }
-        let pinnedW = CGFloat(cols) * cachedCellPixelSize.width
-        let pinnedH = CGFloat(rows) * cachedCellPixelSize.height
-        return pinnedW + 0.5 < naturalContainerPixelSize.width
-            || pinnedH + 0.5 < naturalContainerPixelSize.height
-    }
-
-    /// Re-run the set_size call with the pinned pixel box when a pin is
-    /// set and we have measured cell metrics. This runs after the natural
-    /// set_size in `updateSize` and whenever the daemon changes the pin.
-    /// Also computes the letterbox rect (in points, centered in the host
-    /// view) and pushes it to GhosttyNSView so the user sees a 1 pt
-    /// separator border around the active terminal area whenever this
-    /// device is larger than the smallest attached sibling.
-    private func reapplyEffectiveGridPinIfNeeded() {
-        guard let surface else { return }
-        guard let pin = effectiveGridPin,
+    /// Execute the currently-known daemon view size on the Ghostty
+    /// surface: resize the C surface to the view's pixel rect, snap
+    /// `surfaceView.frame` to match (so the CAMetalLayer clears any
+    /// ghost pixels from a larger prior grid), and hand the rect to
+    /// `GhosttyNSView.letterboxRect` which draws the border and
+    /// triggers a scroll-view re-layout. Safe to call repeatedly; if
+    /// the resulting frame matches the existing one, nothing changes.
+    private func applyCurrentViewSize() {
+        guard let surface,
+              let view = attachedView,
+              let pin = daemonViewSize,
               pin.cols > 0, pin.rows > 0 else {
             attachedView?.letterboxRect = nil
             return
         }
-        // Refresh cell metrics on demand. `updateSize` only refreshes
-        // `cachedCellPixelSize` when the natural pixel box changes, so a
-        // pin that arrives while the view bounds are stable would
-        // otherwise see a stale .zero cache and skip — leaving no
-        // border. Querying ghostty_surface_size here is cheap (returns
-        // current state, no resize) and gives us valid metrics whenever
-        // the C surface is up.
-        if cachedCellPixelSize.width <= 0 || cachedCellPixelSize.height <= 0 {
-            let natural = ghostty_surface_size(surface)
-            if natural.columns > 0, natural.rows > 0,
-               natural.width_px > 0, natural.height_px > 0 {
-                cachedCellPixelSize = CGSize(
-                    width: CGFloat(natural.width_px) / CGFloat(natural.columns),
-                    height: CGFloat(natural.height_px) / CGFloat(natural.rows)
-                )
-            }
-        }
         guard cachedCellPixelSize.width > 0, cachedCellPixelSize.height > 0 else {
-            attachedView?.letterboxRect = nil
+            // We haven't measured yet — the daemon beat AppKit. The
+            // first `updateSize` pass will call us back once it runs.
             return
         }
         let pinnedPxW = UInt32(max(1, Int((CGFloat(pin.cols) * cachedCellPixelSize.width).rounded(.down))))
         let pinnedPxH = UInt32(max(1, Int((CGFloat(pin.rows) * cachedCellPixelSize.height).rounded(.down))))
-        // Compare against the TRUE natural container px, not `lastPixelWidth`
-        // which gets overwritten by our own pinned set_size call. Using
-        // lastPixelWidth here caused the "weird resize" feedback loop:
-        // after we pinned, lastPixelWidth == pinnedPxW, this guard
-        // returned early + cleared letterboxRect, which bounced the
-        // scroll view back to full size, which triggered another
-        // reapplyEffectiveGridPinIfNeeded that re-pinned, etc.
-        let naturalPxW = naturalContainerPixelSize.width > 0 ? UInt32(naturalContainerPixelSize.width.rounded(.down)) : lastPixelWidth
-        let naturalPxH = naturalContainerPixelSize.height > 0 ? UInt32(naturalContainerPixelSize.height.rounded(.down)) : lastPixelHeight
-        if pinnedPxW >= naturalPxW && pinnedPxH >= naturalPxH {
-            attachedView?.letterboxRect = nil
-            #if DEBUG
-            dlog("effectiveGrid.pin.noop surface=\(id.uuidString.prefix(8)) pinnedPx=\(pinnedPxW)x\(pinnedPxH) naturalPx=\(naturalPxW)x\(naturalPxH) — we are the smallest, clear border")
-            #endif
-            return
-        }
         ghostty_surface_set_size(surface, pinnedPxW, pinnedPxH)
-        // Ghostty only re-rasterizes the cells it owns at the new grid;
-        // the rest of the CAMetalLayer keeps stale pixels from the prior
-        // larger set_size. Force a redraw so the inactive region clears
-        // before the border layer above it is painted.
         ghostty_surface_refresh(surface)
-        attachedView?.layer?.setNeedsDisplay()
-        // Convert pixel dimensions back to points, left-align inside the
-        // attached view's bounds, and anchor the top edge so Ghostty's
-        // prompt stays where it was on screen. Left-align (not center)
-        // so the prompt starts at the same column every time regardless
-        // of container width — users reading text expect a fixed left
-        // margin, not a moving column.
-        if let view = attachedView {
-            let scale = max(view.window?.backingScaleFactor ?? 2.0, 1.0)
-            let widthPts = CGFloat(pinnedPxW) / scale
-            let heightPts = CGFloat(pinnedPxH) / scale
-            let bounds = view.bounds
-            let rect = CGRect(
-                x: 0,
-                y: 0,
-                width: min(widthPts, bounds.width),
-                height: min(heightPts, bounds.height)
-            )
-            view.letterboxRect = rect
-        }
+        let scale = max(view.window?.backingScaleFactor ?? 2.0, 1.0)
+        let widthPts = CGFloat(pinnedPxW) / scale
+        let heightPts = CGFloat(pinnedPxH) / scale
+        let bounds = view.bounds
+        let rect = CGRect(
+            x: 0,
+            y: 0,
+            width: min(widthPts, bounds.width.isFinite ? bounds.width : widthPts),
+            height: min(heightPts, bounds.height.isFinite ? bounds.height : heightPts)
+        )
+        view.letterboxRect = rect
         #if DEBUG
-        dlog("effectiveGrid.pin surface=\(id.uuidString.prefix(8)) container=\(lastPixelWidth)x\(lastPixelHeight) pinned=\(pinnedPxW)x\(pinnedPxH) cols=\(pin.cols) rows=\(pin.rows)")
+        dlog("viewSize.snap surface=\(id.uuidString.prefix(8)) containerPx=\(lastPixelWidth)x\(lastPixelHeight) pinnedPx=\(pinnedPxW)x\(pinnedPxH) pinnedPt=\(widthPts)x\(heightPts)")
         #endif
     }
 
@@ -9518,26 +9401,12 @@ final class GhosttySurfaceScrollView: NSView {
 #if DEBUG
         logLayoutDuringActiveDrag(targetSize: targetSize)
 #endif
-        // Tell the terminal surface the TRUE natural container px so it
-        // can distinguish "AppKit laid out the container at size S" from
-        // "we pinned surfaceView smaller and AppKit bounced back through
-        // updateSize with the pinned size." Without this distinction the
-        // pin reshapes lastPixelWidth and confuses the pin guard.
-        let scale = surfaceView.window?.backingScaleFactor ?? 2.0
-        surfaceView.terminalSurface?.updateNaturalContainerPixelSize(
-            CGSize(
-                width: (targetSize.width * scale).rounded(.down),
-                height: (targetSize.height * scale).rounded(.down)
-            )
-        )
-
-        // When the daemon has pinned this surface to a smaller effective
-        // grid (another attached device has a smaller container),
-        // shrink the surfaceView so AppKit resizes its CAMetalLayer to
-        // the pinned rect. Without this the Ghostty renderer writes into
-        // a smaller cell region but the surrounding Metal pixels retain
-        // stale content from the previous larger grid, producing the
-        // ghosting / overlapping-text artifact.
+        // If the daemon has pinned us to a smaller grid than the scroll
+        // view's container, shrink surfaceView.frame to the pinned rect
+        // so AppKit resizes the CAMetalLayer to match (otherwise Ghostty
+        // renders into a small corner of a larger layer whose remaining
+        // pixels keep ghost content from the previous grid). Otherwise
+        // fill the container.
         let targetSurfaceFrame: CGRect
         if let pin = surfaceView.letterboxRect,
            pin.width > 0, pin.height > 0,
