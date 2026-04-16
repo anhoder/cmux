@@ -216,11 +216,6 @@ extension EnvironmentValues {
     }
 }
 
-enum ContentViewLifecycle: Sendable {
-    case recreateOnSwitch
-    case keepAllAlive
-}
-
 enum NewTabPosition: Sendable {
     case current
     case end
@@ -233,7 +228,6 @@ struct WorkspaceLayoutConfiguration: Sendable {
     var allowTabReordering: Bool
     var allowCrossPaneTabMove: Bool
     var autoCloseEmptyPanes: Bool
-    var contentViewLifecycle: ContentViewLifecycle
     var newTabPosition: NewTabPosition
     var appearance: Appearance
 
@@ -246,7 +240,6 @@ struct WorkspaceLayoutConfiguration: Sendable {
         allowTabReordering: Bool = true,
         allowCrossPaneTabMove: Bool = true,
         autoCloseEmptyPanes: Bool = true,
-        contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch,
         newTabPosition: NewTabPosition = .current,
         appearance: Appearance = .default
     ) {
@@ -256,7 +249,6 @@ struct WorkspaceLayoutConfiguration: Sendable {
         self.allowTabReordering = allowTabReordering
         self.allowCrossPaneTabMove = allowCrossPaneTabMove
         self.autoCloseEmptyPanes = autoCloseEmptyPanes
-        self.contentViewLifecycle = contentViewLifecycle
         self.newTabPosition = newTabPosition
         self.appearance = appearance
     }
@@ -1197,13 +1189,19 @@ final class SplitViewController {
     // MARK: - Split Operations
 
     /// Split the specified pane in the given orientation
-    func splitPane(_ paneId: PaneID, orientation: SplitOrientation, with newTab: TabItem? = nil) {
+    func splitPane(
+        _ paneId: PaneID,
+        orientation: SplitOrientation,
+        with newTab: TabItem? = nil,
+        focusNewPane: Bool = true
+    ) {
         clearPaneZoom()
         rootNode = splitNodeRecursively(
             node: rootNode,
             targetPaneId: paneId,
             orientation: orientation,
-            newTab: newTab
+            newTab: newTab,
+            focusNewPane: focusNewPane
         )
     }
 
@@ -1211,7 +1209,8 @@ final class SplitViewController {
         node: SplitNode,
         targetPaneId: PaneID,
         orientation: SplitOrientation,
-        newTab: TabItem?
+        newTab: TabItem?,
+        focusNewPane: Bool
     ) -> SplitNode {
         switch node {
         case .pane(let paneState):
@@ -1236,8 +1235,9 @@ final class SplitViewController {
                     animationOrigin: .fromSecond  // New pane slides in from right/bottom
                 )
 
-                // Focus the new pane
-                focusedPaneId = newPane.id
+                if focusNewPane {
+                    focusedPaneId = newPane.id
+                }
 
                 return .split(splitState)
             }
@@ -1248,27 +1248,36 @@ final class SplitViewController {
                 node: splitState.first,
                 targetPaneId: targetPaneId,
                 orientation: orientation,
-                newTab: newTab
+                newTab: newTab,
+                focusNewPane: focusNewPane
             )
             splitState.second = splitNodeRecursively(
                 node: splitState.second,
                 targetPaneId: targetPaneId,
                 orientation: orientation,
-                newTab: newTab
+                newTab: newTab,
+                focusNewPane: focusNewPane
             )
             return .split(splitState)
         }
     }
 
     /// Split a pane with a specific tab, optionally inserting the new pane first
-    func splitPaneWithTab(_ paneId: PaneID, orientation: SplitOrientation, tab: TabItem, insertFirst: Bool) {
+    func splitPaneWithTab(
+        _ paneId: PaneID,
+        orientation: SplitOrientation,
+        tab: TabItem,
+        insertFirst: Bool,
+        focusNewPane: Bool = true
+    ) {
         clearPaneZoom()
         rootNode = splitNodeWithTabRecursively(
             node: rootNode,
             targetPaneId: paneId,
             orientation: orientation,
             tab: tab,
-            insertFirst: insertFirst
+            insertFirst: insertFirst,
+            focusNewPane: focusNewPane
         )
     }
 
@@ -1277,7 +1286,8 @@ final class SplitViewController {
         targetPaneId: PaneID,
         orientation: SplitOrientation,
         tab: TabItem,
-        insertFirst: Bool
+        insertFirst: Bool,
+        focusNewPane: Bool
     ) -> SplitNode {
         switch node {
         case .pane(let paneState):
@@ -1307,8 +1317,9 @@ final class SplitViewController {
                     )
                 }
 
-                // Focus the new pane
-                focusedPaneId = newPane.id
+                if focusNewPane {
+                    focusedPaneId = newPane.id
+                }
 
                 return .split(splitState)
             }
@@ -1320,14 +1331,16 @@ final class SplitViewController {
                 targetPaneId: targetPaneId,
                 orientation: orientation,
                 tab: tab,
-                insertFirst: insertFirst
+                insertFirst: insertFirst,
+                focusNewPane: focusNewPane
             )
             splitState.second = splitNodeWithTabRecursively(
                 node: splitState.second,
                 targetPaneId: targetPaneId,
                 orientation: orientation,
                 tab: tab,
-                insertFirst: insertFirst
+                insertFirst: insertFirst,
+                focusNewPane: focusNewPane
             )
             return .split(splitState)
         }
@@ -1400,15 +1413,20 @@ final class SplitViewController {
     // MARK: - Tab Operations
 
     /// Add a tab to the focused pane (or specified pane)
-    func addTab(_ tab: TabItem, toPane paneId: PaneID? = nil, atIndex index: Int? = nil) {
+    func addTab(
+        _ tab: TabItem,
+        toPane paneId: PaneID? = nil,
+        atIndex index: Int? = nil,
+        select: Bool = true
+    ) {
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId,
               let pane = rootNode.findPane(targetPaneId) else { return }
 
         if let index {
-            pane.insertTab(tab, at: index)
+            pane.insertTab(tab, at: index, select: select)
         } else {
-            pane.addTab(tab)
+            pane.addTab(tab, select: select)
         }
     }
 
@@ -2173,7 +2191,8 @@ final class WorkspaceLayoutController {
         id: TabID? = nil,
         title: String,
         isPinned: Bool = false,
-        inPane pane: PaneID? = nil
+        inPane pane: PaneID? = nil,
+        select: Bool = true
     ) -> TabID? {
         let tabId = id ?? TabID()
         let tab = WorkspaceLayout.Tab(id: tabId, title: title, isPinned: isPinned)
@@ -2207,7 +2226,12 @@ final class WorkspaceLayoutController {
             title: title,
             isPinned: isPinned
         )
-        internalController.addTab(tabItem, toPane: PaneID(id: targetPane.id), atIndex: insertIndex)
+        internalController.addTab(
+            tabItem,
+            toPane: PaneID(id: targetPane.id),
+            atIndex: insertIndex,
+            select: select
+        )
 
         // Notify delegate
         delegate?.workspaceSplit(self, didCreateTab: tab, inPane: targetPane)
@@ -2394,12 +2418,14 @@ final class WorkspaceLayoutController {
     func splitPane(
         _ paneId: PaneID? = nil,
         orientation: SplitOrientation,
-        withTab tab: WorkspaceLayout.Tab? = nil
+        withTab tab: WorkspaceLayout.Tab? = nil,
+        focusNewPane: Bool = true
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
 
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId else { return nil }
+        let previousPaneIds = Set(internalController.rootNode.allPaneIds)
 
         // Check with delegate
         if delegate?.workspaceSplit(self, shouldSplitPane: targetPaneId, orientation: orientation) == false {
@@ -2421,11 +2447,13 @@ final class WorkspaceLayoutController {
         internalController.splitPane(
             PaneID(id: targetPaneId.id),
             orientation: orientation,
-            with: internalTab
+            with: internalTab,
+            focusNewPane: focusNewPane
         )
 
-        // Find new pane (will be focused after split)
-        let newPaneId = focusedPaneId!
+        let newPaneId = Set(internalController.rootNode.allPaneIds)
+            .subtracting(previousPaneIds)
+            .first ?? focusedPaneId!
 
         // Notify delegate
         delegate?.workspaceSplit(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
@@ -2451,12 +2479,14 @@ final class WorkspaceLayoutController {
         _ paneId: PaneID? = nil,
         orientation: SplitOrientation,
         withTab tab: WorkspaceLayout.Tab,
-        insertFirst: Bool
+        insertFirst: Bool,
+        focusNewPane: Bool = true
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
 
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId else { return nil }
+        let previousPaneIds = Set(internalController.rootNode.allPaneIds)
 
         // Check with delegate
         if delegate?.workspaceSplit(self, shouldSplitPane: targetPaneId, orientation: orientation) == false {
@@ -2474,10 +2504,13 @@ final class WorkspaceLayoutController {
             PaneID(id: targetPaneId.id),
             orientation: orientation,
             tab: internalTab,
-            insertFirst: insertFirst
+            insertFirst: insertFirst,
+            focusNewPane: focusNewPane
         )
 
-        let newPaneId = focusedPaneId!
+        let newPaneId = Set(internalController.rootNode.allPaneIds)
+            .subtracting(previousPaneIds)
+            .first ?? focusedPaneId!
 
         // Notify delegate
         delegate?.workspaceSplit(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
@@ -2504,9 +2537,11 @@ final class WorkspaceLayoutController {
         _ paneId: PaneID? = nil,
         orientation: SplitOrientation,
         movingTab tabId: TabID,
-        insertFirst: Bool
+        insertFirst: Bool,
+        focusNewPane: Bool = true
     ) -> PaneID? {
         guard configuration.allowSplits else { return nil }
+        let previousPaneIds = Set(internalController.rootNode.allPaneIds)
 
         // Find the existing tab and its source pane.
         guard let (sourcePane, tabIndex) = findTabInternal(tabId) else { return nil }
@@ -2540,10 +2575,13 @@ final class WorkspaceLayoutController {
             PaneID(id: targetPaneId.id),
             orientation: orientation,
             tab: tabItem,
-            insertFirst: insertFirst
+            insertFirst: insertFirst,
+            focusNewPane: focusNewPane
         )
 
-        let newPaneId = focusedPaneId!
+        let newPaneId = Set(internalController.rootNode.allPaneIds)
+            .subtracting(previousPaneIds)
+            .first ?? focusedPaneId!
 
         // Notify delegate
         delegate?.workspaceSplit(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
@@ -2783,8 +2821,9 @@ final class WorkspaceLayoutController {
         split.dividerPosition = clampedPosition
 
         if fromExternal {
-            // Use a slight delay to allow the UI to update before re-enabling notifications
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            // External restore/config loads should suppress only the immediate geometry echo
+            // from the same update turn, not an arbitrary timed window.
+            DispatchQueue.main.async { [weak self] in
                 self?.internalController.isExternalUpdateInProgress = false
             }
         }
@@ -2894,11 +2933,9 @@ struct WorkspaceLayoutView<Content: View, EmptyContent: View>: View {
             controller: controller,
             renderSnapshot: renderSnapshot,
             nativeContent: nativeContentBuilder,
-            tabChrome: tabChromeProvider,
             content: contentBuilder,
             emptyPane: emptyPaneBuilder,
             showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons,
-            contentViewLifecycle: controller.configuration.contentViewLifecycle,
             onGeometryChange: { [weak controller] isDragging in
                 controller?.notifyGeometryChange(isDragging: isDragging)
             }

@@ -4894,37 +4894,6 @@ extension BrowserPanel {
             "firstResponder=\(String(describing: window?.firstResponder))"
         )
 #endif
-        postBrowserSearchFocusNotification(reason: "immediate", generation: generation)
-        // Focus notification can race with portal overlay mount. Re-post on the
-        // next runloop and shortly after so the find field can claim first responder.
-        DispatchQueue.main.async { [weak self] in
-            self?.postBrowserSearchFocusNotification(reason: "async0", generation: generation)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.postBrowserSearchFocusNotification(reason: "async50ms", generation: generation)
-        }
-    }
-
-    private func postBrowserSearchFocusNotification(reason: String, generation: UInt64) {
-        guard canApplySearchFocusRequest(generation) else {
-#if DEBUG
-            dlog(
-                "browser.find.focusNotification.skip panel=\(id.uuidString.prefix(5)) " +
-                "reason=\(reason) generation=\(generation)"
-            )
-#endif
-            return
-        }
-#if DEBUG
-        let window = webView.window
-        dlog(
-            "browser.find.focusNotification panel=\(id.uuidString.prefix(5)) " +
-            "generation=\(generation) " +
-            "reason=\(reason) window=\(window?.windowNumber ?? -1) " +
-            "firstResponder=\(String(describing: window?.firstResponder))"
-        )
-#endif
-        NotificationCenter.default.post(name: .browserSearchFocus, object: id)
     }
 
     func findNext() {
@@ -4955,10 +4924,6 @@ extension BrowserPanel {
         if replaySearch, !state.needle.isEmpty {
             executeFindSearch(state.needle)
         }
-        postBrowserSearchFocusNotification(
-            reason: "restoreAfterNavigation",
-            generation: searchFocusRequestGeneration
-        )
     }
 
     private func executeFindSearch(_ needle: String) {
@@ -5710,7 +5675,19 @@ private extension BrowserPanel {
 }
 
 extension BrowserPanel {
-    func hideBrowserPortalView(source: String) {
+    func setBrowserPortalVisibility(
+        visibleInUI: Bool,
+        zPriority: Int,
+        source: String
+    ) {
+        BrowserWindowPortalRegistry.updateEntryVisibility(
+            for: webView,
+            visibleInUI: visibleInUI,
+            zPriority: zPriority
+        )
+        if visibleInUI {
+            return
+        }
         BrowserWindowPortalRegistry.hide(
             webView: webView,
             source: source

@@ -18,6 +18,25 @@ Implemented on `issue-2289-appkit-split-host`:
 - the layout host command and drag path now use typed `PanelType` surface kinds instead of raw `"terminal"` and `"browser"` strings
 - browser portal and visibility assumptions now sit behind a dedicated `BrowserPanelWorkspaceContentView` mounting adapter instead of leaking through `WorkspaceSplitNativeHost`
 - the keyboard/browser "insert at end" path now uses the correct reorder slot semantics, which restored the existing append-at-end invariant
+- workspace no longer runs a terminal geometry recovery loop after split, close, move, reorder, or zoom mutations, and the timer-based moved-terminal refresh path is gone
+- the dead `TerminalPanel.requestViewReattach()` abstraction is gone, so terminal geometry reconciliation now stays at the retained host layer instead of being driven from `Workspace`
+- browser portal teardown now happens at the retained browser host boundary, and the workspace-wide browser portal follow-up loop is gone
+- unfocused split and create commands now preserve pane focus and tab selection at the `WorkspaceLayoutController` boundary instead of mutating focus first and repairing it later
+- the old non-focus split reassert path is gone, so split/create command flow no longer depends on nested async focus retries
+- the AppKit host no longer self-observes layout state or re-computes snapshots internally, and now acts as a pure apply-the-provided-snapshot renderer
+- split zoom no longer recreates the entire workspace layout subtree just to clear stale chrome
+- terminal reparent focus suppression now clears from the retained host mount path, so the split path no longer uses a fixed 50 ms timing delay
+- browser find focus now relies on overlay mount/update state instead of repeated notification pulses
+- browser omnibar select-all now executes from the native text-field host instead of a timed retry pair
+- browser address-bar pending focus now resumes from command-palette visibility change signals instead of polling
+- browser portal presentation refresh now uses the same immediate-plus-next-runloop reattach shape as the local inline host, and the fixed 30 ms follow-up pass is gone
+- external divider updates in `WorkspaceSplit` now suppress only the immediate geometry echo instead of reopening notifications after a fixed 50 ms delay
+- browser import modal presentation now waits on popover dismissal state instead of a fixed 120 ms delay
+
+Current remaining work is validation, not more ownership surgery:
+
+- dogfood split, close, zoom, move, and browser cases against the tagged build
+- add or tighten behavior-level coverage where a deterministic harness exists
 
 `TabItem.title` remains intentionally as the serialized fallback title used by layout snapshots, placeholders, and export/debug paths. Runtime tab chrome truth no longer depends on it.
 
@@ -360,6 +379,28 @@ Remove:
 - `surfaceIdToPanelId` for normal layout operations
 - renderer-local type switches as the main content extension point
 - old observation-based rerender hooks that exist only to compensate for duplicated state
+
+### Phase 10. Preserve retained hosts across topology changes, completed
+
+Completed in this phase:
+
+- `WorkspaceLayoutRootHostView` no longer resets pane and split host caches when the split topology changes
+- pane-host cleanup now runs after every tree rebuild, so removed panes and splits still tear down cleanly without forcing surviving panes to remount
+- the unused `recreateOnSwitch` lifecycle mode was deleted, and the AppKit shell now always keeps pane content alive
+- the workspace-level terminal geometry recovery pass is deleted, so split, close, move, reorder, and zoom no longer force terminal reattach and refresh from `Workspace`
+- the timer-based moved-terminal refresh path is deleted, and debug-stress callers now reconcile geometry directly on the retained hosted view instead of going through workspace-owned reattach helpers
+- browser portal teardown and visibility repair now live at the retained browser host boundary instead of a workspace-owned follow-up loop
+
+### Phase 11. Delete repair loops and duplicate renderer observation, completed
+
+Completed in this phase:
+
+- unfocused split and create paths now express their focus intent at the layout-controller boundary instead of mutating focus and reasserting it later from `Workspace`
+- the old non-focus split reassert state machine is deleted
+- the workspace-wide event-driven layout follow-up loop is deleted
+- `WorkspaceLayoutRootHostView` no longer tracks nested mutable controller state on its own or re-projects snapshots internally
+- split zoom no longer recreates the entire workspace layout subtree
+- terminal reparent focus suppression now resumes from retained-host mount readiness instead of a fixed delay
 
 ## Browser and Future Surface Kinds
 

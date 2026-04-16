@@ -209,16 +209,9 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         var isProgrammaticMutation = false
         weak var parentField: BrowserSearchNativeTextField?
         var pendingFocusRequest: Bool?
-        var searchFocusObserver: NSObjectProtocol?
 
         init(parent: BrowserSearchTextFieldRepresentable) {
             self.parent = parent
-        }
-
-        deinit {
-            if let searchFocusObserver {
-                NotificationCenter.default.removeObserver(searchFocusObserver)
-            }
         }
 
         func focusField(_ field: BrowserSearchNativeTextField, in window: NSWindow) {
@@ -288,23 +281,6 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         field.isEnabled = true
         field.stringValue = text
         context.coordinator.parentField = field
-        context.coordinator.searchFocusObserver = NotificationCenter.default.addObserver(
-            forName: .browserSearchFocus,
-            object: nil,
-            queue: .main
-        ) { [weak field, weak coordinator = context.coordinator] notification in
-            guard let field, let coordinator else { return }
-            guard let notifiedPanelId = notification.object as? UUID,
-                  notifiedPanelId == coordinator.parent.panelId else { return }
-            guard coordinator.parent.canApplyFocusRequest(coordinator.parent.focusRequestGeneration) else { return }
-            guard let window = field.window else { return }
-            let fr = window.firstResponder
-            let alreadyFocused = fr === field ||
-                field.currentEditor() != nil ||
-                ((fr as? NSTextView)?.delegate as? NSTextField) === field
-            guard !alreadyFocused else { return }
-            coordinator.focusField(field, in: window)
-        }
         return field
     }
 
@@ -353,10 +329,6 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: BrowserSearchNativeTextField, coordinator: Coordinator) {
-        if let observer = coordinator.searchFocusObserver {
-            NotificationCenter.default.removeObserver(observer)
-            coordinator.searchFocusObserver = nil
-        }
         nsView.delegate = nil
         coordinator.parentField = nil
     }

@@ -299,7 +299,20 @@ struct WorkspaceContentView: View {
             controller: workspace.splitController,
             nativeContent: { tab, paneId in
                 let _ = Self.debugPanelLookup(tab: tab, workspace: workspace)
-                guard let panel = workspace.panel(for: tab.id) else { return nil }
+                guard let panel = workspace.panel(for: tab.id) else {
+#if DEBUG
+                    let selectedInPane = workspace.splitController.selectedTab(inPane: paneId)?.id == tab.id
+                    if selectedInPane {
+                        dlog(
+                            "close.blankstate.nativeContent.missingPanel ws=\(workspace.id.uuidString.prefix(5)) " +
+                            "pane=\(paneId.id.uuidString.prefix(5)) tab=\(tab.id.uuid.uuidString.prefix(5)) " +
+                            "focusedPanel=\(workspace.focusedPanelId?.uuidString.prefix(5) ?? "nil") " +
+                            "panels=\(workspace.panels.count)"
+                        )
+                    }
+#endif
+                    return nil
+                }
 
                 let isFocused = isWorkspaceInputActive && workspace.focusedPanelId == panel.id
                 let isSelectedInPane = workspace.splitController.selectedTab(inPane: paneId)?.id == tab.id
@@ -414,10 +427,6 @@ struct WorkspaceContentView: View {
                 }
         }
         .internalOnlyTabDrag()
-        // Split zoom swaps WorkspaceSplit between the full split tree and a single pane view.
-        // Recreate the WorkspaceSplit subtree on zoom enter/exit so stale pre-zoom pane chrome
-        // cannot remain stacked above portal-hosted browser content.
-        .id(splitZoomRenderIdentity)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             refreshGhosttyAppearanceConfig(reason: "onAppear")
@@ -480,10 +489,6 @@ struct WorkspaceContentView: View {
             )
             #endif
         }
-    }
-
-    private var splitZoomRenderIdentity: String {
-        workspace.splitController.zoomedPaneId.map { "zoom:\($0.id.uuidString)" } ?? "unzoomed"
     }
 
     private static let tmuxWorkspacePaneTopChromeHeight: CGFloat = 30

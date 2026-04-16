@@ -5662,6 +5662,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             )
         }
 #endif
+        if wasVisible != visible {
+            NotificationCenter.default.post(
+                name: .commandPaletteVisibilityDidChange,
+                object: window,
+                userInfo: ["visible": visible]
+            )
+        }
     }
 
     func isCommandPaletteVisible(windowId: UUID) -> Bool {
@@ -8291,7 +8298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
                 if shouldReconcileVisibleSelection {
                     target.workspace.scheduleDebugStressTerminalGeometryReconcile()
-                    terminalPanel.requestViewReattach()
+                    _ = hostedView.reconcileGeometryNow()
                 }
                 terminalPanel.surface.requestBackgroundSurfaceStartIfNeeded()
                 startedThisPass += 1

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
@@ -295,6 +296,35 @@ final class TabManagerWorkspaceOwnershipTests: XCTestCase {
         XCTAssertEqual(manager.selectedTabId, initialSelectedTabId)
         XCTAssertEqual(externalWorkspace.panels.count, externalPanelCountBefore)
         XCTAssertEqual(externalWorkspace.panelTitles, externalPanelTitlesBefore)
+    }
+
+    func testClosingSelectedWorkspacePublishesTabsAfterSelectionMovesToSurvivor() {
+        let manager = TabManager()
+        guard let firstWorkspace = manager.selectedWorkspace else {
+            XCTFail("Expected initial workspace")
+            return
+        }
+
+        let closingWorkspace = manager.addWorkspace()
+        XCTAssertEqual(manager.selectedTabId, closingWorkspace.id)
+
+        var tabsSnapshots: [([UUID], UUID?)] = []
+        let cancellable = manager.$tabs
+            .dropFirst()
+            .sink { newTabs in
+                tabsSnapshots.append((newTabs.map(\.id), manager.selectedTabId))
+            }
+
+        manager.closeWorkspace(closingWorkspace)
+        drainMainQueue()
+
+        XCTAssertEqual(manager.tabs.map(\.id), [firstWorkspace.id])
+        XCTAssertEqual(manager.selectedTabId, firstWorkspace.id)
+        XCTAssertEqual(tabsSnapshots.count, 1)
+        XCTAssertEqual(tabsSnapshots[0].0, [firstWorkspace.id])
+        XCTAssertEqual(tabsSnapshots[0].1, firstWorkspace.id)
+
+        withExtendedLifetime(cancellable) {}
     }
 }
 

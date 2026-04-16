@@ -8718,7 +8718,6 @@ extension Notification.Name {
     static let ghosttySearchFocus = Notification.Name("ghosttySearchFocus")
     static let ghosttyConfigDidReload = Notification.Name("ghosttyConfigDidReload")
     static let ghosttyDefaultBackgroundDidChange = Notification.Name("ghosttyDefaultBackgroundDidChange")
-    static let browserSearchFocus = Notification.Name("browserSearchFocus")
 }
 
 // MARK: - Scroll View Wrapper (Ghostty-style scrollbar)
@@ -10821,9 +10820,15 @@ final class GhosttySurfaceScrollView: NSView {
     }
 
     /// Suppress the surface view's onFocus callback and ghostty_surface_set_focus during
-    /// SwiftUI reparenting (programmatic splits). Call clearSuppressReparentFocus() after layout settles.
+    /// SwiftUI reparenting (programmatic splits). The retained host clears this once the
+    /// view is mounted into its next slot with usable geometry.
     func suppressReparentFocus() {
         surfaceView.suppressingReparentFocus = true
+    }
+
+    func resumeReparentFocusIfSuppressed() {
+        guard surfaceView.suppressingReparentFocus else { return }
+        clearSuppressReparentFocus()
     }
 
     func clearSuppressReparentFocus() {

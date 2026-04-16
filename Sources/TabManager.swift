@@ -3824,29 +3824,31 @@ class TabManager: ObservableObject {
     }
 
     func closeWorkspace(_ workspace: Workspace) {
-        guard tabs.count > 1 else { return }
+        guard tabs.count > 1,
+              let index = tabs.firstIndex(where: { $0.id == workspace.id }) else { return }
         sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
         clearWorkspaceGitProbes(workspaceId: workspace.id)
         clearWorkspacePullRequestTracking(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
 
-        AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
-        workspace.teardownAllPanels()
-        workspace.teardownRemoteConnection()
-        unwireClosedBrowserTracking(for: workspace)
-        workspace.owningTabManager = nil
-
-        if let index = tabs.firstIndex(where: { $0.id == workspace.id }) {
-            tabs.remove(at: index)
-
-            if selectedTabId == workspace.id {
-                // Keep the "focused index" stable when possible:
-                // - If we closed workspace i and there is still a workspace at index i, focus it (the one that moved up).
-                // - Otherwise (we closed the last workspace), focus the new last workspace (i-1).
-                let newIndex = min(index, max(0, tabs.count - 1))
-                selectedTabId = tabs[newIndex].id
-            }
+        if pendingWorkspaceUnfocusTarget?.tabId == workspace.id {
+            pendingWorkspaceUnfocusTarget = nil
         }
+
+        if selectedTabId == workspace.id {
+            let replacementId: UUID?
+            if index + 1 < tabs.count {
+                replacementId = tabs[index + 1].id
+            } else if index > 0 {
+                replacementId = tabs[index - 1].id
+            } else {
+                replacementId = nil
+            }
+            selectedTabId = replacementId
+        }
+
+        let removed = tabs.remove(at: index)
+        releaseClosedWorkspace(removed)
     }
 
     /// Detach a workspace from this window without closing its panels.
@@ -6918,6 +6920,15 @@ extension TabManager {
         workspace.owningTabManager = nil
     }
 
+    private func releaseClosedWorkspace(_ workspace: Workspace) {
+        AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
+        workspace.teardownAllPanels()
+        workspace.teardownRemoteConnection()
+        unwireClosedBrowserTracking(for: workspace)
+        workspace.owningTabManager = nil
+        lastFocusedPanelByTab.removeValue(forKey: workspace.id)
+    }
+
     func restoreSessionSnapshot(_ snapshot: SessionTabManagerSnapshot) {
 #if DEBUG
         startupLog(
@@ -7088,6 +7099,7 @@ extension Notification.Name {
     static let commandPaletteSwitcherRequested = Notification.Name("cmux.commandPaletteSwitcherRequested")
     static let commandPaletteSubmitRequested = Notification.Name("cmux.commandPaletteSubmitRequested")
     static let commandPaletteDismissRequested = Notification.Name("cmux.commandPaletteDismissRequested")
+    static let commandPaletteVisibilityDidChange = Notification.Name("cmux.commandPaletteVisibilityDidChange")
     static let commandPaletteRenameTabRequested = Notification.Name("cmux.commandPaletteRenameTabRequested")
     static let commandPaletteRenameWorkspaceRequested = Notification.Name("cmux.commandPaletteRenameWorkspaceRequested")
     static let commandPaletteEditWorkspaceDescriptionRequested = Notification.Name("cmux.commandPaletteEditWorkspaceDescriptionRequested")
@@ -7107,5 +7119,4 @@ extension Notification.Name {
     static let browserDidBlurAddressBar = Notification.Name("browserDidBlurAddressBar")
     static let webViewDidReceiveClick = Notification.Name("webViewDidReceiveClick")
     static let terminalPortalVisibilityDidChange = Notification.Name("cmux.terminalPortalVisibilityDidChange")
-    static let browserPortalRegistryDidChange = Notification.Name("cmux.browserPortalRegistryDidChange")
 }

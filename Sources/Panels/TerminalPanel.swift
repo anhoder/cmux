@@ -171,15 +171,6 @@ final class TerminalPanel: Panel, ObservableObject {
         surface.teardownSurface()
     }
 
-    func requestViewReattach() {
-        _ = hostedView.reconcileGeometryNow()
-        if surface.surface != nil {
-            surface.forceRefresh()
-        } else {
-            surface.requestBackgroundSurfaceStartIfNeeded()
-        }
-    }
-
     // MARK: - Terminal-specific methods
 
     func sendText(_ text: String) {

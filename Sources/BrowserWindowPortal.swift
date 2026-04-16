@@ -2134,7 +2134,6 @@ final class WindowBrowserPortal: NSObject {
     private struct PendingHostedWebViewRefresh {
         var generation: UInt64 = 0
         var asyncWorkItem: DispatchWorkItem?
-        var delayedWorkItem: DispatchWorkItem?
     }
 
     private var entriesByWebViewId: [ObjectIdentifier: Entry] = [:]
@@ -2766,10 +2765,8 @@ final class WindowBrowserPortal: NSObject {
     ) {
         guard var pending = pendingHostedWebViewRefreshes[webViewId] else { return }
         pending.asyncWorkItem?.cancel()
-        pending.delayedWorkItem?.cancel()
         if keepGeneration {
             pending.asyncWorkItem = nil
-            pending.delayedWorkItem = nil
             pendingHostedWebViewRefreshes[webViewId] = pending
         } else {
             pendingHostedWebViewRefreshes.removeValue(forKey: webViewId)
@@ -2799,8 +2796,8 @@ final class WindowBrowserPortal: NSObject {
         let webViewId = ObjectIdentifier(webView)
 
         // Bind/reveal/fullscreen refreshes can stack up during a single layout churn.
-        // Keep only the latest follow-up passes so reattach work does not pile up on
-        // the main thread while browser panes are moving between hosts.
+        // Keep only the latest next-runloop follow-up so reattach work does not pile
+        // up on the main thread while browser panes are moving between hosts.
         cancelPendingHostedWebViewRefreshes(for: webViewId, keepGeneration: true)
         var pending = pendingHostedWebViewRefreshes[webViewId] ?? PendingHostedWebViewRefresh()
         nextHostedWebViewRefreshGeneration &+= 1
@@ -2817,6 +2814,13 @@ final class WindowBrowserPortal: NSObject {
 
         let asyncWorkItem = DispatchWorkItem { [weak self, weak webView, weak containerView] in
             guard let self, let webView, let containerView else { return }
+            defer {
+                if var current = self.pendingHostedWebViewRefreshes[webViewId],
+                   current.generation == generation {
+                    current.asyncWorkItem = nil
+                    self.pendingHostedWebViewRefreshes[webViewId] = current
+                }
+            }
             guard self.pendingHostedWebViewRefreshes[webViewId]?.generation == generation else { return }
             self.runHostedWebViewRefreshPass(
                 webView,
@@ -2827,32 +2831,9 @@ final class WindowBrowserPortal: NSObject {
             )
         }
         pending.asyncWorkItem = asyncWorkItem
-
-        let delayedWorkItem = DispatchWorkItem { [weak self, weak webView, weak containerView] in
-            guard let self else { return }
-            defer {
-                if var current = self.pendingHostedWebViewRefreshes[webViewId],
-                   current.generation == generation {
-                    current.asyncWorkItem = nil
-                    current.delayedWorkItem = nil
-                    self.pendingHostedWebViewRefreshes[webViewId] = current
-                }
-            }
-            guard let webView, let containerView else { return }
-            guard self.pendingHostedWebViewRefreshes[webViewId]?.generation == generation else { return }
-            self.runHostedWebViewRefreshPass(
-                webView,
-                in: containerView,
-                reason: reason,
-                phase: "delayed",
-                reattachRenderingState: true
-            )
-        }
-        pending.delayedWorkItem = delayedWorkItem
         pendingHostedWebViewRefreshes[webViewId] = pending
 
         DispatchQueue.main.async(execute: asyncWorkItem)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: delayedWorkItem)
     }
 
     private enum HostedWebViewPresentationUpdateKind {
@@ -3958,7 +3939,6 @@ enum BrowserWindowPortalRegistry {
     private static var webViewToWindowId: [ObjectIdentifier: ObjectIdentifier] = [:]
 
     private static func postRegistryDidChange(for webView: WKWebView) {
-        NotificationCenter.default.post(name: .browserPortalRegistryDidChange, object: webView)
     }
 
     private static func installWindowCloseObserverIfNeeded(for window: NSWindow) {
