@@ -428,10 +428,12 @@ struct LiveAnchormuxConfig: Equatable, Sendable {
     }
 }
 
-final class LiveAnchormuxConfigStore: ObservableObject {
+@Observable
+final class LiveAnchormuxConfigStore {
+    @ObservationIgnored
     private static let watcherQueue = DispatchQueue(label: "LiveAnchormuxConfigStore.watcher")
 
-    @Published private(set) var config: LiveAnchormuxConfig
+    private(set) var config: LiveAnchormuxConfig
 
     private let fileManager: FileManager
     private var watchedPath: String?
@@ -951,13 +953,13 @@ struct LiveAnchormuxFixtureView: View {
         defaultValue: "Open a desktop workspace first."
     )
 
-    @StateObject private var configStore: LiveAnchormuxConfigStore
+    @State private var configStore: LiveAnchormuxConfigStore
     @StateObject private var terminalStore: TerminalSidebarStore
     @State private var navigationPath = NavigationPath()
     @State private var didAutoOpen = false
 
     init(config: LiveAnchormuxConfig) {
-        _configStore = StateObject(
+        _configStore = State(
             wrappedValue: LiveAnchormuxConfigStore(config: config)
         )
         let snapshot = TerminalStoreSnapshot.empty()

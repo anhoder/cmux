@@ -38,15 +38,6 @@ iOS reload from this dir:
 cd ios && ./scripts/reload.sh
 ```
 
-If you see `error: There is no XCFramework found at .../TailscaleKit.xcframework`,
-the `vendor/libtailscale` submodule isn't built in this worktree. Build
-it once per worktree before iOS reload works:
-
-```bash
-git submodule update --init --recursive vendor/libtailscale
-cd vendor/libtailscale/swift && ./build.sh   # check exact path/script in vendor/libtailscale
-```
-
 Always state explicitly in chat handoff which surfaces were reloaded:
 "Reloaded mac (tag: <slug>) and iOS simulator. iPhone unavailable." —
 never let the user guess.
