@@ -135,7 +135,11 @@ The replacement owns all behavior inside a workspace content area:
 - Horizontal means side-by-side, first pane on the left and second pane on the right.
 - Vertical means stacked, first pane on top and second pane on bottom.
 - New user-created splits begin at a `0.5` divider ratio.
-- Programmatic divider updates clamp to the inclusive range `0.1...0.9`.
+- Programmatic divider updates clamp by both ratio and absolute pane minimum.
+- Ratio clamp remains `0.1...0.9`.
+- Absolute clamp enforces the current pane minimum width and height of `100` points.
+- Effective divider bounds are `max(0.1, 100 / axisLength)...min(0.9, 1 - 100 / axisLength)` when axis length permits.
+- If axis length cannot satisfy two 100-point panes, the divider clamps to the closest valid value and pane minimum wins over ratio.
 - Divider movement updates geometry snapshots and layout persistence.
 - Closing a pane collapses the tree by promoting its sibling.
 - After pane close, focus moves to the surviving sibling when possible, otherwise the first remaining pane.
@@ -193,6 +197,7 @@ The replacement owns all behavior inside a workspace content area:
 ## Persistence Contract
 
 - Session snapshots preserve workspace title, custom title, custom color, pinned state, current directory, focused panel, split tree, divider positions, pane membership, selected panel per pane, panel metadata, status entries, log entries, progress, and git-branch state.
+- Session snapshots preserve workspace ID so automation references and restore mapping remain stable.
 - Terminal panel snapshots preserve working directory and eligible scrollback.
 - Browser panel snapshots preserve URL, profile, page zoom, developer-tools visibility, render intent, and back and forward history.
 - Markdown panel snapshots preserve file path.

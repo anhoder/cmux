@@ -282,10 +282,10 @@ struct WorkspaceLayoutConfiguration: Sendable {
         static let `default` = SplitButtonTooltips()
 
         init(
-            newTerminal: String = "New Terminal",
-            newBrowser: String = "New Browser",
-            splitRight: String = "Split Right",
-            splitDown: String = "Split Down"
+            newTerminal: String = String(localized: "workspace.tooltip.newTerminal", defaultValue: "New Terminal"),
+            newBrowser: String = String(localized: "workspace.tooltip.newBrowser", defaultValue: "New Browser"),
+            splitRight: String = String(localized: "workspace.tooltip.splitRight", defaultValue: "Split Right"),
+            splitDown: String = String(localized: "workspace.tooltip.splitDown", defaultValue: "Split Down")
         ) {
             self.newTerminal = newTerminal
             self.newBrowser = newBrowser

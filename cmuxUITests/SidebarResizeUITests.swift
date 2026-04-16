@@ -8,7 +8,10 @@ final class SidebarResizeUITests: XCTestCase {
 
     func testSidebarResizerTracksCursor() {
         let app = XCUIApplication()
-        launchAndAllowBackground(app)
+        XCTAssertTrue(
+            launchAndAllowBackground(app),
+            "Expected app to launch and reach foreground before resizing sidebar"
+        )
 
         let elements = app.descendants(matching: .any)
         let resizer = elements["SidebarResizer"]
@@ -39,7 +42,10 @@ final class SidebarResizeUITests: XCTestCase {
 
     func testSidebarResizerAllowsSmallerMinimumWidth() {
         let app = XCUIApplication()
-        launchAndAllowBackground(app)
+        XCTAssertTrue(
+            launchAndAllowBackground(app),
+            "Expected app to launch and reach foreground before resizing sidebar"
+        )
 
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 5.0))
@@ -63,7 +69,10 @@ final class SidebarResizeUITests: XCTestCase {
 
     func testSidebarResizerHasMaximumWidthCap() {
         let app = XCUIApplication()
-        launchAndAllowBackground(app)
+        XCTAssertTrue(
+            launchAndAllowBackground(app),
+            "Expected app to launch and reach foreground before resizing sidebar"
+        )
 
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 5.0))
@@ -101,7 +110,7 @@ final class SidebarResizeUITests: XCTestCase {
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 
-    private func launchAndAllowBackground(_ app: XCUIApplication) {
+    private func launchAndAllowBackground(_ app: XCUIApplication) -> Bool {
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
 
         let options = XCTExpectedFailure.Options()
@@ -112,6 +121,8 @@ final class SidebarResizeUITests: XCTestCase {
 
         if app.state == .runningBackground {
             app.activate()
+            return app.wait(for: .runningForeground, timeout: 5.0)
         }
+        return app.state == .runningForeground || app.wait(for: .runningForeground, timeout: 5.0)
     }
 }
