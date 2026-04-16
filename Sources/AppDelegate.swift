@@ -2224,8 +2224,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private nonisolated(unsafe) static var sessionSnapshotDirtyRequestMirrorIsDirty = false
     private nonisolated(unsafe) static var sessionSnapshotDirtyRequestWriteInFlight = false
     private nonisolated(unsafe) static var sessionSnapshotDirtyRequestLatestReason = "unspecified"
+#if DEBUG
+    nonisolated(unsafe) static var sessionSnapshotDirtyRequestObserverForTesting: ((String) -> Void)?
+#endif
 
     nonisolated static func requestSessionSnapshotDirty(reason: String) {
+#if DEBUG
+        sessionSnapshotDirtyRequestObserverForTesting?(reason)
+#endif
         guard beginSessionSnapshotDirtyRequest(reason: reason) else { return }
         Task { @MainActor in
             let pendingReason = takeSessionSnapshotDirtyRequestReason()

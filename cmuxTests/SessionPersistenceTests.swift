@@ -1,4 +1,5 @@
 import XCTest
+@testable import Bonsplit
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -97,6 +98,29 @@ final class SessionPersistenceTests: XCTestCase {
 
         workspace.remoteConfiguration = nil
         XCTAssertEqual(tabManager.sessionSnapshot(includeScrollback: false).workspaces.count, 1)
+    }
+
+    @MainActor
+    func testDirectBonsplitSamePaneReorderMarksSessionDirty() throws {
+        let workspace = Workspace()
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        _ = try XCTUnwrap(workspace.newTerminalSurface(inPane: paneId, focus: false))
+
+        let pane = try XCTUnwrap(workspace.bonsplitController.internalController.rootNode.findPane(paneId))
+        let originalOrder = pane.tabs.map(\.id)
+        XCTAssertEqual(originalOrder.count, 2)
+
+        let dirtyExpectation = expectation(description: "session dirty after same-pane bonsplit reorder")
+        AppDelegate.sessionSnapshotDirtyRequestObserverForTesting = { reason in
+            guard reason == "workspace.bonsplitTabOrder" else { return }
+            dirtyExpectation.fulfill()
+        }
+        defer { AppDelegate.sessionSnapshotDirtyRequestObserverForTesting = nil }
+
+        pane.moveTab(from: 0, to: 2)
+
+        wait(for: [dirtyExpectation], timeout: 1.0)
+        XCTAssertEqual(pane.tabs.map(\.id), [originalOrder[1], originalOrder[0]])
     }
 
     func testSaveAndLoadRoundTripWithCustomSnapshotPath() throws {

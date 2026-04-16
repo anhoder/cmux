@@ -3,6 +3,7 @@ import SwiftUI
 import AppKit
 import Bonsplit
 import Combine
+import Observation
 import CryptoKit
 import Darwin
 import Network
@@ -6504,6 +6505,11 @@ struct ClosedBrowserPanelRestoreSnapshot {
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 @MainActor
 final class Workspace: Identifiable, ObservableObject {
+    private struct SessionPaneTabOrderSnapshot: Equatable {
+        let paneId: String
+        let tabIds: [String]
+    }
+
     static let terminalScrollBarHiddenDidChangeNotification = Notification.Name(
         "cmux.workspaceTerminalScrollBarHiddenDidChange"
     )
@@ -6547,9 +6553,44 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
     private(set) var preferredBrowserProfileID: UUID?
+    private var observedSessionPaneTabOrderSnapshot: [SessionPaneTabOrderSnapshot] = []
 
     private func markSessionSnapshotDirty(reason: String) {
         AppDelegate.requestSessionSnapshotDirty(reason: "workspace.\(reason)")
+    }
+
+    private func currentSessionPaneTabOrderSnapshot() -> [SessionPaneTabOrderSnapshot] {
+        bonsplitController.layoutSnapshot().panes.map { pane in
+            SessionPaneTabOrderSnapshot(paneId: pane.paneId, tabIds: pane.tabIds)
+        }
+    }
+
+    private func installSessionPaneTabOrderObserver() {
+        observedSessionPaneTabOrderSnapshot = currentSessionPaneTabOrderSnapshot()
+        observeSessionPaneTabOrderChanges()
+    }
+
+    private func observeSessionPaneTabOrderChanges() {
+        _ = withObservationTracking {
+            currentSessionPaneTabOrderSnapshot()
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.handleSessionPaneTabOrderChange()
+            }
+        }
+    }
+
+    private func handleSessionPaneTabOrderChange() {
+        let previousSnapshot = observedSessionPaneTabOrderSnapshot
+        let nextSnapshot = currentSessionPaneTabOrderSnapshot()
+        observedSessionPaneTabOrderSnapshot = nextSnapshot
+        observeSessionPaneTabOrderChanges()
+
+        guard nextSnapshot != previousSnapshot else { return }
+
+        // Same-pane tab drags inside Bonsplit can reorder tabs without going through
+        // Workspace.reorderSurface or Bonsplit's geometry delegate callback.
+        markSessionSnapshotDirty(reason: "bonsplitTabOrder")
     }
 
     /// Ordinal for CMUX_PORT range assignment (monotonically increasing per app session)
@@ -7098,6 +7139,7 @@ final class Workspace: Identifiable, ObservableObject {
             bonsplitController.selectTab(initialTabId)
         }
         tmuxLayoutSnapshot = bonsplitController.layoutSnapshot()
+        installSessionPaneTabOrderObserver()
     }
 
     deinit {
