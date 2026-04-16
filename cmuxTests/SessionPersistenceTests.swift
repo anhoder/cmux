@@ -23,7 +23,7 @@ final class SessionPersistenceTests: XCTestCase {
         try "# hello\n".write(to: markdownURL, atomically: true, encoding: .utf8)
 
         let workspace = Workspace()
-        let paneId = try XCTUnwrap(workspace.splitController.allPaneIds.first)
+        let paneId = try XCTUnwrap(workspace.paneIds.first)
         let panel = try XCTUnwrap(
             workspace.createMarkdownPanel(
                 inPane: paneId,

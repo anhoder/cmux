@@ -661,7 +661,7 @@ extension Workspace {
     }
 
     func sessionSnapshot(includeScrollback: Bool) -> SessionWorkspaceSnapshot {
-        let tree = splitController.treeSnapshot()
+        let tree = treeSnapshot()
         let layout = sessionLayoutSnapshot(from: tree)
 
         let orderedPanelIds = sidebarOrderedPanelIds()
@@ -752,7 +752,7 @@ extension Workspace {
         }
 
         pruneSurfaceMetadata(validSurfaceIds: Set(panels.keys))
-        applySessionDividerPositions(snapshotNode: snapshot.layout, liveNode: splitController.treeSnapshot())
+        applySessionDividerPositions(snapshotNode: snapshot.layout, liveNode: treeSnapshot())
 
         applyProcessTitle(snapshot.processTitle)
         setCustomTitle(snapshot.customTitle)
@@ -972,10 +972,7 @@ extension Workspace {
         case .pane(let pane):
             leaves.append(SessionPaneRestoreEntry(paneId: paneId, snapshot: pane))
         case .split(let split):
-            var anchorPanelId = splitController
-                .tabs(inPane: paneId)
-                .compactMap { panel(for: $0.id)?.id }
-                .first
+            var anchorPanelId = surfaceIds(inPane: paneId).first
 
             if anchorPanelId == nil {
                 anchorPanelId = createTerminalPanel(inPane: paneId, focus: false)?.id
@@ -1009,9 +1006,7 @@ extension Workspace {
         panelSnapshotsById: [UUID: SessionPanelSnapshot],
         oldToNewPanelIds: inout [UUID: UUID]
     ) {
-        let existingPanelIds = splitController
-            .tabs(inPane: paneId)
-            .compactMap { panel(for: $0.id)?.id }
+        let existingPanelIds = surfaceIds(inPane: paneId)
         let desiredOldPanelIds = snapshot.panelIds.filter { panelSnapshotsById[$0] != nil }
 #if DEBUG
         startupLog(
@@ -1219,8 +1214,8 @@ extension Workspace {
         switch (snapshotNode, liveNode) {
         case (.split(let snapshotSplit), .split(let liveSplit)):
             if let splitID = UUID(uuidString: liveSplit.id) {
-                _ = splitController.setDividerPosition(
-                    CGFloat(snapshotSplit.dividerPosition),
+                _ = setDividerPosition(
+                    snapshotSplit.dividerPosition,
                     forSplit: splitID,
                     fromExternal: true
                 )
@@ -1251,7 +1246,7 @@ extension Workspace {
             populateCustomPane(leaf.paneId, surfaces: leaf.surfaces, baseCwd: baseCwd, focusPanelId: &focusPanelId)
         }
 
-        let liveRoot = splitController.treeSnapshot()
+        let liveRoot = treeSnapshot()
         applyCustomDividerPositions(configNode: layout, liveNode: liveRoot)
 
         if let focusPanelId {
@@ -1275,10 +1270,7 @@ extension Workspace {
                 return
             }
 
-            var anchorPanelId = splitController
-                .tabs(inPane: paneId)
-                .compactMap { panel(for: $0.id)?.id }
-                .first
+            var anchorPanelId = surfaceIds(inPane: paneId).first
 
             if anchorPanelId == nil {
                 anchorPanelId = createTerminalPanel(inPane: paneId, focus: false)?.id
@@ -1307,9 +1299,7 @@ extension Workspace {
         baseCwd: String,
         focusPanelId: inout UUID?
     ) {
-        let existingPanelIds = splitController
-            .tabs(inPane: paneId)
-            .compactMap { panel(for: $0.id)?.id }
+        let existingPanelIds = surfaceIds(inPane: paneId)
 
         guard !surfaces.isEmpty else { return }
 
@@ -1410,8 +1400,8 @@ extension Workspace {
         switch (configNode, liveNode) {
         case (.split(let configSplit), .split(let liveSplit)):
             if let splitID = UUID(uuidString: liveSplit.id) {
-                _ = splitController.setDividerPosition(
-                    CGFloat(configSplit.clampedSplitPosition),
+                _ = setDividerPosition(
+                    configSplit.clampedSplitPosition,
                     forSplit: splitID,
                     fromExternal: true
                 )
@@ -7004,11 +6994,11 @@ final class Workspace: Identifiable, ObservableObject {
     /// The currently focused pane's panel ID
     var focusedPanelId: UUID? {
         guard let paneId = splitController.focusedPaneId,
-              let tab = splitController.selectedTab(inPane: paneId),
-              panels[tab.id.id] != nil else {
+              let tabId = splitController.selectedTabId(inPane: paneId),
+              panels[tabId.id] != nil else {
             return nil
         }
-        return tab.id.id
+        return tabId.id
     }
 
     /// The currently focused terminal panel (if any)
@@ -7021,7 +7011,7 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func effectiveSelectedPanelId(inPane paneId: PaneID) -> UUID? {
-        guard let surfaceId = splitController.selectedTab(inPane: paneId)?.id,
+        guard let surfaceId = splitController.selectedTabId(inPane: paneId),
               panels[surfaceId.id] != nil else {
             return nil
         }
@@ -7402,9 +7392,9 @@ final class Workspace: Identifiable, ObservableObject {
         )
         self.splitController = WorkspaceLayoutController(configuration: config)
         splitController.contextMenuShortcuts = Self.buildContextMenuShortcuts()
-
-        // Remove the default "Welcome" tab that WorkspaceSplit creates
-        let welcomeTabIds = splitController.allTabIds
+        splitController.onGeometryChanged = { [weak self] snapshot in
+            self?.publishGeometrySnapshot(snapshot)
+        }
 
         // Create initial terminal panel
         let terminalPanel = TerminalPanel(
@@ -7431,21 +7421,6 @@ final class Workspace: Identifiable, ObservableObject {
             initialTabId = tabId
         }
 
-        // Close the default Welcome tab(s)
-        for welcomeTabId in welcomeTabIds {
-            splitController.closeTab(welcomeTabId)
-        }
-
-        splitController.onExternalTabDrop = { [weak self] request in
-            self?.handleExternalTabDrop(request) ?? false
-        }
-        splitController.onFileDrop = { [weak self] urls, paneId in
-            self?.handlePaneFileDrop(urls: urls, in: paneId) ?? false
-        }
-        splitController.onTabCloseRequest = { [weak self] tabId, _ in
-            self?.markExplicitClose(surfaceId: tabId)
-        }
-
         // Set ourselves as delegate
         splitController.delegate = self
 
@@ -7456,7 +7431,7 @@ final class Workspace: Identifiable, ObservableObject {
             // Focus the pane containing the initial tab (or the first pane as fallback).
             let paneToFocus: PaneID? = {
                 for paneId in splitController.allPaneIds {
-                    if splitController.tabs(inPane: paneId).contains(where: { $0.id == initialTabId }) {
+                    if splitController.tabIds(inPane: paneId).contains(initialTabId) {
                         return paneId
                     }
                 }
@@ -7467,11 +7442,11 @@ final class Workspace: Identifiable, ObservableObject {
             }
             splitController.selectTab(initialTabId)
         }
-        tmuxLayoutSnapshot = splitController.layoutSnapshot()
+        publishGeometrySnapshot(splitController.layoutSnapshot())
     }
 
     private func handlePaneFileDrop(urls: [URL], in paneId: PaneID) -> Bool {
-        guard let tabId = splitController.selectedTab(inPane: paneId)?.id,
+        guard let tabId = splitController.selectedTabId(inPane: paneId),
               let panel = terminalPanel(for: tabId) else {
             return false
         }
@@ -7722,8 +7697,254 @@ final class Workspace: Identifiable, ObservableObject {
         panels[surfaceId.id] != nil
     }
 
+    var paneIds: [PaneID] {
+        splitController.allPaneIds
+    }
+
+    var paneCount: Int {
+        paneIds.count
+    }
+
+    var focusedPaneId: PaneID? {
+        splitController.focusedPaneId
+    }
+
+    var isSplitZoomed: Bool {
+        splitController.isSplitZoomed
+    }
+
+    var zoomedPaneId: PaneID? {
+        splitController.zoomedPaneId
+    }
+
+    var tabBarLeadingInset: CGFloat {
+        get { splitController.configuration.appearance.tabBarLeadingInset }
+        set {
+            var configuration = splitController.configuration
+            guard configuration.appearance.tabBarLeadingInset != newValue else { return }
+            configuration.appearance.tabBarLeadingInset = newValue
+            splitController.configuration = configuration
+        }
+    }
+
+    var showsSplitButtons: Bool {
+        splitController.configuration.allowSplits &&
+            splitController.configuration.appearance.showSplitButtons
+    }
+
+    var chromeBackgroundHex: String? {
+        splitController.configuration.appearance.chromeColors.backgroundHex
+    }
+
+    func containsPane(_ paneId: PaneID) -> Bool {
+        paneIds.contains(paneId)
+    }
+
+    func paneId(uuid: UUID) -> PaneID? {
+        paneIds.first(where: { $0.id == uuid })
+    }
+
+    @discardableResult
+    func setDividerPosition(
+        _ position: Double,
+        forSplit splitId: UUID,
+        fromExternal: Bool = false
+    ) -> Bool {
+        let didSet = splitController.setDividerPosition(position, forSplit: splitId, fromExternal: fromExternal)
+        if didSet {
+            publishGeometrySnapshot(splitController.layoutSnapshot())
+        }
+        return didSet
+    }
+
+    func consumeSplitEntryAnimation(_ splitId: UUID) {
+        splitController.consumeSplitEntryAnimation(splitId)
+    }
+
+    var allSurfaceIds: [UUID] {
+        paneIds.flatMap { surfaceIds(inPane: $0) }
+    }
+
+    func surfaceIds(inPane paneId: PaneID) -> [UUID] {
+        splitController.tabIds(inPane: paneId).compactMap { surfaceId in
+            panels[surfaceId.id] != nil ? surfaceId.id : nil
+        }
+    }
+
+    func selectedSurfaceId(inPane paneId: PaneID) -> UUID? {
+        guard let surfaceId = splitController.selectedTabId(inPane: paneId),
+              panels[surfaceId.id] != nil else {
+            return nil
+        }
+        return surfaceId.id
+    }
+
+    func containsSurface(_ panelId: UUID, inPane paneId: PaneID) -> Bool {
+        surfaceIds(inPane: paneId).contains(panelId)
+    }
+
+    @discardableResult
+    func focusPane(_ paneId: PaneID) -> Bool {
+        guard containsPane(paneId) else { return false }
+        splitController.focusPane(paneId)
+        if let selectedSurfaceId = selectedSurfaceId(inPane: paneId) {
+            focusPanel(selectedSurfaceId)
+        } else {
+            scheduleFocusReconcile()
+        }
+        return true
+    }
+
+    @discardableResult
+    func selectSurface(_ panelId: UUID) -> Bool {
+        guard panels[panelId] != nil else { return false }
+        focusPanel(panelId)
+        return true
+    }
+
+    func layoutSnapshot() -> LayoutSnapshot {
+        splitController.layoutSnapshot()
+    }
+
+    private func publishGeometrySnapshot(_ snapshot: LayoutSnapshot) {
+        tmuxLayoutSnapshot = snapshot
+        if !isDetachingCloseTransaction {
+            scheduleFocusReconcile()
+        }
+    }
+
+    func treeSnapshot() -> ExternalTreeNode {
+        buildExternalTreeSnapshot(
+            from: splitController.rootNode,
+            containerFrame: splitController.containerFrame
+        )
+    }
+
+    @discardableResult
+    func equalizeSplits(orientationFilter: String? = nil) -> Bool {
+        equalizeSplits(node: treeSnapshot(), orientationFilter: orientationFilter)
+    }
+
+#if DEBUG
+    func setLayoutDelegateForTesting(_ delegate: WorkspaceLayoutDelegate?) {
+        splitController.delegate = delegate ?? self
+    }
+#endif
+
     private func surfaceKind(for panel: any Panel) -> PanelType {
         panel.panelType
+    }
+
+    private func buildExternalTreeSnapshot(
+        from node: SplitNode,
+        containerFrame: CGRect,
+        bounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    ) -> ExternalTreeNode {
+        switch node {
+        case .pane(let paneState):
+            let pixelFrame = PixelRect(
+                x: Double(bounds.minX * containerFrame.width + containerFrame.origin.x),
+                y: Double(bounds.minY * containerFrame.height + containerFrame.origin.y),
+                width: Double(bounds.width * containerFrame.width),
+                height: Double(bounds.height * containerFrame.height)
+            )
+            let tabs = paneState.tabIds.map { tabId in
+                let resolvedTabId = TabID(id: tabId)
+                let title = layoutTabSnapshot(for: resolvedTabId)?.title ?? "Tab"
+                return ExternalTab(id: tabId.uuidString, title: title)
+            }
+            return .pane(
+                ExternalPaneNode(
+                    id: paneState.id.id.uuidString,
+                    frame: pixelFrame,
+                    tabs: tabs,
+                    selectedTabId: paneState.selectedTabId?.uuidString
+                )
+            )
+
+        case .split(let splitState):
+            let dividerPos = splitState.dividerPosition
+            let firstBounds: CGRect
+            let secondBounds: CGRect
+
+            switch splitState.orientation {
+            case .horizontal:
+                firstBounds = CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY,
+                    width: bounds.width * dividerPos,
+                    height: bounds.height
+                )
+                secondBounds = CGRect(
+                    x: bounds.minX + bounds.width * dividerPos,
+                    y: bounds.minY,
+                    width: bounds.width * (1 - dividerPos),
+                    height: bounds.height
+                )
+            case .vertical:
+                firstBounds = CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY,
+                    width: bounds.width,
+                    height: bounds.height * dividerPos
+                )
+                secondBounds = CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY + bounds.height * dividerPos,
+                    width: bounds.width,
+                    height: bounds.height * (1 - dividerPos)
+                )
+            }
+
+            return .split(
+                ExternalSplitNode(
+                    id: splitState.id.uuidString,
+                    orientation: splitState.orientation.rawValue,
+                    dividerPosition: Double(splitState.dividerPosition),
+                    first: buildExternalTreeSnapshot(
+                        from: splitState.first,
+                        containerFrame: containerFrame,
+                        bounds: firstBounds
+                    ),
+                    second: buildExternalTreeSnapshot(
+                        from: splitState.second,
+                        containerFrame: containerFrame,
+                        bounds: secondBounds
+                    )
+                )
+            )
+        }
+    }
+
+    @discardableResult
+    private func equalizeSplits(node: ExternalTreeNode, orientationFilter: String?) -> Bool {
+        guard case .split(let split) = node,
+              let splitId = UUID(uuidString: split.id) else {
+            return false
+        }
+
+        var didEqualize = false
+        if orientationFilter == nil || split.orientation == orientationFilter {
+            let firstLeaves = countPaneLeaves(in: split.first)
+            let secondLeaves = countPaneLeaves(in: split.second)
+            let totalLeaves = firstLeaves + secondLeaves
+            let position = CGFloat(firstLeaves) / CGFloat(totalLeaves)
+            setDividerPosition(position, forSplit: splitId, fromExternal: true)
+            didEqualize = true
+        }
+
+        let firstChanged = equalizeSplits(node: split.first, orientationFilter: orientationFilter)
+        let secondChanged = equalizeSplits(node: split.second, orientationFilter: orientationFilter)
+        return didEqualize || firstChanged || secondChanged
+    }
+
+    private func countPaneLeaves(in node: ExternalTreeNode) -> Int {
+        switch node {
+        case .pane:
+            return 1
+        case .split(let split):
+            return countPaneLeaves(in: split.first) + countPaneLeaves(in: split.second)
+        }
     }
 
     private func resolvedPanelTitle(panelId: UUID, fallback: String) -> String {
@@ -7734,6 +7955,48 @@ final class Workspace: Identifiable, ObservableObject {
             return custom
         }
         return fallbackTitle
+    }
+
+    private func layoutTabSnapshot(for tabId: TabID) -> WorkspaceLayout.Tab? {
+        let panelId = tabId.id
+        guard let panel = panels[panelId] else { return nil }
+
+        let surfaceState = surfaceStateSnapshot(panelId: panelId)
+        let fallbackTitle = surfaceState.title ?? panel.displayTitle
+        return WorkspaceLayout.Tab(
+            id: tabId,
+            title: resolvedPanelTitle(panelId: panelId, fallback: fallbackTitle),
+            isPinned: surfaceState.isPinned
+        )
+    }
+
+    private func tabChromeProjectionEntry(
+        for panelId: UUID,
+        notificationStore: TerminalNotificationStore?
+    ) -> WorkspaceTabChromeProjectionState.Entry? {
+        guard let panel = panels[panelId] else { return nil }
+
+        let surfaceState = surfaceStateSnapshot(panelId: panelId)
+        let fallbackTitle = surfaceState.title ?? panel.displayTitle
+        let browserState = surfaceState.browserTabChromeState
+        let store = notificationStore ?? AppDelegate.shared?.notificationStore
+        let hasUnreadNotification =
+            store?.hasVisibleNotificationIndicator(forTabId: id, surfaceId: panelId) ?? false
+
+        return WorkspaceTabChromeProjectionState.Entry(
+            title: resolvedPanelTitle(panelId: panelId, fallback: fallbackTitle),
+            hasCustomTitle: surfaceState.customTitle != nil,
+            icon: panel.displayIcon,
+            iconImageData: browserState?.iconImageData,
+            kind: surfaceKind(for: panel),
+            isDirty: panel.isDirty,
+            showsNotificationBadge: Self.shouldShowUnreadIndicator(
+                hasUnreadNotification: hasUnreadNotification,
+                isManuallyUnread: surfaceState.isManuallyUnread
+            ),
+            isLoading: browserState?.isLoading ?? false,
+            isPinned: surfaceState.isPinned
+        )
     }
 
     private func syncPinnedStateForTab(_ tabId: TabID, panelId: UUID) {
@@ -7787,29 +8050,29 @@ final class Workspace: Identifiable, ObservableObject {
         isNormalizingPinnedTabOrder = true
         defer { isNormalizingPinnedTabOrder = false }
 
-        let tabs = splitController.tabs(inPane: paneId)
-        let pinnedTabs = tabs.filter { surfaceStateSnapshot(panelId: $0.id.id).isPinned }
-        let unpinnedTabs = tabs.filter { !surfaceStateSnapshot(panelId: $0.id.id).isPinned }
-        let desiredOrder = pinnedTabs + unpinnedTabs
+        let paneSurfaceIds = surfaceIds(inPane: paneId)
+        let pinnedSurfaceIds = paneSurfaceIds.filter { surfaceStateSnapshot(panelId: $0).isPinned }
+        let unpinnedSurfaceIds = paneSurfaceIds.filter { !surfaceStateSnapshot(panelId: $0).isPinned }
+        let desiredOrder = pinnedSurfaceIds + unpinnedSurfaceIds
 
-        for (index, desiredTab) in desiredOrder.enumerated() {
-            let currentTabs = splitController.tabs(inPane: paneId)
-            guard let currentIndex = currentTabs.firstIndex(where: { $0.id == desiredTab.id }) else { continue }
+        for (index, desiredSurfaceId) in desiredOrder.enumerated() {
+            let currentSurfaceIds = surfaceIds(inPane: paneId)
+            guard let currentIndex = currentSurfaceIds.firstIndex(of: desiredSurfaceId) else { continue }
             if currentIndex != index {
-                _ = splitController.reorderTab(desiredTab.id, toIndex: index)
+                _ = splitController.reorderTab(TabID(id: desiredSurfaceId), toIndex: index)
             }
         }
     }
 
     private func insertionIndexToRight(of anchorTabId: TabID, inPane paneId: PaneID) -> Int {
-        let tabs = splitController.tabs(inPane: paneId)
-        guard let anchorIndex = tabs.firstIndex(where: { $0.id == anchorTabId }) else { return tabs.count }
-        let pinnedCount = tabs.reduce(into: 0) { count, tab in
-            if surfaceStateSnapshot(panelId: tab.id.id).isPinned {
+        let paneSurfaceIds = surfaceIds(inPane: paneId)
+        guard let anchorIndex = paneSurfaceIds.firstIndex(of: anchorTabId.id) else { return paneSurfaceIds.count }
+        let pinnedCount = paneSurfaceIds.reduce(into: 0) { count, panelId in
+            if surfaceStateSnapshot(panelId: panelId).isPinned {
                 count += 1
             }
         }
-        let rawTarget = min(anchorIndex + 1, tabs.count)
+        let rawTarget = min(anchorIndex + 1, paneSurfaceIds.count)
         return max(rawTarget, pinnedCount)
     }
 
@@ -7843,27 +8106,13 @@ final class Workspace: Identifiable, ObservableObject {
     ) -> WorkspaceTabChromeProjectionState {
         let entriesByPanelId = panels.reduce(into: [UUID: WorkspaceTabChromeProjectionState.Entry]()) { result, item in
             let panelId = item.key
-            let panel = item.value
-            let surfaceState = surfaceStateSnapshot(panelId: panelId)
-            let fallbackTitle = surfaceState.title ?? panel.displayTitle
-            let browserState = surfaceState.browserTabChromeState
-            let hasUnreadNotification =
-                notificationStore?.hasVisibleNotificationIndicator(forTabId: id, surfaceId: panelId) ?? false
-
-            result[panelId] = WorkspaceTabChromeProjectionState.Entry(
-                title: resolvedPanelTitle(panelId: panelId, fallback: fallbackTitle),
-                hasCustomTitle: surfaceState.customTitle != nil,
-                icon: panel.displayIcon,
-                iconImageData: browserState?.iconImageData,
-                kind: surfaceKind(for: panel),
-                isDirty: panel.isDirty,
-                showsNotificationBadge: Self.shouldShowUnreadIndicator(
-                    hasUnreadNotification: hasUnreadNotification,
-                    isManuallyUnread: surfaceState.isManuallyUnread
-                ),
-                isLoading: browserState?.isLoading ?? false,
-                isPinned: surfaceState.isPinned
-            )
+            guard let entry = tabChromeProjectionEntry(
+                for: panelId,
+                notificationStore: notificationStore
+            ) else {
+                return
+            }
+            result[panelId] = entry
         }
 
         return WorkspaceTabChromeProjectionState(entriesByPanelId: entriesByPanelId)
@@ -7898,7 +8147,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         let isFocused = context.isWorkspaceInputActive && focusedPanelId == panel.id
-        let isSelectedInPane = splitController.selectedTab(inPane: paneId)?.id == tab.id
+        let isSelectedInPane = splitController.selectedTabId(inPane: paneId) == tab.id
         let isVisibleInUI = context.panelVisibleInUI(
             isSelectedInPane: isSelectedInPane,
             isFocused: isFocused
@@ -7979,7 +8228,7 @@ final class Workspace: Identifiable, ObservableObject {
                     #if DEBUG
                     dlog("emptyPane.newTerminal pane=\(paneId.id.uuidString.prefix(5))")
                     #endif
-                    self.splitController.focusPane(paneId)
+                    self.focusPane(paneId)
                     _ = self.createTerminalPanel(inPane: paneId)
                 },
                 onCreateBrowser: { [weak self] in
@@ -7987,7 +8236,7 @@ final class Workspace: Identifiable, ObservableObject {
                     #if DEBUG
                     dlog("emptyPane.newBrowser pane=\(paneId.id.uuidString.prefix(5))")
                     #endif
-                    self.splitController.focusPane(paneId)
+                    self.focusPane(paneId)
                     _ = self.createBrowserPanel(inPane: paneId)
                 }
             )
@@ -7999,13 +8248,12 @@ final class Workspace: Identifiable, ObservableObject {
         projectionState: WorkspaceTabChromeProjectionState,
         showSplitButtons: Bool
     ) -> WorkspaceLayoutPaneChromeSnapshot {
-        let selectedTabId = pane.selectedTabId ?? pane.tabs.first?.id
+        let selectedTabId = pane.selectedTabId ?? pane.tabIds.first
         let paneId = pane.id
-        let renderedTabs = pane.tabs.map { tab in
-            renderTabChrome(
-                for: WorkspaceLayout.Tab(from: tab),
-                using: projectionState
-            )
+        let renderedTabs = pane.tabIds.map { surfaceId in
+            let baseTab = layoutTabSnapshot(for: TabID(id: surfaceId))
+                ?? WorkspaceLayout.Tab(id: TabID(id: surfaceId), title: "Tab")
+            return renderTabChrome(for: baseTab, using: projectionState)
         }
         let tabs = renderedTabs.enumerated().map { index, tab in
             WorkspaceLayoutTabChromeSnapshot(
@@ -8092,6 +8340,20 @@ final class Workspace: Identifiable, ObservableObject {
     func makeLayoutRenderSnapshot(context: WorkspaceLayoutRenderContext) -> WorkspaceLayoutRenderSnapshot {
         let projectionState = makeTabChromeProjectionState(notificationStore: context.notificationStore)
         return WorkspaceLayoutRenderSnapshot(
+            presentation: WorkspaceLayoutPresentationSnapshot(
+                appearance: splitController.configuration.appearance,
+                isInteractive: context.isWorkspaceInputActive,
+                localTabDrag: {
+                    guard let tabId = splitController.currentDragTabId,
+                          let sourcePaneId = splitController.currentDragSourcePaneId else {
+                        return nil
+                    }
+                    return WorkspaceLayoutLocalDragSnapshot(
+                        tabId: tabId,
+                        sourcePaneId: sourcePaneId
+                    )
+                }()
+            ),
             root: makeRenderNodeSnapshot(
                 node: splitController.renderRootNode,
                 projectionState: projectionState,
@@ -8119,7 +8381,7 @@ final class Workspace: Identifiable, ObservableObject {
         defer { debugStressPreloadSelectionDepth -= 1 }
         let isVisibleSelection =
             splitController.focusedPaneId == paneId &&
-            splitController.selectedTab(inPane: paneId)?.id == tabId &&
+            splitController.selectedTabId(inPane: paneId) == tabId &&
             terminalPanel.hostedView.window != nil &&
             terminalPanel.hostedView.superview != nil
 
@@ -8540,15 +8802,13 @@ final class Workspace: Identifiable, ObservableObject {
     func sidebarOrderedPanelIds() -> [UUID] {
         let paneTabs: [String: [UUID]] = Dictionary(
             uniqueKeysWithValues: splitController.allPaneIds.map { paneId in
-                let panelIds = splitController
-                    .tabs(inPane: paneId)
-                    .compactMap { panel(for: $0.id)?.id }
+                let panelIds = surfaceIds(inPane: paneId)
                 return (paneId.id.uuidString, panelIds)
             }
         )
 
         let fallbackPanelIds = panels.keys.sorted { $0.uuidString < $1.uuidString }
-        let tree = splitController.treeSnapshot()
+        let tree = treeSnapshot()
         return SidebarBranchOrdering.orderedPanelIds(
             tree: tree,
             paneTabs: paneTabs,
@@ -9427,8 +9687,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         if let preferredPaneId,
-           let selectedSurfaceId = splitController.selectedTab(inPane: preferredPaneId)?.id,
-           let selectedPanelId = panel(for: selectedSurfaceId)?.id,
+           let selectedPanelId = selectedSurfaceId(inPane: preferredPaneId),
            let selectedTerminalPanel = terminalPanel(for: selectedPanelId) {
             appendCandidate(selectedTerminalPanel)
         }
@@ -9442,9 +9701,8 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         if let preferredPaneId {
-            for tab in splitController.tabs(inPane: preferredPaneId) {
-                guard let panelId = panel(for: tab.id)?.id,
-                      let terminalPanel = terminalPanel(for: panelId) else { continue }
+            for panelId in surfaceIds(inPane: preferredPaneId) {
+                guard let terminalPanel = terminalPanel(for: panelId) else { continue }
                 appendCandidate(terminalPanel)
             }
         }
@@ -9530,11 +9788,9 @@ final class Workspace: Identifiable, ObservableObject {
         focus: Bool = true
     ) -> TerminalPanel? {
         // Find the pane containing the source panel
-        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
         var sourcePaneId: PaneID?
         for paneId in splitController.allPaneIds {
-            let tabs = splitController.tabs(inPane: paneId)
-            if tabs.contains(where: { $0.id == sourceTabId }) {
+            if containsSurface(panelId, inPane: paneId) {
                 sourcePaneId = paneId
                 break
             }
@@ -9584,13 +9840,6 @@ final class Workspace: Identifiable, ObservableObject {
         }
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
 
-        // Pre-generate the WorkspaceSplit tab ID so we can install the panel mapping before WorkspaceSplit
-        // mutates layout state (avoids transient "Empty Panel" flashes during split).
-        let newTab = WorkspaceLayout.Tab(
-            id: TabID(id: newPanel.id),
-            title: panelTitle(panelId: newPanel.id) ?? newPanel.displayTitle,
-            isPinned: false
-        )
         // Capture the source terminal's hosted view before WorkspaceSplit mutates focusedPaneId,
         // so we can hand it to focusPanel as the "move focus FROM" view.
         let previousHostedView = focusedTerminalPanel?.hostedView
@@ -9601,7 +9850,7 @@ final class Workspace: Identifiable, ObservableObject {
         guard splitController.splitPane(
             paneId,
             orientation: orientation,
-            withTab: newTab,
+            withTabId: TabID(id: newPanel.id),
             insertFirst: insertFirst,
             focusNewPane: focus
         ) != nil else {
@@ -9968,11 +10217,9 @@ final class Workspace: Identifiable, ObservableObject {
         focus: Bool = true
     ) -> BrowserPanel? {
         // Find the pane containing the source panel
-        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
         var sourcePaneId: PaneID?
         for paneId in splitController.allPaneIds {
-            let tabs = splitController.tabs(inPane: paneId)
-            if tabs.contains(where: { $0.id == sourceTabId }) {
+            if containsSurface(panelId, inPane: paneId) {
                 sourcePaneId = paneId
                 break
             }
@@ -9995,12 +10242,6 @@ final class Workspace: Identifiable, ObservableObject {
         panels[browserPanel.id] = browserPanel
         updateSurfaceState(panelId: browserPanel.id) { $0.title = browserPanel.displayTitle }
 
-        // Pre-generate the WorkspaceSplit tab ID so the mapping exists before the split lands.
-        let newTab = WorkspaceLayout.Tab(
-            id: TabID(id: browserPanel.id),
-            title: browserPanel.displayTitle,
-            isPinned: false
-        )
         // Create the split with the browser tab already present.
         // Mark this split as programmatic so didSplitPane doesn't auto-create a terminal.
         isProgrammaticSplit = true
@@ -10008,7 +10249,7 @@ final class Workspace: Identifiable, ObservableObject {
         guard splitController.splitPane(
             paneId,
             orientation: orientation,
-            withTab: newTab,
+            withTabId: TabID(id: browserPanel.id),
             insertFirst: insertFirst,
             focusNewPane: focus
         ) != nil else {
@@ -10077,7 +10318,7 @@ final class Workspace: Identifiable, ObservableObject {
 
         // Keyboard/browser-open paths want "new tab at end" regardless of global new-tab placement.
         if insertAtEnd {
-            let targetIndex = splitController.tabs(inPane: paneId).count
+            let targetIndex = splitController.tabIds(inPane: paneId).count
             _ = splitController.reorderTab(newTabId, toIndex: targetIndex)
         }
 
@@ -10102,11 +10343,9 @@ final class Workspace: Identifiable, ObservableObject {
         filePath: String,
         focus: Bool = true
     ) -> MarkdownPanel? {
-        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
         var sourcePaneId: PaneID?
         for paneId in splitController.allPaneIds {
-            let tabs = splitController.tabs(inPane: paneId)
-            if tabs.contains(where: { $0.id == sourceTabId }) {
+            if containsSurface(panelId, inPane: paneId) {
                 sourcePaneId = paneId
                 break
             }
@@ -10118,17 +10357,12 @@ final class Workspace: Identifiable, ObservableObject {
         panels[markdownPanel.id] = markdownPanel
         updateSurfaceState(panelId: markdownPanel.id) { $0.title = markdownPanel.displayTitle }
 
-        let newTab = WorkspaceLayout.Tab(
-            id: TabID(id: markdownPanel.id),
-            title: markdownPanel.displayTitle,
-            isPinned: false
-        )
         isProgrammaticSplit = true
         defer { isProgrammaticSplit = false }
         guard splitController.splitPane(
             paneId,
             orientation: orientation,
-            withTab: newTab,
+            withTabId: TabID(id: markdownPanel.id),
             insertFirst: insertFirst,
             focusNewPane: focus
         ) != nil else {
@@ -10222,7 +10456,7 @@ final class Workspace: Identifiable, ObservableObject {
         let targetIsActive = focusedPanelId == panelId || firstResponderPanelId == panelId
         guard targetIsActive,
               let focusedPane = splitController.focusedPaneId,
-              let selected = splitController.selectedTab(inPane: focusedPane) else {
+              let selected = splitController.selectedTabId(inPane: focusedPane) else {
 #if DEBUG
             dlog(
                 "surface.close.fallback.skip panel=\(panelId.uuidString.prefix(5)) " +
@@ -10235,9 +10469,9 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         if force {
-            forceCloseTabIds.insert(selected.id)
+            forceCloseTabIds.insert(selected)
         }
-        let closed = splitController.closeTab(selected.id)
+        let closed = splitController.closeTab(selected)
 #if DEBUG
         dlog(
             "surface.close.fallback panel=\(panelId.uuidString.prefix(5)) " +
@@ -10249,16 +10483,14 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func paneId(forPanelId panelId: UUID) -> PaneID? {
-        guard let tabId = surfaceIdFromPanelId(panelId) else { return nil }
         return splitController.allPaneIds.first { paneId in
-            splitController.tabs(inPane: paneId).contains(where: { $0.id == tabId })
+            containsSurface(panelId, inPane: paneId)
         }
     }
 
     func indexInPane(forPanelId panelId: UUID) -> Int? {
-        guard let tabId = surfaceIdFromPanelId(panelId),
-              let paneId = paneId(forPanelId: panelId) else { return nil }
-        return splitController.tabs(inPane: paneId).firstIndex(where: { $0.id == tabId })
+        guard let paneId = paneId(forPanelId: panelId) else { return nil }
+        return surfaceIds(inPane: paneId).firstIndex(of: panelId)
     }
 
     /// Returns the nearest right-side sibling pane for browser placement.
@@ -10267,7 +10499,7 @@ final class Workspace: Identifiable, ObservableObject {
     func preferredBrowserTargetPane(fromPanelId panelId: UUID) -> PaneID? {
         guard let sourcePane = paneId(forPanelId: panelId) else { return nil }
         let sourcePaneId = sourcePane.id.uuidString
-        let tree = splitController.treeSnapshot()
+        let tree = treeSnapshot()
         guard let path = browserPathToPane(targetPaneId: sourcePaneId, node: tree) else { return nil }
 
         let layout = splitController.layoutSnapshot()
@@ -10318,7 +10550,7 @@ final class Workspace: Identifiable, ObservableObject {
         let paneById = Dictionary(uniqueKeysWithValues: paneIds.map { ($0.id.uuidString, $0) })
         var paneBounds: [String: CGRect] = [:]
         browserCollectNormalizedPaneBounds(
-            node: splitController.treeSnapshot(),
+            node: treeSnapshot(),
             availableRect: CGRect(x: 0, y: 0, width: 1, height: 1),
             into: &paneBounds
         )
@@ -10442,22 +10674,22 @@ final class Workspace: Identifiable, ObservableObject {
         let anchorPaneId: UUID?
     }
 
-    private func stageClosedBrowserRestoreSnapshotIfNeeded(for tab: WorkspaceLayout.Tab, inPane pane: PaneID) {
-        guard let panelId = panel(for: tab.id)?.id,
+    private func stageClosedBrowserRestoreSnapshotIfNeeded(for tabId: TabID, inPane pane: PaneID) {
+        guard let panelId = panel(for: tabId)?.id,
               let browserPanel = browserPanel(for: panelId),
-              let tabIndex = splitController.tabs(inPane: pane).firstIndex(where: { $0.id == tab.id }) else {
-            pendingClosedBrowserRestoreSnapshots.removeValue(forKey: tab.id)
+              let tabIndex = splitController.tabIds(inPane: pane).firstIndex(of: tabId) else {
+            pendingClosedBrowserRestoreSnapshots.removeValue(forKey: tabId)
             return
         }
 
         let fallbackPlan = browserCloseFallbackPlan(
             forPaneId: pane.id.uuidString,
-            in: splitController.treeSnapshot()
+            in: treeSnapshot()
         )
         let resolvedURL = browserPanel.currentURL
             ?? browserPanel.preferredURLStringForOmnibar().flatMap(URL.init(string:))
 
-        pendingClosedBrowserRestoreSnapshots[tab.id] = ClosedBrowserPanelRestoreSnapshot(
+        pendingClosedBrowserRestoreSnapshots[tabId] = ClosedBrowserPanelRestoreSnapshot(
             workspaceId: id,
             url: resolvedURL,
             profileID: browserPanel.profileID,
@@ -10559,6 +10791,32 @@ final class Workspace: Identifiable, ObservableObject {
             scheduleFocusReconcile()
         }
         return true
+    }
+
+    @discardableResult
+    func splitSurface(
+        panelId: UUID,
+        inPane paneId: PaneID? = nil,
+        orientation: SplitOrientation,
+        insertFirst: Bool,
+        focusNewPane: Bool = true
+    ) -> PaneID? {
+        guard panels[panelId] != nil,
+              let tabId = surfaceIdFromPanelId(panelId) else { return nil }
+        let newPaneId = splitController.splitPane(
+            paneId,
+            orientation: orientation,
+            movingTab: tabId,
+            insertFirst: insertFirst,
+            focusNewPane: focusNewPane
+        )
+        guard let newPaneId else { return nil }
+        if focusNewPane {
+            focusPanel(panelId)
+        } else {
+            scheduleFocusReconcile()
+        }
+        return newPaneId
     }
 
     @discardableResult
@@ -10773,19 +11031,19 @@ final class Workspace: Identifiable, ObservableObject {
         // (socket API, notification click, etc.), ensure the target tab's pane becomes focused
         // so `focusedPanelId` and follow-on focus logic are coherent.
         let targetPaneId = splitController.allPaneIds.first(where: { paneId in
-            splitController.tabs(inPane: paneId).contains(where: { $0.id == tabId })
+            splitController.tabIds(inPane: paneId).contains(tabId)
         })
         let selectionAlreadyConverged: Bool = {
             guard let targetPaneId else { return false }
             return splitController.focusedPaneId == targetPaneId &&
-                splitController.selectedTab(inPane: targetPaneId)?.id == tabId
+                splitController.selectedTabId(inPane: targetPaneId) == tabId
         }()
         let shouldSuppressReentrantRefocus = trigger == .terminalFirstResponder && selectionAlreadyConverged
 #if DEBUG
         let targetPaneShort = targetPaneId.map { String($0.id.uuidString.prefix(5)) } ?? "nil"
         let focusedPaneShort = splitController.focusedPaneId.map { String($0.id.uuidString.prefix(5)) } ?? "nil"
         let selectedTabShort = splitController.focusedPaneId
-            .flatMap { splitController.selectedTab(inPane: $0)?.id }
+            .flatMap { splitController.selectedTabId(inPane: $0) }
             .map { String($0.uuid.uuidString.prefix(5)) } ?? "nil"
         let currentPanelShort = currentlyFocusedPanelId.map { String($0.uuidString.prefix(5)) } ?? "nil"
         dlog(
@@ -10886,7 +11144,7 @@ final class Workspace: Identifiable, ObservableObject {
         // Always reconcile selection/focus after navigation so AppKit first-responder and
         // WorkspaceSplit's focused pane stay aligned, even through split tree mutations.
         if let paneId = splitController.focusedPaneId,
-           let tabId = splitController.selectedTab(inPane: paneId)?.id {
+           let tabId = splitController.selectedTabId(inPane: paneId) {
             applyTabSelection(tabId: tabId, inPane: paneId)
         }
 
@@ -10899,7 +11157,7 @@ final class Workspace: Identifiable, ObservableObject {
         splitController.selectNextTab()
 
         if let paneId = splitController.focusedPaneId,
-           let tabId = splitController.selectedTab(inPane: paneId)?.id {
+           let tabId = splitController.selectedTabId(inPane: paneId) {
             applyTabSelection(tabId: tabId, inPane: paneId)
         }
     }
@@ -10909,7 +11167,7 @@ final class Workspace: Identifiable, ObservableObject {
         splitController.selectPreviousTab()
 
         if let paneId = splitController.focusedPaneId,
-           let tabId = splitController.selectedTab(inPane: paneId)?.id {
+           let tabId = splitController.selectedTabId(inPane: paneId) {
             applyTabSelection(tabId: tabId, inPane: paneId)
         }
     }
@@ -10917,11 +11175,11 @@ final class Workspace: Identifiable, ObservableObject {
     /// Select a surface by index in the currently focused pane
     func selectSurface(at index: Int) {
         guard let focusedPaneId = splitController.focusedPaneId else { return }
-        let tabs = splitController.tabs(inPane: focusedPaneId)
-        guard index >= 0 && index < tabs.count else { return }
-        splitController.selectTab(tabs[index].id)
+        let tabIds = splitController.tabIds(inPane: focusedPaneId)
+        guard index >= 0 && index < tabIds.count else { return }
+        splitController.selectTab(tabIds[index])
 
-        if let tabId = splitController.selectedTab(inPane: focusedPaneId)?.id {
+        if let tabId = splitController.selectedTabId(inPane: focusedPaneId) {
             applyTabSelection(tabId: tabId, inPane: focusedPaneId)
         }
     }
@@ -10929,11 +11187,11 @@ final class Workspace: Identifiable, ObservableObject {
     /// Select the last surface in the currently focused pane
     func selectLastSurface() {
         guard let focusedPaneId = splitController.focusedPaneId else { return }
-        let tabs = splitController.tabs(inPane: focusedPaneId)
-        guard let last = tabs.last else { return }
-        splitController.selectTab(last.id)
+        let tabIds = splitController.tabIds(inPane: focusedPaneId)
+        guard let last = tabIds.last else { return }
+        splitController.selectTab(last)
 
-        if let tabId = splitController.selectedTab(inPane: focusedPaneId)?.id {
+        if let tabId = splitController.selectedTabId(inPane: focusedPaneId) {
             applyTabSelection(tabId: tabId, inPane: focusedPaneId)
         }
     }
@@ -10948,6 +11206,11 @@ final class Workspace: Identifiable, ObservableObject {
     @discardableResult
     func clearSplitZoom() -> Bool {
         splitController.clearPaneZoom()
+    }
+
+    @discardableResult
+    func closePane(_ paneId: PaneID) -> Bool {
+        splitController.closePane(paneId)
     }
 
     @discardableResult
@@ -11071,17 +11334,17 @@ final class Workspace: Identifiable, ObservableObject {
         var targetPanelId: UUID?
 
         if let focusedPane = splitController.focusedPaneId,
-           let focusedTab = splitController.selectedTab(inPane: focusedPane),
-           let mappedPanelId = panel(for: focusedTab.id)?.id,
+           let focusedTabId = splitController.selectedTabId(inPane: focusedPane),
+           let mappedPanelId = panel(for: focusedTabId)?.id,
            panels[mappedPanelId] != nil {
             targetPanelId = mappedPanelId
         } else {
             for pane in splitController.allPaneIds {
-                guard let selectedTab = splitController.selectedTab(inPane: pane),
-                      let mappedPanelId = panel(for: selectedTab.id)?.id,
+                guard let selectedTabId = splitController.selectedTabId(inPane: pane),
+                      let mappedPanelId = panel(for: selectedTabId)?.id,
                       panels[mappedPanelId] != nil else { continue }
                 splitController.focusPane(pane)
-                splitController.selectTab(selectedTab.id)
+                splitController.selectTab(selectedTabId)
                 targetPanelId = mappedPanelId
                 break
             }
@@ -11091,7 +11354,7 @@ final class Workspace: Identifiable, ObservableObject {
             targetPanelId = fallbackPanelId
             if let fallbackTabId = surfaceIdFromPanelId(fallbackPanelId),
                let fallbackPane = splitController.allPaneIds.first(where: { paneId in
-                   splitController.tabs(inPane: paneId).contains(where: { $0.id == fallbackTabId })
+                   splitController.tabIds(inPane: paneId).contains(fallbackTabId)
                }) {
                 splitController.focusPane(fallbackPane)
                 splitController.selectTab(fallbackTabId)
@@ -11143,22 +11406,20 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func tabIdsToLeft(of anchorTabId: TabID, inPane paneId: PaneID) -> [TabID] {
-        let tabs = splitController.tabs(inPane: paneId)
-        guard let index = tabs.firstIndex(where: { $0.id == anchorTabId }) else { return [] }
-        return Array(tabs.prefix(index).map(\.id))
+        let tabIds = splitController.tabIds(inPane: paneId)
+        guard let index = tabIds.firstIndex(of: anchorTabId) else { return [] }
+        return Array(tabIds.prefix(index))
     }
 
     private func tabIdsToRight(of anchorTabId: TabID, inPane paneId: PaneID) -> [TabID] {
-        let tabs = splitController.tabs(inPane: paneId)
-        guard let index = tabs.firstIndex(where: { $0.id == anchorTabId }),
-              index + 1 < tabs.count else { return [] }
-        return Array(tabs.suffix(from: index + 1).map(\.id))
+        let tabIds = splitController.tabIds(inPane: paneId)
+        guard let index = tabIds.firstIndex(of: anchorTabId),
+              index + 1 < tabIds.count else { return [] }
+        return Array(tabIds.suffix(from: index + 1))
     }
 
     private func tabIdsToCloseOthers(of anchorTabId: TabID, inPane paneId: PaneID) -> [TabID] {
-        splitController.tabs(inPane: paneId)
-            .map(\.id)
-            .filter { $0 != anchorTabId }
+        splitController.tabIds(inPane: paneId).filter { $0 != anchorTabId }
     }
 
     private func createTerminalToRight(of anchorTabId: TabID, inPane paneId: PaneID) {
@@ -11305,7 +11566,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
-    private func handleExternalTabDrop(_ request: WorkspaceLayoutController.ExternalTabDropRequest) -> Bool {
+    func handleExternalTabDrop(_ request: WorkspaceLayoutExternalTabDropRequest) -> Bool {
         guard let app = AppDelegate.shared else { return false }
 #if DEBUG
         let dropStart = ProcessInfo.processInfo.systemUptime
@@ -11359,6 +11620,89 @@ final class Workspace: Identifiable, ObservableObject {
         return moved
     }
 
+}
+
+// MARK: - WorkspaceLayoutHost
+
+extension Workspace: WorkspaceLayoutHost {
+    func notifyGeometryChange(isDragging: Bool) {
+        splitController.notifyGeometryChange(isDragging: isDragging)
+    }
+
+    func setContainerFrame(_ frame: CGRect) {
+        splitController.setContainerFrame(frame)
+    }
+
+    @discardableResult
+    func setDividerPosition(_ position: CGFloat, forSplit splitId: UUID) -> Bool {
+        setDividerPosition(Double(position), forSplit: splitId)
+    }
+
+    func selectTab(_ tabId: TabID) {
+        splitController.selectTab(tabId)
+    }
+
+    @discardableResult
+    func requestCloseTab(_ tabId: TabID, inPane paneId: PaneID) -> Bool {
+        markExplicitClose(surfaceId: tabId)
+        return splitController.closeTab(tabId, inPane: paneId)
+    }
+
+    @discardableResult
+    func togglePaneZoom(inPane paneId: PaneID) -> Bool {
+        if let panelId = selectedSurfaceId(inPane: paneId) {
+            return toggleSplitZoom(panelId: panelId)
+        }
+        return splitController.togglePaneZoom(inPane: paneId)
+    }
+
+    func requestTabContextAction(_ action: TabContextAction, for tabId: TabID, inPane paneId: PaneID) {
+        workspaceSplit(didRequestTabContextAction: action, for: tabId, inPane: paneId)
+    }
+
+    func requestNewTab(kind: PanelType, inPane paneId: PaneID) {
+        workspaceSplit(didRequestNewTab: kind, inPane: paneId)
+    }
+
+    @discardableResult
+    func splitPane(_ paneId: PaneID?, orientation: SplitOrientation) -> PaneID? {
+        splitController.splitPane(paneId, orientation: orientation)
+    }
+
+    @discardableResult
+    func splitPane(
+        _ paneId: PaneID?,
+        orientation: SplitOrientation,
+        movingTab tabId: TabID,
+        insertFirst: Bool,
+        focusNewPane: Bool
+    ) -> PaneID? {
+        splitController.splitPane(
+            paneId,
+            orientation: orientation,
+            movingTab: tabId,
+            insertFirst: insertFirst,
+            focusNewPane: focusNewPane
+        )
+    }
+
+    @discardableResult
+    func moveTab(_ tabId: TabID, toPane paneId: PaneID, atIndex index: Int?) -> Bool {
+        splitController.moveTab(tabId, toPane: paneId, atIndex: index)
+    }
+
+    func beginTabDrag(tabId: TabID, sourcePaneId: PaneID) {
+        splitController.beginTabDrag(tabId: tabId, sourcePaneId: sourcePaneId)
+    }
+
+    func clearDragState() {
+        splitController.clearDragState()
+    }
+
+    @discardableResult
+    func handleFileDrop(_ urls: [URL], in paneId: PaneID) -> Bool {
+        handlePaneFileDrop(urls: urls, in: paneId)
+    }
 }
 
 // MARK: - WorkspaceLayoutDelegate
@@ -11469,9 +11813,9 @@ extension Workspace: WorkspaceLayoutDelegate {
 
     /// Hide browser portals for tabs that are no longer selected in the given pane.
     private func hideBrowserPortalsForDeselectedTabs(inPane pane: PaneID, selectedTabId: TabID) {
-        for tab in splitController.tabs(inPane: pane) {
-            guard tab.id != selectedTabId else { continue }
-            guard let browserPanel = browserPanel(for: tab.id) else { continue }
+        for surfaceId in surfaceIds(inPane: pane) {
+            guard surfaceId != selectedTabId.id else { continue }
+            guard let browserPanel = browserPanel(for: surfaceId) else { continue }
             browserPanel.setBrowserPortalVisibility(
                 visibleInUI: false,
                 zPriority: 0,
@@ -11491,7 +11835,7 @@ extension Workspace: WorkspaceLayoutDelegate {
 #if DEBUG
         let focusedPaneBefore = splitController.focusedPaneId.map { String($0.id.uuidString.prefix(5)) } ?? "nil"
         let selectedTabBefore = splitController.focusedPaneId
-            .flatMap { splitController.selectedTab(inPane: $0)?.id }
+            .flatMap { splitController.selectedTabId(inPane: $0) }
             .map { String($0.uuid.uuidString.prefix(5)) } ?? "nil"
         dlog(
             "focus.split.apply.begin workspace=\(id.uuidString.prefix(5)) " +
@@ -11504,8 +11848,8 @@ extension Workspace: WorkspaceLayoutDelegate {
             if splitController.focusedPaneId != pane {
                 splitController.focusPane(pane)
             }
-            if splitController.tabs(inPane: pane).contains(where: { $0.id == tabId }),
-               splitController.selectedTab(inPane: pane)?.id != tabId {
+            if splitController.tabIds(inPane: pane).contains(tabId),
+               splitController.selectedTabId(inPane: pane) != tabId {
                 splitController.selectTab(tabId)
             }
         }
@@ -11513,10 +11857,10 @@ extension Workspace: WorkspaceLayoutDelegate {
         let focusedPane: PaneID
         let selectedTabId: TabID
         if let currentPane = splitController.focusedPaneId,
-           let currentTabId = splitController.selectedTab(inPane: currentPane)?.id {
+           let currentTabId = splitController.selectedTabId(inPane: currentPane) {
             focusedPane = currentPane
             selectedTabId = currentTabId
-        } else if splitController.tabs(inPane: pane).contains(where: { $0.id == tabId }) {
+        } else if splitController.tabIds(inPane: pane).contains(tabId) {
             focusedPane = pane
             selectedTabId = tabId
             splitController.focusPane(focusedPane)
@@ -11767,52 +12111,52 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, shouldCloseTab tab: WorkspaceLayout.Tab, inPane pane: PaneID) -> Bool {
+    func workspaceSplit(shouldCloseTab tabId: TabID, inPane pane: PaneID) -> Bool {
         func recordPostCloseSelection() {
-            let tabs = controller.tabs(inPane: pane)
-            guard let idx = tabs.firstIndex(where: { $0.id == tab.id }) else {
-                postCloseSelectTabId.removeValue(forKey: tab.id)
+            let tabs = splitController.tabIds(inPane: pane)
+            guard let idx = tabs.firstIndex(of: tabId) else {
+                postCloseSelectTabId.removeValue(forKey: tabId)
                 return
             }
 
             let target: TabID? = {
-                if idx + 1 < tabs.count { return tabs[idx + 1].id }
-                if idx > 0 { return tabs[idx - 1].id }
+                if idx + 1 < tabs.count { return tabs[idx + 1] }
+                if idx > 0 { return tabs[idx - 1] }
                 return nil
             }()
 
             if let target {
-                postCloseSelectTabId[tab.id] = target
+                postCloseSelectTabId[tabId] = target
             } else {
-                postCloseSelectTabId.removeValue(forKey: tab.id)
+                postCloseSelectTabId.removeValue(forKey: tabId)
             }
 
         }
 
-        let explicitUserClose = explicitUserCloseTabIds.remove(tab.id) != nil
+        let explicitUserClose = explicitUserCloseTabIds.remove(tabId) != nil
 
-        if forceCloseTabIds.contains(tab.id) {
-            stageClosedBrowserRestoreSnapshotIfNeeded(for: tab, inPane: pane)
+        if forceCloseTabIds.contains(tabId) {
+            stageClosedBrowserRestoreSnapshotIfNeeded(for: tabId, inPane: pane)
             recordPostCloseSelection()
             return true
         }
 
-        if surfaceStateSnapshot(panelId: tab.id.id).isPinned {
-            clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
+        if surfaceStateSnapshot(panelId: tabId.id).isPinned {
+            clearStagedClosedBrowserRestoreSnapshot(for: tabId)
             NSSound.beep()
             return false
         }
 
-        if explicitUserClose && shouldCloseWorkspaceOnLastSurface(for: tab.id) {
-            clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
+        if explicitUserClose && shouldCloseWorkspaceOnLastSurface(for: tabId) {
+            clearStagedClosedBrowserRestoreSnapshot(for: tabId)
             owningTabManager?.closeWorkspaceWithConfirmation(self)
             return false
         }
 
         // Check if the panel needs close confirmation
-        let panelId = tab.id.id
-        guard let terminalPanel = terminalPanel(for: tab.id) else {
-            stageClosedBrowserRestoreSnapshotIfNeeded(for: tab, inPane: pane)
+        let panelId = tabId.id
+        guard let terminalPanel = terminalPanel(for: tabId) else {
+            stageClosedBrowserRestoreSnapshotIfNeeded(for: tabId, inPane: pane)
             recordPostCloseSelection()
             return true
         }
@@ -11821,13 +12165,12 @@ extension Workspace: WorkspaceLayoutDelegate {
         // Show an app-level confirmation, then re-attempt the close with forceCloseTabIds to bypass
         // this gating on the second pass.
         if panelNeedsConfirmClose(panelId: panelId, fallbackNeedsConfirmClose: terminalPanel.needsConfirmClose()) {
-            clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
-            if pendingCloseConfirmTabIds.contains(tab.id) {
+            clearStagedClosedBrowserRestoreSnapshot(for: tabId)
+            if pendingCloseConfirmTabIds.contains(tabId) {
                 return false
             }
 
-            pendingCloseConfirmTabIds.insert(tab.id)
-            let tabId = tab.id
+            pendingCloseConfirmTabIds.insert(tabId)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 Task { @MainActor in
@@ -11847,12 +12190,12 @@ extension Workspace: WorkspaceLayoutDelegate {
             return false
         }
 
-        clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
+        clearStagedClosedBrowserRestoreSnapshot(for: tabId)
         recordPostCloseSelection()
         return true
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didCloseTab tabId: TabID, fromPane pane: PaneID) {
+    func workspaceSplit(didCloseTab tabId: TabID, fromPane pane: PaneID) {
         forceCloseTabIds.remove(tabId)
         let selectTabId = postCloseSelectTabId.removeValue(forKey: tabId)
         let closedBrowserRestoreSnapshot = pendingClosedBrowserRestoreSnapshots.removeValue(forKey: tabId)
@@ -11936,14 +12279,14 @@ extension Workspace: WorkspaceLayoutDelegate {
 
         if let selectTabId,
            splitController.allPaneIds.contains(pane),
-           splitController.tabs(inPane: pane).contains(where: { $0.id == selectTabId }),
+           splitController.tabIds(inPane: pane).contains(selectTabId),
            splitController.focusedPaneId == pane {
             // Keep selection/focus convergence in the same close transaction to avoid a transient
             // frame where the pane has no selected content.
             splitController.selectTab(selectTabId)
             applyTabSelection(tabId: selectTabId, inPane: pane)
         } else if let focusedPane = splitController.focusedPaneId,
-                  let focusedTabId = splitController.selectedTab(inPane: focusedPane)?.id {
+                  let focusedTabId = splitController.selectedTabId(inPane: focusedPane) {
             // When closing the last tab in a pane, WorkspaceSplit may focus a different pane and skip
             // emitting didSelectTab. Re-apply the focused selection so sidebar state stays in sync.
             applyTabSelection(tabId: focusedTabId, inPane: focusedPane)
@@ -11957,11 +12300,11 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didSelectTab tab: WorkspaceLayout.Tab, inPane pane: PaneID) {
-        applyTabSelection(tabId: tab.id, inPane: pane)
+    func workspaceSplit(didSelectTab tabId: TabID, inPane pane: PaneID) {
+        applyTabSelection(tabId: tabId, inPane: pane)
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didMoveTab tab: WorkspaceLayout.Tab, fromPane source: PaneID, toPane destination: PaneID) {
+    func workspaceSplit(didMoveTab tabId: TabID, fromPane source: PaneID, toPane destination: PaneID) {
 #if DEBUG
         let now = ProcessInfo.processInfo.systemUptime
         let sincePrev: String
@@ -11972,30 +12315,30 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
         debugLastDidMoveTabTimestamp = now
         debugDidMoveTabEventCount += 1
-        let movedPanelId = panel(for: tab.id)?.id
+        let movedPanelId = panel(for: tabId)?.id
         let movedPanel = movedPanelId?.uuidString.prefix(5) ?? "unknown"
-        let selectedBefore = controller.selectedTab(inPane: destination)
-            .map { String(String(describing: $0.id).prefix(5)) } ?? "nil"
-        let focusedPaneBefore = controller.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
+        let selectedBefore = splitController.selectedTabId(inPane: destination)
+            .map { String(String(describing: $0).prefix(5)) } ?? "nil"
+        let focusedPaneBefore = splitController.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
         let focusedPanelBefore = focusedPanelId?.uuidString.prefix(5) ?? "nil"
         dlog(
             "split.moveTab idx=\(debugDidMoveTabEventCount) dtSincePrevMs=\(sincePrev) panel=\(movedPanel) " +
             "from=\(source.id.uuidString.prefix(5)) to=\(destination.id.uuidString.prefix(5)) " +
-            "sourceTabs=\(controller.tabs(inPane: source).count) destTabs=\(controller.tabs(inPane: destination).count)"
+            "sourceTabs=\(splitController.tabIds(inPane: source).count) destTabs=\(splitController.tabIds(inPane: destination).count)"
         )
         dlog(
             "split.moveTab.state.before idx=\(debugDidMoveTabEventCount) panel=\(movedPanel) " +
             "destSelected=\(selectedBefore) focusedPane=\(focusedPaneBefore) focusedPanel=\(focusedPanelBefore)"
         )
 #endif
-        applyTabSelection(tabId: tab.id, inPane: destination)
+        applyTabSelection(tabId: tabId, inPane: destination)
 #if DEBUG
-        let movedPanelIdAfter = panel(for: tab.id)?.id
+        let movedPanelIdAfter = panel(for: tabId)?.id
 #endif
 #if DEBUG
-        let selectedAfter = controller.selectedTab(inPane: destination)
-            .map { String(String(describing: $0.id).prefix(5)) } ?? "nil"
-        let focusedPaneAfter = controller.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
+        let selectedAfter = splitController.selectedTabId(inPane: destination)
+            .map { String(String(describing: $0).prefix(5)) } ?? "nil"
+        let focusedPaneAfter = splitController.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
         let focusedPanelAfter = focusedPanelId?.uuidString.prefix(5) ?? "nil"
         let movedPanelFocused = (movedPanelIdAfter != nil && movedPanelIdAfter == focusedPanelId) ? 1 : 0
         dlog(
@@ -12011,23 +12354,23 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didFocusPane pane: PaneID) {
+    func workspaceSplit(didFocusPane pane: PaneID) {
         // When a pane is focused, focus its selected tab's panel
-        guard let tab = controller.selectedTab(inPane: pane) else { return }
+        guard let tabId = splitController.selectedTabId(inPane: pane) else { return }
 #if DEBUG
         FocusLogStore.shared.append(
-            "Workspace.didFocusPane paneId=\(pane.id.uuidString) tabId=\(tab.id) focusedPane=\(controller.focusedPaneId?.id.uuidString ?? "nil")"
+            "Workspace.didFocusPane paneId=\(pane.id.uuidString) tabId=\(tabId) focusedPane=\(splitController.focusedPaneId?.id.uuidString ?? "nil")"
         )
 #endif
-        applyTabSelection(tabId: tab.id, inPane: pane)
+        applyTabSelection(tabId: tabId, inPane: pane)
 
         // Apply window background for terminal
-        if let terminalPanel = terminalPanel(for: tab.id) {
+        if let terminalPanel = terminalPanel(for: tabId) {
             terminalPanel.applyWindowBackgroundIfActive()
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didClosePane paneId: PaneID) {
+    func workspaceSplit(didClosePane paneId: PaneID) {
         let closedPanelIds = pendingPaneClosePanelIds.removeValue(forKey: paneId.id) ?? []
         let shouldScheduleFocusReconcile = !isDetachingCloseTransaction
 
@@ -12050,7 +12393,7 @@ extension Workspace: WorkspaceLayoutDelegate {
             clearRemoteConfigurationIfWorkspaceBecameLocal()
 
             if let focusedPane = splitController.focusedPaneId,
-               let focusedTabId = splitController.selectedTab(inPane: focusedPane)?.id {
+               let focusedTabId = splitController.selectedTabId(inPane: focusedPane) {
                 applyTabSelection(tabId: focusedTabId, inPane: focusedPane)
             } else if shouldScheduleFocusReconcile {
                 scheduleFocusReconcile()
@@ -12062,23 +12405,23 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, shouldClosePane pane: PaneID) -> Bool {
+    func workspaceSplit(shouldClosePane pane: PaneID) -> Bool {
         // Check if any panel in this pane needs close confirmation
-        let tabs = controller.tabs(inPane: pane)
-        for tab in tabs {
-            if forceCloseTabIds.contains(tab.id) { continue }
-            let panelId = tab.id.id
-            if let terminalPanel = terminalPanel(for: tab.id),
+        let tabIds = splitController.tabIds(inPane: pane)
+        for tabId in tabIds {
+            if forceCloseTabIds.contains(tabId) { continue }
+            let panelId = tabId.id
+            if let terminalPanel = terminalPanel(for: tabId),
                panelNeedsConfirmClose(panelId: panelId, fallbackNeedsConfirmClose: terminalPanel.needsConfirmClose()) {
                 pendingPaneClosePanelIds.removeValue(forKey: pane.id)
                 return false
             }
         }
-        pendingPaneClosePanelIds[pane.id] = tabs.compactMap { panel(for: $0.id)?.id }
+        pendingPaneClosePanelIds[pane.id] = tabIds.compactMap { panel(for: $0)?.id }
         return true
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didSplitPane originalPane: PaneID, newPane: PaneID, orientation: SplitOrientation) {
+    func workspaceSplit(didSplitPane originalPane: PaneID, newPane: PaneID, orientation: SplitOrientation) {
 #if DEBUG
         let panelKindForTab: (TabID) -> String = { tabId in
             guard let panelId = self.panel(for: tabId)?.id,
@@ -12088,25 +12431,25 @@ extension Workspace: WorkspaceLayoutDelegate {
             return String(describing: type(of: panel))
         }
         let paneKindSummary: (PaneID) -> String = { paneId in
-            let tabs = controller.tabs(inPane: paneId)
-            guard !tabs.isEmpty else { return "-" }
-            return tabs.map { tab in
-                String(panelKindForTab(tab.id).prefix(1))
+            let tabIds = self.splitController.tabIds(inPane: paneId)
+            guard !tabIds.isEmpty else { return "-" }
+            return tabIds.map { tabId in
+                String(panelKindForTab(tabId).prefix(1))
             }.joined(separator: ",")
         }
-        let originalSelectedKind = controller.selectedTab(inPane: originalPane).map { panelKindForTab($0.id) } ?? "none"
-        let newSelectedKind = controller.selectedTab(inPane: newPane).map { panelKindForTab($0.id) } ?? "none"
+        let originalSelectedKind = splitController.selectedTabId(inPane: originalPane).map { panelKindForTab($0) } ?? "none"
+        let newSelectedKind = splitController.selectedTabId(inPane: newPane).map { panelKindForTab($0) } ?? "none"
         dlog(
             "split.didSplit original=\(originalPane.id.uuidString.prefix(5)) new=\(newPane.id.uuidString.prefix(5)) " +
             "orientation=\(orientation) programmatic=\(isProgrammaticSplit ? 1 : 0) " +
-            "originalTabs=\(controller.tabs(inPane: originalPane).count) newTabs=\(controller.tabs(inPane: newPane).count) " +
+            "originalTabs=\(splitController.tabIds(inPane: originalPane).count) newTabs=\(splitController.tabIds(inPane: newPane).count) " +
             "originalSelected=\(originalSelectedKind) newSelected=\(newSelectedKind) " +
             "originalKinds=[\(paneKindSummary(originalPane))] newKinds=[\(paneKindSummary(newPane))]"
         )
 #endif
         let rearmBrowserPortalHostReplacement: (PaneID, String) -> Void = { paneId, reason in
-            for tab in controller.tabs(inPane: paneId) {
-                guard let browserPanel = self.browserPanel(for: tab.id) else {
+            for tabId in self.splitController.tabIds(inPane: paneId) {
+                guard let browserPanel = self.browserPanel(for: tabId) else {
                     continue
                 }
                 browserPanel.preparePortalHostReplacementForNextDistinctClaim(
@@ -12126,40 +12469,18 @@ extension Workspace: WorkspaceLayoutDelegate {
             return
         }
 
-        // If the new pane already has a tab, this split moved an existing tab (drag-to-split).
-        //
-        // In the "drag the only tab to split edge" case, WorkspaceSplit inserts a placeholder "Empty"
-        // tab in the source pane to avoid leaving it tabless. In cmux, this is undesirable:
-        // it creates a pane with no real surfaces and leaves an "Empty" tab in the tab bar.
-        //
-        // Replace placeholder-only source panes with a real terminal surface, then drop the
-        // placeholder tabs so the UI stays consistent and pane lists don't contain empties.
-        if !controller.tabs(inPane: newPane).isEmpty {
-            let originalTabs = controller.tabs(inPane: originalPane)
-            let hasRealSurface = originalTabs.contains { hasLivePanel(for: $0.id) }
+        // If the new pane already has a tab, this split moved an existing surface.
+        // The source pane is allowed to become genuinely empty now, and the placeholder
+        // UI comes from the render snapshot instead of fake "Empty" tab state.
+        if !splitController.tabIds(inPane: newPane).isEmpty {
 #if DEBUG
             dlog(
                 "split.didSplit.drag original=\(originalPane.id.uuidString.prefix(5)) " +
-                "new=\(newPane.id.uuidString.prefix(5)) originalTabs=\(originalTabs.count) " +
-                "newTabs=\(controller.tabs(inPane: newPane).count) hasRealSurface=\(hasRealSurface ? 1 : 0) " +
+                "new=\(newPane.id.uuidString.prefix(5)) originalTabs=\(splitController.tabIds(inPane: originalPane).count) " +
+                "newTabs=\(splitController.tabIds(inPane: newPane).count) " +
                 "originalKinds=[\(paneKindSummary(originalPane))] newKinds=[\(paneKindSummary(newPane))]"
             )
 #endif
-            if !hasRealSurface {
-                let placeholderTabs = originalTabs.filter { !hasLivePanel(for: $0.id) }
-#if DEBUG
-                dlog(
-                    "split.placeholderRepair pane=\(originalPane.id.uuidString.prefix(5)) " +
-                    "action=createTerminalAndDropPlaceholders placeholderCount=\(placeholderTabs.count)"
-                )
-#endif
-                _ = createTerminalPanel(inPane: originalPane, focus: false)
-                for tab in controller.tabs(inPane: originalPane) {
-                    if !hasLivePanel(for: tab.id) {
-                        splitController.closeTab(tab.id)
-                    }
-                }
-            }
             normalizePinnedTabs(in: originalPane)
             normalizePinnedTabs(in: newPane)
             return
@@ -12168,7 +12489,7 @@ extension Workspace: WorkspaceLayoutDelegate {
         // Mirror Cmd+D behavior: split buttons should always seed a terminal in the new pane.
         // When the focused source is a browser, inherit terminal config from nearby terminals
         // (or fall back to defaults) instead of leaving an empty selector pane.
-        let sourceTabId = controller.selectedTab(inPane: originalPane)?.id
+        let sourceTabId = splitController.selectedTabId(inPane: originalPane)
         let sourcePanelId = sourceTabId.flatMap { hasLivePanel(for: $0) ? $0.id : nil }
 
 #if DEBUG
@@ -12225,7 +12546,7 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didRequestNewTab kind: PanelType, inPane pane: PaneID) {
+    func workspaceSplit(didRequestNewTab kind: PanelType, inPane pane: PaneID) {
         switch kind {
         case .terminal:
             _ = performLayoutCommand(.createTerminal(inPane: pane))
@@ -12236,60 +12557,53 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
     }
 
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didRequestTabContextAction action: TabContextAction, for tab: WorkspaceLayout.Tab, inPane pane: PaneID) {
+    func workspaceSplit(didRequestTabContextAction action: TabContextAction, for tabId: TabID, inPane pane: PaneID) {
         switch action {
         case .rename:
-            promptRenamePanel(tabId: tab.id)
+            promptRenamePanel(tabId: tabId)
         case .clearName:
-            guard hasLivePanel(for: tab.id) else { return }
-            setPanelCustomTitle(panelId: tab.id.id, title: nil)
+            guard hasLivePanel(for: tabId) else { return }
+            setPanelCustomTitle(panelId: tabId.id, title: nil)
         case .closeToLeft:
-            closeTabs(tabIdsToLeft(of: tab.id, inPane: pane))
+            closeTabs(tabIdsToLeft(of: tabId, inPane: pane))
         case .closeToRight:
-            closeTabs(tabIdsToRight(of: tab.id, inPane: pane))
+            closeTabs(tabIdsToRight(of: tabId, inPane: pane))
         case .closeOthers:
-            closeTabs(tabIdsToCloseOthers(of: tab.id, inPane: pane))
+            closeTabs(tabIdsToCloseOthers(of: tabId, inPane: pane))
         case .move:
-            promptMovePanel(tabId: tab.id)
+            promptMovePanel(tabId: tabId)
         case .moveToLeftPane:
-            guard hasLivePanel(for: tab.id),
+            guard hasLivePanel(for: tabId),
                   let destinationPane = splitController.adjacentPane(to: pane, direction: .left) else { return }
-            _ = performLayoutCommand(.moveSurface(panelId: tab.id.id, toPane: destinationPane))
+            _ = performLayoutCommand(.moveSurface(panelId: tabId.id, toPane: destinationPane))
         case .moveToRightPane:
-            guard hasLivePanel(for: tab.id),
+            guard hasLivePanel(for: tabId),
                   let destinationPane = splitController.adjacentPane(to: pane, direction: .right) else { return }
-            _ = performLayoutCommand(.moveSurface(panelId: tab.id.id, toPane: destinationPane))
+            _ = performLayoutCommand(.moveSurface(panelId: tabId.id, toPane: destinationPane))
         case .newTerminalToRight:
-            createTerminalToRight(of: tab.id, inPane: pane)
+            createTerminalToRight(of: tabId, inPane: pane)
         case .newBrowserToRight:
-            createBrowserToRight(of: tab.id, inPane: pane)
+            createBrowserToRight(of: tabId, inPane: pane)
         case .reload:
-            guard let browser = browserPanel(for: tab.id) else { return }
+            guard let browser = browserPanel(for: tabId) else { return }
             browser.reload()
         case .duplicate:
-            duplicateBrowserToRight(anchorTabId: tab.id, inPane: pane)
+            duplicateBrowserToRight(anchorTabId: tabId, inPane: pane)
         case .togglePin:
-            guard hasLivePanel(for: tab.id) else { return }
-            let shouldPin = !surfaceStateSnapshot(panelId: tab.id.id).isPinned
-            setPanelPinned(panelId: tab.id.id, pinned: shouldPin)
+            guard hasLivePanel(for: tabId) else { return }
+            let shouldPin = !surfaceStateSnapshot(panelId: tabId.id).isPinned
+            setPanelPinned(panelId: tabId.id, pinned: shouldPin)
         case .markAsRead:
-            guard hasLivePanel(for: tab.id) else { return }
-            clearManualUnread(panelId: tab.id.id)
+            guard hasLivePanel(for: tabId) else { return }
+            clearManualUnread(panelId: tabId.id)
         case .markAsUnread:
-            guard hasLivePanel(for: tab.id) else { return }
-            markPanelUnread(tab.id.id)
+            guard hasLivePanel(for: tabId) else { return }
+            markPanelUnread(tabId.id)
         case .toggleZoom:
-            guard hasLivePanel(for: tab.id) else { return }
-            _ = performLayoutCommand(.toggleSplitZoom(panelId: tab.id.id))
+            guard hasLivePanel(for: tabId) else { return }
+            _ = performLayoutCommand(.toggleSplitZoom(panelId: tabId.id))
         @unknown default:
             break
-        }
-    }
-
-    func workspaceSplit(_ controller: WorkspaceLayoutController, didChangeGeometry snapshot: LayoutSnapshot) {
-        tmuxLayoutSnapshot = snapshot
-        if !isDetachingCloseTransaction {
-            scheduleFocusReconcile()
         }
     }
 

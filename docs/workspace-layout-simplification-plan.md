@@ -5,8 +5,22 @@
 Implemented on `2026-04-16`:
 
 - `WorkspaceLayoutController` now owns the split tree, focus state, drag state, geometry state, and split algorithms directly, so `SplitViewController` is gone and there is no nested mutable layout owner below `Workspace`
+- `PaneState` now stores only ordered surface IDs plus selected surface ID, so the layout tree no longer retains fallback title or pin metadata alongside topology
 - `PaneState` and `SplitState` are now value types, so the controller no longer mutates aliased pane or split references behind `rootNode.findPane` and `findSplit`
 - `PaneState` and `SplitState` no longer participate in Swift Observation, because the shell now renders from workspace-owned snapshots instead of nested live layout observation
+- `Workspace` now resolves tab chrome back into `WorkspaceLayoutController` through a tab-snapshot provider, so queries, context actions, and external tree snapshots no longer depend on layout-owned `TabItem` payloads
+- the layout controller now starts from a genuinely empty pane, and drag-to-split no longer synthesizes fake `"Empty"` tabs just to avoid a tabless pane
+- `WorkspaceLayoutDelegate` tab callbacks now carry `TabID` instead of resolved `WorkspaceLayout.Tab` payloads, so split/create/select/move/close/context-action flow no longer round-trips runtime chrome through the controller
+- `WorkspaceLayoutController` now exposes `tabIds(inPane:)` and `selectedTabId(inPane:)`, and runtime callers have started moving off `tabs(inPane:)` and `selectedTab(inPane:)` for non-render logic
+- `Workspace` now exposes panel-level pane queries such as `surfaceIds(inPane:)`, `selectedSurfaceId(inPane:)`, `containsSurface(_:inPane:)`, and `indexInPane(forPanelId:)`, so AppDelegate, GhosttyTerminalView, TerminalController, and workspace runtime code no longer map pane membership through layout tab snapshots
+- app and test code no longer call `WorkspaceLayoutController.tabs(inPane:)` or `selectedTab(inPane:)`, so full-tab pane queries are no longer part of the workspace runtime path
+- outside `Workspace` itself, app and test code no longer call `WorkspaceLayoutController.tabIds(inPane:)` or `selectedTabId(inPane:)` either, so pane selection and membership now cross the runtime boundary as workspace surface IDs instead of layout-controller reads
+- `Workspace` now exposes `layoutSnapshot()` and `treeSnapshot()` for external consumers, so `ContentView`, `TabManager`, `TerminalController`, and routing tests no longer depend on `WorkspaceLayoutController.layoutSnapshot()` or `treeSnapshot()` directly
+- `Workspace` now also owns pane focus, selected-surface selection, split zoom state, tab-bar leading inset, split-button visibility, and interactivity as app-facing APIs, so window chrome sync, workspace content rendering, socket pane focus, and shortcut tests no longer reach into `splitController` for those runtime concerns
+- existing-surface split operations now cross the runtime boundary as `Workspace.splitSurface(...)`, so AppDelegate cross-workspace moves and TerminalController socket commands no longer invoke `WorkspaceLayoutController.splitPane(...)` directly
+- app and test code outside the native layout host no longer access `WorkspaceLayoutController` directly, and delegate-injection tests now go through a dedicated workspace test seam instead of mutating `splitController.delegate` themselves
+- `WorkspaceLayoutDelegate` callbacks no longer thread the live `WorkspaceLayoutController` instance through every runtime callback, so selection, move, split, close, and geometry notifications now cross the boundary as plain pane and tab IDs
+- split equalization now crosses the runtime boundary as `Workspace.equalizeSplits(...)`, so `TabManager`, socket automation, and tests no longer pass `WorkspaceLayoutController` around for divider mutations
 - split orientation, divider position, and split-entry animation origin now flow through the canonical render snapshot, so `WorkspaceLayoutRootHostView` and `WorkspaceLayoutNativeSplitView` no longer read live split state back out of the controller tree
 - divider drags now update split geometry through `WorkspaceLayoutController` APIs instead of mutating `SplitState` directly from the renderer
 - focused workspace suites passed on `ssh cmux-macmini` after the ownership cut: `WorkspaceLayoutSimplificationTests`, `WorkspaceSurfaceRegistryTests`, `WorkspaceContentViewVisibilityTests`, `WorkspaceUnitTests`, and `TabManagerUnitTests`
@@ -21,6 +35,18 @@ Implemented on `2026-04-16`:
 - pane-host content refresh now compares explicit mount identity before reuse, so content-kind transitions tear down deterministically instead of relying on `installContentView` side effects
 - off-window terminal mounts now keep the hosted view installed immediately and only defer the runtime `attachSurface` step until a real window-backed refresh, which removes the blank-pane root-collapse failure during split close
 - regression coverage now checks the new retained-surface contract directly, including off-window terminal mounting, shared-slot content replacement, workspace-selected displayed content, placeholder mounting, terminal-host detachment on surface removal, and later attachment after the host enters a window
+- `Workspace` now conforms to the `WorkspaceLayoutHost` protocol directly, so production rendering no longer stores or passes a `WorkspaceLayoutController` bridge through `Workspace` and `WorkspaceContentView`
+- the AppKit layout host now talks to `Workspace` through that host protocol for geometry, drag, split, close, zoom, context action, file-drop, and external-tab-drop routing
+- `WorkspaceLayoutControllerHostAdapter` is gone, because the native tab-button leaf now receives explicit action closures for select, close, zoom, context actions, and drag lifecycle instead of retaining the full host protocol just for preview and debug wiring
+- `WorkspaceLayoutRenderSnapshot` now owns workspace-shell presentation state such as appearance, interactivity, and local tab-drag identity, so the native AppKit host no longer reads those values back through `WorkspaceLayoutHost`
+- workspace shell interactivity now comes from `WorkspaceLayoutRenderContext` instead of a body-time mutation in `WorkspaceContentView`, so SwiftUI render passes no longer write controller state just to disable drag interception for inactive workspaces
+- `WorkspaceLayoutController` no longer participates in Swift Observation at all, because production rendering now depends on workspace-owned snapshots plus command routing instead of observing the nested layout engine
+- `Workspace` now owns external tree snapshot assembly too, so the layout controller no longer resolves tab titles or depends on a workspace-owned tab-chrome provider for non-render APIs
+- layout-geometry publication no longer crosses `WorkspaceLayoutDelegate`; `WorkspaceLayoutController` now publishes geometry through a dedicated snapshot sink owned by `Workspace`, and programmatic divider updates now refresh the cached tmux geometry snapshot through the same workspace boundary
+- focused remote validation for that final host-boundary cut passed on `ssh cmux-macmini`, `113` tests and `0` failures, including layout simplification, surface registry, content visibility, workspace state, tab manager, shortcut routing, remote connection, session persistence, and sidebar ordering suites
+- focused remote validation passed again on `ssh cmux-macmini` after the presentation-snapshot cut, `114` tests and `0` failures, covering the same suites plus the new snapshot-presentation regression
+- focused remote validation passed again on `ssh cmux-macmini` after removing Swift Observation from `WorkspaceLayoutController`, `114` tests and `0` failures
+- focused remote validation passed again on `ssh cmux-macmini` after moving external tree snapshots to `Workspace`, `114` tests and `0` failures, including the new tree-snapshot title regression
 
 The old status list below reflects earlier cleanup work that landed before this bug surfaced. The current migration is the ownership cut that makes close, split, and root collapse deterministic.
 

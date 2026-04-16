@@ -1197,7 +1197,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
             XCTFail("Expected split pane IDs")
             return
         }
-        let layoutBefore = workspace.splitController.layoutSnapshot()
+        let layoutBefore = workspace.layoutSnapshot()
         guard let leftPaneBeforeFrame = layoutBefore.panes.first(where: { $0.paneId == leftPaneBefore.id.uuidString })?.frame,
               let rightPaneBeforeFrame = layoutBefore.panes.first(where: { $0.paneId == rightPaneBefore.id.uuidString })?.frame else {
             XCTFail("Expected pane frames before shortcut split")
@@ -1240,7 +1240,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
             XCTFail("Expected pane IDs after shortcut split")
             return
         }
-        let layoutAfter = workspace.splitController.layoutSnapshot()
+        let layoutAfter = workspace.layoutSnapshot()
         guard let newPaneFrame = layoutAfter.panes.first(where: { $0.paneId == newPaneId.id.uuidString })?.frame,
               let rightPaneAfterFrame = layoutAfter.panes.first(where: { $0.paneId == rightPaneAfter.id.uuidString })?.frame else {
             XCTFail("Expected pane frames after shortcut split")

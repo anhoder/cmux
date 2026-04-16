@@ -1818,7 +1818,7 @@ final class BrowserSessionHistoryRestoreTests: XCTestCase {
 
     func testResetSidebarContextClearsBrowserPanelsIntoNewTabState() throws {
         let workspace = Workspace()
-        let paneId = try XCTUnwrap(workspace.splitController.allPaneIds.first)
+        let paneId = try XCTUnwrap(workspace.paneIds.first)
         let contextPanelId = try XCTUnwrap(workspace.focusedPanelId)
         let browser = try XCTUnwrap(
             workspace.createBrowserPanel(

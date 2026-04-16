@@ -642,7 +642,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         workspace.configureRemoteConnection(config, autoConnect: false)
 
-        let paneID = try XCTUnwrap(workspace.splitController.allPaneIds.first)
+        let paneID = try XCTUnwrap(workspace.paneIds.first)
         let panelID = try XCTUnwrap(workspace.focusedTerminalPanel?.id)
         let detached = try XCTUnwrap(workspace.detachSurface(panelId: panelID))
 
@@ -693,7 +693,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         let panelID = try XCTUnwrap(sourceWorkspace.focusedTerminalPanel?.id)
         let detached = try XCTUnwrap(sourceWorkspace.detachSurface(panelId: panelID))
-        let destinationPaneID = try XCTUnwrap(destinationWorkspace.splitController.allPaneIds.first)
+        let destinationPaneID = try XCTUnwrap(destinationWorkspace.paneIds.first)
 
         let restoredPanelID = destinationWorkspace.attachDetachedSurface(
             detached,
@@ -718,7 +718,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
         let manager = TabManager()
         let sourceWorkspace = try XCTUnwrap(manager.selectedWorkspace)
         let destinationWorkspace = manager.addWorkspace()
-        let sourcePaneID = try XCTUnwrap(sourceWorkspace.splitController.allPaneIds.first)
+        let sourcePaneID = try XCTUnwrap(sourceWorkspace.paneIds.first)
         let config = WorkspaceRemoteConfiguration(
             destination: "cmux-macmini",
             port: nil,
@@ -748,7 +748,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         let panelID = try XCTUnwrap(sourceWorkspace.focusedTerminalPanel?.id)
         let detached = try XCTUnwrap(sourceWorkspace.detachSurface(panelId: panelID))
-        let destinationPaneID = try XCTUnwrap(destinationWorkspace.splitController.allPaneIds.first)
+        let destinationPaneID = try XCTUnwrap(destinationWorkspace.paneIds.first)
 
         let restoredPanelID = destinationWorkspace.attachDetachedSurface(
             detached,
@@ -802,7 +802,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         let panelID = try XCTUnwrap(sourceWorkspace.focusedTerminalPanel?.id)
         let detached = try XCTUnwrap(sourceWorkspace.detachSurface(panelId: panelID))
-        let destinationPaneID = try XCTUnwrap(destinationWorkspace.splitController.allPaneIds.first)
+        let destinationPaneID = try XCTUnwrap(destinationWorkspace.paneIds.first)
 
         let restoredPanelID = destinationWorkspace.attachDetachedSurface(
             detached,
@@ -826,7 +826,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
     @MainActor
     func testRemoteTerminalSessionEndSkipsControlMasterCleanupWhenBrowserPanelsKeepWorkspaceRemote() throws {
         let workspace = Workspace()
-        let paneID = try XCTUnwrap(workspace.splitController.allPaneIds.first)
+        let paneID = try XCTUnwrap(workspace.paneIds.first)
         let initialTerminalID = try XCTUnwrap(workspace.focusedTerminalPanel?.id)
         let config = WorkspaceRemoteConfiguration(
             destination: "cmux-macmini",
@@ -920,7 +920,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         let panelID = try XCTUnwrap(source.focusedTerminalPanel?.id)
         let sourcePaneID = try XCTUnwrap(source.paneId(forPanelId: panelID))
-        let destinationPaneID = try XCTUnwrap(destination.splitController.allPaneIds.first)
+        let destinationPaneID = try XCTUnwrap(destination.paneIds.first)
         source.setSurfaceTTYName(panelId: panelID, ttyName: "/dev/ttys004")
 
         let detached = try XCTUnwrap(source.detachSurface(panelId: panelID))
@@ -934,7 +934,7 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
 
         XCTAssertEqual(restoredPanelID, panelID)
         XCTAssertEqual(destination.surfaceTTYName(panelId: panelID), "/dev/ttys004")
-        XCTAssertEqual(source.splitController.tabs(inPane: sourcePaneID).count, 0)
+        XCTAssertEqual(source.surfaceIds(inPane: sourcePaneID).count, 0)
     }
 
     func testDetectedSSHUploadFailureCleansUpEarlierRemoteUploads() throws {

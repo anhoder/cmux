@@ -1969,7 +1969,7 @@ struct ContentView: View {
               let workspace = tabManager.selectedWorkspace else { return nil }
         let layoutSnapshot = WorkspaceContentView.effectiveTmuxLayoutSnapshot(
             cachedSnapshot: workspace.tmuxLayoutSnapshot,
-            liveSnapshot: workspace.splitController.layoutSnapshot()
+            liveSnapshot: workspace.layoutSnapshot()
         )
         let contentView = window.contentView
 
@@ -2746,9 +2746,7 @@ struct ContentView: View {
     private func syncTrafficLightInset() {
         let inset: CGFloat = (isMinimalMode && !sidebarState.isVisible && !isFullScreen) ? 80 : 0
         for tab in tabManager.tabs {
-            if tab.splitController.configuration.appearance.tabBarLeadingInset != inset {
-                tab.splitController.configuration.appearance.tabBarLeadingInset = inset
-            }
+            tab.tabBarLeadingInset = inset
         }
     }
 
@@ -5889,7 +5887,7 @@ struct ContentView: View {
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceHasSplits,
-                workspace.splitController.allPaneIds.count > 1
+                workspace.paneCount > 1
             )
             let workspaceIndex = tabManager.tabs.firstIndex { $0.id == workspace.id }
             snapshot.setBool(CommandPaletteContextKeys.workspaceHasPeers, tabManager.tabs.count > 1)

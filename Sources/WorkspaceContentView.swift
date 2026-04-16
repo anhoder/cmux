@@ -284,9 +284,6 @@ struct WorkspaceContentView: View {
     var body: some View {
         let appearance = PanelAppearance.fromConfig(config)
         let usesWorkspacePaneOverlay = TmuxOverlayExperimentSettings.target().usesWorkspacePaneOverlay
-        let showSplitButtons =
-            workspace.splitController.configuration.allowSplits &&
-            workspace.splitController.configuration.appearance.showSplitButtons
         let renderContext = WorkspaceLayoutRenderContext(
             notificationStore: notificationStore,
             isWorkspaceVisible: isWorkspaceVisible,
@@ -294,16 +291,12 @@ struct WorkspaceContentView: View {
             appearance: appearance,
             workspacePortalPriority: workspacePortalPriority,
             usesWorkspacePaneOverlay: usesWorkspacePaneOverlay,
-            showSplitButtons: showSplitButtons
+            showSplitButtons: workspace.showsSplitButtons
         )
         let renderSnapshot = workspace.makeLayoutRenderSnapshot(context: renderContext)
 
-        // Inactive workspaces are kept alive in a ZStack (for state preservation) but their
-        // AppKit-backed views can still intercept drags. Disable drop acceptance for them.
-        let _ = { workspace.splitController.isInteractive = isWorkspaceInputActive }()
-
         let splitView = WorkspaceLayoutView(
-            controller: workspace.splitController,
+            host: workspace,
             renderSnapshot: renderSnapshot,
             surfaceRegistry: workspace.surfaceRegistry
         )
@@ -630,7 +623,7 @@ struct WorkspaceContentView: View {
             )
         }
         logTheme(
-            "theme refresh end workspace=\(workspace.id.uuidString) reason=\(reason) event=\(eventLabel) chromeBg=\(workspace.splitController.configuration.appearance.chromeColors.backgroundHex ?? "nil")"
+            "theme refresh end workspace=\(workspace.id.uuidString) reason=\(reason) event=\(eventLabel) chromeBg=\(workspace.chromeBackgroundHex ?? "nil")"
         )
     }
 

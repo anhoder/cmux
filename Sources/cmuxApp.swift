@@ -3519,7 +3519,7 @@ private func workspaceTabChromeDebugPreviewScenario(
     isClosePressed: Bool
 ) -> WorkspaceLayoutTabChromeDebugScenario {
     let appearance = workspaceLayoutTabChromeDebugAppearance()
-    let tab = WorkspaceLayout.Tab(title: "~/fun/cmuxterm-hq", icon: "terminal.fill", kind: .terminal)
+    let tab = WorkspaceLayout.Tab.rendered(title: "~/fun/cmuxterm-hq", icon: "terminal.fill", kind: .terminal)
 
     return WorkspaceLayoutTabChromeDebugScenario(
         id: "interactive-preview",

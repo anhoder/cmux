@@ -10743,15 +10743,15 @@ final class GhosttySurfaceScrollView: NSView {
 
         guard let tab = tabManager.tabs.first(where: { $0.id == tabId }),
               let tabIdForSurface = tab.surfaceIdFromPanelId(surfaceId),
-              let paneId = tab.splitController.allPaneIds.first(where: { paneId in
-                  tab.splitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
+              let paneId = tab.paneIds.first(where: { paneId in
+                  tab.containsSurface(tabIdForSurface.id, inPane: paneId)
               }) else {
             scheduleAutomaticFirstResponderApply(reason: "ensureFocus.missingPane")
             return
         }
 
-        guard tab.splitController.selectedTab(inPane: paneId)?.id == tabIdForSurface,
-              tab.splitController.focusedPaneId == paneId else {
+        guard tab.selectedSurfaceId(inPane: paneId) == tabIdForSurface.id,
+              tab.focusedPaneId == paneId else {
             scheduleAutomaticFirstResponderApply(reason: "ensureFocus.unfocusedPane")
             return
         }
@@ -10809,14 +10809,14 @@ final class GhosttySurfaceScrollView: NSView {
               tabManager.selectedTabId == tabId,
               let tab = tabManager.tabs.first(where: { $0.id == tabId }),
               let tabIdForSurface = tab.surfaceIdFromPanelId(surfaceId),
-              let paneId = tab.splitController.allPaneIds.first(where: { paneId in
-                  tab.splitController.tabs(inPane: paneId).contains(where: { $0.id == tabIdForSurface })
+              let paneId = tab.paneIds.first(where: { paneId in
+                  tab.containsSurface(tabIdForSurface.id, inPane: paneId)
               }) else {
             return false
         }
 
-        return tab.splitController.selectedTab(inPane: paneId)?.id == tabIdForSurface &&
-            tab.splitController.focusedPaneId == paneId
+        return tab.selectedSurfaceId(inPane: paneId) == tabIdForSurface.id &&
+            tab.focusedPaneId == paneId
     }
 
     /// Suppress the surface view's onFocus callback and ghostty_surface_set_focus during

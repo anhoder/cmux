@@ -1253,14 +1253,14 @@ final class TabManagerNotificationFocusTests: XCTestCase {
 
         workspace.focusPanel(leftPanelId)
         XCTAssertTrue(workspace.toggleSplitZoom(panelId: leftPanelId), "Expected split zoom to enable")
-        XCTAssertTrue(workspace.splitController.isSplitZoomed, "Expected workspace to start zoomed")
+        XCTAssertTrue(workspace.isSplitZoomed, "Expected workspace to start zoomed")
 
         XCTAssertTrue(manager.focusTabFromNotification(workspace.id, surfaceId: rightPanel.id))
         drainMainQueue()
         drainMainQueue()
 
         XCTAssertFalse(
-            workspace.splitController.isSplitZoomed,
+            workspace.isSplitZoomed,
             "Expected notification focus to exit split zoom so the target pane becomes visible"
         )
         XCTAssertEqual(workspace.focusedPanelId, rightPanel.id, "Expected notification target panel to be focused")
@@ -1379,7 +1379,7 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
     func testOpenBrowserInsertAtEndPlacesNewBrowserAtPaneEnd() {
         let manager = TabManager()
         guard let workspace = manager.selectedWorkspace,
-              let paneId = workspace.splitController.focusedPaneId else {
+              let paneId = workspace.focusedPaneId else {
             XCTFail("Expected focused workspace and pane")
             return
         }
@@ -1392,14 +1392,14 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
             return
         }
 
-        let tabs = workspace.splitController.tabs(inPane: paneId)
-        guard let lastSurfaceId = tabs.last?.id else {
+        let tabIds = workspace.surfaceIds(inPane: paneId)
+        guard let lastSurfaceId = tabIds.last else {
             XCTFail("Expected at least one surface in pane")
             return
         }
 
         XCTAssertEqual(
-            workspace.panel(for: lastSurfaceId)?.id,
+            workspace.panels[lastSurfaceId]?.id,
             browserPanelId,
             "Expected Cmd+Shift+B/Cmd+L open path to append browser surface at end"
         )
@@ -1419,7 +1419,7 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
 
         let targetWorkspace = manager.addWorkspace(select: false)
         manager.selectWorkspace(initialWorkspace)
-        let initialPaneCount = targetWorkspace.splitController.allPaneIds.count
+        let initialPaneCount = targetWorkspace.paneCount
         let initialPanelCount = targetWorkspace.panels.count
 
         guard let browserPanelId = manager.openBrowser(
@@ -1434,7 +1434,7 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
 
         XCTAssertEqual(manager.selectedTabId, targetWorkspace.id, "Expected target workspace to become selected")
         XCTAssertEqual(
-            targetWorkspace.splitController.allPaneIds.count,
+            targetWorkspace.paneCount,
             initialPaneCount + 1,
             "Expected split-right browser open to create a new pane"
         )
@@ -1466,7 +1466,7 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
             return
         }
 
-        let initialPaneCount = workspace.splitController.allPaneIds.count
+        let initialPaneCount = workspace.paneCount
 
         guard let browserPanelId = manager.openBrowser(
             inWorkspace: workspace.id,
@@ -1479,7 +1479,7 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            workspace.splitController.allPaneIds.count,
+            workspace.paneCount,
             initialPaneCount,
             "Expected split-right browser open to reuse existing panes"
         )
@@ -1489,13 +1489,13 @@ final class TabManagerSurfaceCreationTests: XCTestCase {
             "Expected browser to open in the top-right pane when multiple splits already exist"
         )
 
-        let targetPaneTabs = workspace.splitController.tabs(inPane: topRightPaneId)
-        guard let lastSurfaceId = targetPaneTabs.last?.id else {
+        let targetPaneTabIds = workspace.surfaceIds(inPane: topRightPaneId)
+        guard let lastSurfaceId = targetPaneTabIds.last else {
             XCTFail("Expected top-right pane to contain tabs")
             return
         }
         XCTAssertEqual(
-            workspace.panel(for: lastSurfaceId)?.id,
+            workspace.panels[lastSurfaceId]?.id,
             browserPanelId,
             "Expected browser surface to be appended at end in the reused top-right pane"
         )
@@ -1515,7 +1515,7 @@ final class TabManagerEqualizeSplitsTests: XCTestCase {
             return
         }
 
-        let initialSplits = splitNodes(in: workspace.splitController.treeSnapshot())
+        let initialSplits = splitNodes(in: workspace.treeSnapshot())
         XCTAssertGreaterThanOrEqual(initialSplits.count, 2, "Expected at least two split nodes in nested layout")
 
         for (index, split) in initialSplits.enumerated() {
@@ -1525,14 +1525,14 @@ final class TabManagerEqualizeSplitsTests: XCTestCase {
             }
             let targetPosition: CGFloat = index.isMultiple(of: 2) ? 0.2 : 0.8
             XCTAssertTrue(
-                workspace.splitController.setDividerPosition(targetPosition, forSplit: splitId),
+                workspace.setDividerPosition(targetPosition, forSplit: splitId),
                 "Expected to seed divider position for split \(splitId)"
             )
         }
 
         XCTAssertTrue(manager.equalizeSplits(tabId: workspace.id), "Expected equalize splits command to succeed")
 
-        let equalizedSplits = splitNodes(in: workspace.splitController.treeSnapshot())
+        let equalizedSplits = splitNodes(in: workspace.treeSnapshot())
         XCTAssertEqual(equalizedSplits.count, initialSplits.count)
         for split in equalizedSplits {
             XCTAssertEqual(split.dividerPosition, 0.5, accuracy: 0.000_1)
@@ -1551,14 +1551,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.5, forSplit: splitId),
+            workspace.setDividerPosition(0.5, forSplit: splitId),
             "Expected to seed divider position"
         )
 
@@ -1567,7 +1567,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to succeed for the right edge of the left pane"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1588,14 +1588,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.5, forSplit: splitId),
+            workspace.setDividerPosition(0.5, forSplit: splitId),
             "Expected to seed divider position"
         )
 
@@ -1604,7 +1604,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to succeed for the left edge of the right pane"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1625,14 +1625,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.5, forSplit: splitId),
+            workspace.setDividerPosition(0.5, forSplit: splitId),
             "Expected to seed divider position"
         )
 
@@ -1641,7 +1641,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to succeed for the bottom edge of the top pane"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1662,14 +1662,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.5, forSplit: splitId),
+            workspace.setDividerPosition(0.5, forSplit: splitId),
             "Expected to seed divider position"
         )
 
@@ -1678,7 +1678,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to succeed for the top edge of the bottom pane"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1699,7 +1699,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
@@ -1709,7 +1709,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to fail when the pane has no adjacent border in that direction"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1725,14 +1725,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.89, forSplit: splitId),
+            workspace.setDividerPosition(0.89, forSplit: splitId),
             "Expected to seed divider position near upper bound"
         )
 
@@ -1741,7 +1741,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to clamp instead of failing"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }
@@ -1758,14 +1758,14 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             return
         }
 
-        guard let split = splitNodes(in: workspace.splitController.treeSnapshot()).first,
+        guard let split = splitNodes(in: workspace.treeSnapshot()).first,
               let splitId = UUID(uuidString: split.id) else {
             XCTFail("Expected a split node in tree snapshot")
             return
         }
 
         XCTAssertTrue(
-            workspace.splitController.setDividerPosition(0.11, forSplit: splitId),
+            workspace.setDividerPosition(0.11, forSplit: splitId),
             "Expected to seed divider position near lower bound"
         )
 
@@ -1774,7 +1774,7 @@ final class TabManagerResizeSplitsTests: XCTestCase {
             "Expected resizeSplit to clamp instead of failing"
         )
 
-        guard let updatedSplit = splitNodes(in: workspace.splitController.treeSnapshot()).first else {
+        guard let updatedSplit = splitNodes(in: workspace.treeSnapshot()).first else {
             XCTFail("Expected updated split node in tree snapshot")
             return
         }

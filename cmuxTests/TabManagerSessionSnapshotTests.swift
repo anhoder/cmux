@@ -63,7 +63,7 @@ final class TabManagerSessionSnapshotTests: XCTestCase {
             terminalStartupCommand: "ssh cmux-macmini"
         )
         remoteWorkspace.configureRemoteConnection(configuration, autoConnect: false)
-        let paneId = try XCTUnwrap(remoteWorkspace.splitController.allPaneIds.first)
+        let paneId = try XCTUnwrap(remoteWorkspace.paneIds.first)
         _ = remoteWorkspace.createBrowserPanel(inPane: paneId, url: URL(string: "http://localhost:3000"), focus: false)
 
         let snapshot = manager.sessionSnapshot(includeScrollback: false)

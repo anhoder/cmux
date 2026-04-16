@@ -247,10 +247,10 @@ final class ReactGrabPastebackTargetTests: XCTestCase {
 
         workspace.focusPanel(terminalId)
         XCTAssertTrue(workspace.toggleSplitZoom(panelId: terminalId))
-        XCTAssertTrue(workspace.splitController.isSplitZoomed)
+        XCTAssertTrue(workspace.isSplitZoomed)
 
         XCTAssertTrue(manager.toggleReactGrabFromCurrentFocus())
-        XCTAssertFalse(workspace.splitController.isSplitZoomed)
+        XCTAssertFalse(workspace.isSplitZoomed)
         XCTAssertEqual(workspace.focusedPanelId, browserPanel.id)
         XCTAssertEqual(browserPanel.pendingReactGrabReturnTargetPanelId, terminalId)
     }
