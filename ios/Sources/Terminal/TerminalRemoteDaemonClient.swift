@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.remote-client")
 
 protocol TerminalRemoteDaemonTransport: Sendable {
     func writeLine(_ line: String) async throws
@@ -637,7 +640,7 @@ actor TerminalRemoteDaemonClient {
         guard let data = line.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: data),
               let json = raw as? [String: Any] else {
-            NSLog("📱 dispatcher: dropping non-JSON line: %@", String(line.prefix(120)))
+            log.debug("dispatcher: dropping non-JSON line: \(String(line.prefix(120)), privacy: .public)")
             return
         }
 
@@ -645,13 +648,13 @@ actor TerminalRemoteDaemonClient {
             if let continuation = pendingRequests.removeValue(forKey: requestID) {
                 continuation.resume(returning: line)
             } else {
-                NSLog("📱 dispatcher: response for unknown id %d", requestID)
+                log.debug("dispatcher: response for unknown id \(requestID, privacy: .public)")
             }
             return
         }
 
         guard let event = json["event"] as? String else {
-            NSLog("📱 dispatcher: line missing id and event: %@", String(line.prefix(120)))
+            log.debug("dispatcher: line missing id and event: \(String(line.prefix(120)), privacy: .public)")
             return
         }
 
@@ -670,18 +673,18 @@ actor TerminalRemoteDaemonClient {
         }
 
         guard let sessionID = json["session_id"] as? String else {
-            NSLog("📱 dispatcher: event %@ missing session_id", event)
+            log.debug("dispatcher: event \(event, privacy: .public) missing session_id")
             return
         }
         guard let handler = pushHandlers[sessionID] else {
-            NSLog("📱 dispatcher: no push handler for session %@ event %@", sessionID, event)
+            log.debug("dispatcher: no push handler for session \(sessionID, privacy: .public) event \(event, privacy: .public)")
             return
         }
 
         switch event {
         case "terminal.output":
             guard let pushEvent = Self.parseTerminalOutputEvent(json: json) else {
-                NSLog("📱 dispatcher: malformed terminal.output for %@", sessionID)
+                log.debug("dispatcher: malformed terminal.output for \(sessionID, privacy: .public)")
                 return
             }
             handler(pushEvent)
@@ -694,12 +697,12 @@ actor TerminalRemoteDaemonClient {
             let cols = (json["cols"] as? Int) ?? (json["cols"] as? NSNumber)?.intValue ?? 0
             let rows = (json["rows"] as? Int) ?? (json["rows"] as? NSNumber)?.intValue ?? 0
             guard cols > 0, rows > 0 else {
-                NSLog("📱 dispatcher: malformed session.view_size for %@", sessionID)
+                log.debug("dispatcher: malformed session.view_size for \(sessionID, privacy: .public)")
                 return
             }
             handler(.viewSize(cols: cols, rows: rows))
         default:
-            NSLog("📱 dispatcher: ignoring unknown event %@ for %@", event, sessionID)
+            log.debug("dispatcher: ignoring unknown event \(event, privacy: .public) for \(sessionID, privacy: .public)")
         }
     }
 
@@ -793,7 +796,7 @@ actor TerminalRemoteDaemonClient {
         do {
             envelope = try decoder.decode(TerminalRemoteDaemonResponseEnvelope<ResponsePayload>.self, from: data)
         } catch {
-            NSLog("📱 RPC decode error: %@ for type %@ line: %@", String(describing: error), String(describing: responseType), String(line.prefix(200)))
+            log.error("RPC decode error: \(String(describing: error), privacy: .public) for type \(String(describing: responseType), privacy: .public) line: \(String(line.prefix(200)), privacy: .public)")
             throw TerminalRemoteDaemonClientError.invalidJSON(line)
         }
 

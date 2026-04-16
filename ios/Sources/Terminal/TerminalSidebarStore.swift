@@ -381,7 +381,7 @@ final class TerminalSidebarStore: ObservableObject {
                         )
                     }
                 } catch {
-                    NSLog("📱 startWorkspace: daemon open_pane failed: %@", (error as NSError).localizedDescription)
+                    log.error("startWorkspace: daemon open_pane failed: \((error as NSError).localizedDescription, privacy: .public)")
                     await MainActor.run { self?.markWorkspaceFailed(workspaceID: workspaceID) }
                 }
             }
@@ -487,7 +487,7 @@ final class TerminalSidebarStore: ObservableObject {
             hosts[idx] = host
         }
         #if DEBUG
-        NSLog("📱 controller(for:) host=%@ wsPort=%@ hasWS=%d", host.hostname, String(describing: host.wsPort), host.hasWebSocketEndpoint ? 1 : 0)
+        log.debug("controller(for:) host=\(host.hostname, privacy: .public) wsPort=\(String(describing: host.wsPort), privacy: .public) hasWS=\(host.hasWebSocketEndpoint, privacy: .public)")
         #endif
 
         let controller = makeController(for: workspace, host: host)
@@ -1165,10 +1165,11 @@ final class TerminalSidebarStore: ObservableObject {
 
         if let secret, !secret.isEmpty {
             host.wsSecret = secret
-            NSLog("📱 WS debug: secret loaded (%d chars) hostname=%@", secret.count, host.hostname)
+            let hostname = host.hostname
+            log.debug("WS debug: secret loaded (\(secret.count, privacy: .public) chars) hostname=\(hostname, privacy: .public)")
         } else {
             host.wsPort = nil
-            NSLog("📱 WS debug: no secret available, disabling WebSocket")
+            log.debug("WS debug: no secret available, disabling WebSocket")
         }
         #endif
     }
@@ -1477,7 +1478,7 @@ final class TerminalSessionController {
                     self.finishTransportConnectTask(generation: connectGeneration)
                 }
             } catch {
-                NSLog("📱 SessionController: connect failed: %@ (type=%@)", error.localizedDescription, String(describing: type(of: error)))
+                log.error("SessionController: connect failed: \(error.localizedDescription, privacy: .public) (type=\(String(describing: type(of: error)), privacy: .public))")
                 await MainActor.run {
                     let isCurrentTransport = self.isCurrentTransport(transport)
                     if isCurrentTransport {

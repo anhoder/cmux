@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.websocket")
 
 enum TerminalWebSocketTransportError: LocalizedError {
     case invalidURL
@@ -41,7 +44,7 @@ final class TerminalWebSocketDaemonClient: Sendable {
             throw TerminalWebSocketTransportError.invalidURL
         }
 
-        NSLog("[WebSocket] Connecting to %@:%d", host, port)
+        log.debug("Connecting to \(host, privacy: .public):\(port, privacy: .public)")
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = timeoutSeconds
@@ -79,7 +82,7 @@ final class TerminalWebSocketDaemonClient: Sendable {
             )
         }
 
-        NSLog("[WebSocket] Connection established to %@:%d", host, port)
+        log.debug("Connection established to \(host, privacy: .public):\(port, privacy: .public)")
 
         return TerminalWebSocketLineTransport(session: session, webSocket: task)
     }
@@ -125,7 +128,7 @@ actor TerminalWebSocketLineTransport: TerminalRemoteDaemonTransport {
     }
 
     func cancel() {
-        NSLog("[WebSocket] Disconnecting, invalidating session")
+        log.debug("Disconnecting, invalidating session")
         webSocket.cancel(with: .goingAway, reason: nil)
         session.invalidateAndCancel()
     }
@@ -183,7 +186,7 @@ final class TerminalWebSocketTransport: @unchecked Sendable, TerminalTransport {
             throw TerminalWebSocketTransportError.invalidURL
         }
 
-        NSLog("[WebSocket] Transport connecting to %@:%d session=%@ (pooled)", host.hostname, wsPort, sessionName)
+        log.debug("Transport connecting to \(self.host.hostname, privacy: .public):\(wsPort, privacy: .public) session=\(self.sessionName, privacy: .public) (pooled)")
 
         // Reuse the pooled ws + RPC client for this daemon. The connection
         // owns the URLSessionWebSocketTask; on transport failure it will be
@@ -231,7 +234,7 @@ final class TerminalWebSocketTransport: @unchecked Sendable, TerminalTransport {
     }
 
     func disconnect() async {
-        NSLog("[WebSocket] Transport disconnecting session=%@", sessionName)
+        log.debug("Transport disconnecting session=\(self.sessionName, privacy: .public)")
         let transport = stateQueue.sync { () -> TerminalTransport? in
             let t = activeTransport
             activeTransport = nil

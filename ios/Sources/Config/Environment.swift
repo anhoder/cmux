@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import CMUXAuthCore
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "environment")
 
 enum Environment {
     case development
@@ -137,7 +140,7 @@ enum Environment {
         #if DEBUG && !targetEnvironment(simulator)
         if let host = url.host?.lowercased(),
            host == "localhost" || host == "127.0.0.1" {
-            NSLog("⚠️ API base URL '%@' uses localhost, unreachable from physical device. Run ./scripts/reload.sh to auto-detect Mac IP.", candidate)
+            log.warning("API base URL '\(candidate, privacy: .public)' uses localhost, unreachable from physical device. Run ./scripts/reload.sh to auto-detect Mac IP.")
         }
         #endif
 
@@ -145,7 +148,7 @@ enum Environment {
             return candidate
         }
 
-        NSLog("📱 Environment: Ignoring insecure API base URL on device: %@", candidate)
+        log.info("Ignoring insecure API base URL on device: \(candidate, privacy: .public)")
         return secureFallbackAPIBaseURL(for: environment)
     }
 

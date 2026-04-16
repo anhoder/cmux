@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.daemon-connection")
 
 enum TerminalDaemonConnectionEvent: Sendable {
     case connected
@@ -127,7 +130,7 @@ actor TerminalDaemonConnection {
             do {
                 initialResult = try await connectionClient.workspaceSubscribe()
             } catch {
-                NSLog("📱 daemon connection: workspace.subscribe failed: %@", error.localizedDescription ?? "unknown")
+                log.error("workspace.subscribe failed: \(error.localizedDescription, privacy: .public)")
                 initialResult = nil
             }
             if let initialResult, let initialJSON = Self.encodeWorkspaceList(initialResult) {
@@ -209,14 +212,14 @@ actor TerminalDaemonConnection {
         guard let client, let hello, await !client.isClosed() else { return }
         guard hello.capabilities.contains("notifications.remote") else {
             #if DEBUG
-            NSLog("📱 daemon connection: notifications.remote not advertised; skipping push config")
+            log.info("notifications.remote not advertised; skipping push config")
             #endif
             lastPushConfiguration = nil
             return
         }
         guard let config = pushConfigurator.currentConfiguration() else {
             #if DEBUG
-            NSLog("📱 daemon connection: push config incomplete; remote push disabled")
+            log.info("push config incomplete; remote push disabled")
             #endif
             lastPushConfiguration = nil
             return
@@ -232,18 +235,11 @@ actor TerminalDaemonConnection {
             )
             lastPushConfiguration = config
             #if DEBUG
-            NSLog(
-                "📱 daemon connection: configured remote push endpoint=%@ tokens=%d",
-                config.endpoint,
-                config.deviceTokens.count
-            )
+            log.debug("configured remote push endpoint=\(config.endpoint, privacy: .public) tokens=\(config.deviceTokens.count, privacy: .public)")
             #endif
         } catch {
             #if DEBUG
-            NSLog(
-                "📱 daemon connection: configure_notifications failed: %@",
-                String(describing: error)
-            )
+            log.error("configure_notifications failed: \(String(describing: error), privacy: .public)")
             #endif
         }
     }

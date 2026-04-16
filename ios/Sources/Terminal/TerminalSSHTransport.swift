@@ -1,7 +1,10 @@
 import Foundation
+import OSLog
 @preconcurrency import NIOCore
 @preconcurrency import NIOSSH
 @preconcurrency import NIOTransportServices
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.ssh-factory")
 
 struct TerminalGridSize: Equatable, Sendable {
     var columns: Int
@@ -135,11 +138,9 @@ struct DefaultTerminalTransportFactory: TerminalTransportFactory {
         sessionName: String,
         resumeState: TerminalRemoteDaemonResumeState?
     ) -> TerminalTransport {
-        NSLog("📱 TransportFactory: hostname=%@ wsPort=%@ wsSecret=%@ transportPref=%@ teamID=%@ hasWebSocket=%d",
-              host.hostname, host.wsPort.map(String.init) ?? "nil", host.wsSecret != nil ? "set" : "nil",
-              String(describing: host.transportPreference), host.teamID ?? "nil", host.hasWebSocketEndpoint ? 1 : 0)
+        log.debug("TransportFactory: hostname=\(host.hostname, privacy: .public) wsPort=\(host.wsPort.map(String.init) ?? "nil", privacy: .public) wsSecret=\(host.wsSecret != nil ? "set" : "nil", privacy: .public) transportPref=\(String(describing: host.transportPreference), privacy: .public) teamID=\(host.teamID ?? "nil", privacy: .public) hasWebSocket=\(host.hasWebSocketEndpoint, privacy: .public)")
         if host.hasWebSocketEndpoint {
-            NSLog("📱 TransportFactory: → WebSocket transport")
+            log.debug("TransportFactory: → WebSocket transport")
             return TerminalWebSocketTransport(
                 host: host,
                 sessionName: sessionName,
@@ -148,10 +149,10 @@ struct DefaultTerminalTransportFactory: TerminalTransportFactory {
         }
         if host.transportPreference == .remoteDaemon {
             if let remoteDaemonBuilder {
-                NSLog("📱 TransportFactory: → custom remoteDaemon builder")
+                log.debug("TransportFactory: → custom remoteDaemon builder")
                 return remoteDaemonBuilder(host, credentials, sessionName, resumeState)
             }
-            NSLog("📱 TransportFactory: → TerminalDirectDaemonTransport")
+            log.debug("TransportFactory: → TerminalDirectDaemonTransport")
             return TerminalDirectDaemonTransport(
                 host: host,
                 credentials: credentials,
@@ -160,7 +161,7 @@ struct DefaultTerminalTransportFactory: TerminalTransportFactory {
                 ticketService: daemonTicketService
             )
         }
-        NSLog("📱 TransportFactory: → raw SSH transport")
+        log.debug("TransportFactory: → raw SSH transport")
         return TerminalSSHTransport(host: host, credentials: credentials, sessionName: sessionName)
     }
 }
