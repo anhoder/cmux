@@ -5879,6 +5879,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func refreshTerminalSurfacesAfterGhosttyConfigReload(source: String) {
         var refreshedCount = 0
         forEachTerminalPanel { terminalPanel in
+            // Drop per-cell metrics first: the new config may carry a
+            // different font family/size, and `reconcileGeometryNow`
+            // below only re-measures when the container pixel rect
+            // changes. Without this, letterbox math keeps using the
+            // old cell size against a new grid.
+            terminalPanel.surface.invalidateCachedCellMetrics(reason: "configReload.\(source)")
             terminalPanel.hostedView.reconcileGeometryNow()
             terminalPanel.hostedView.refreshHostBackgroundAfterGhosttyConfigReload()
             terminalPanel.surface.forceRefresh(reason: "appDelegate.refreshAfterGhosttyConfigReload")

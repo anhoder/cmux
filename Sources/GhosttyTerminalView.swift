@@ -4645,6 +4645,26 @@ final class TerminalSurface: Identifiable, ObservableObject {
         #endif
     }
 
+    /// Invalidate the cached cell pixel metrics so the next `updateSize`
+    /// pass re-measures them. Call whenever something can change cell
+    /// metrics without changing the container pixel rect — font-size
+    /// bindings, full config reloads, theme swaps that change the font
+    /// family, etc. Without this, `applyCurrentViewSize` keeps stretching
+    /// the daemon's (cols, rows) with stale per-cell pixels, producing
+    /// letterboxes that are off by a few pixels on each side.
+    func invalidateCachedCellMetrics(reason: String = "unspecified") {
+        guard cachedCellPixelSize != .zero else { return }
+        #if DEBUG
+        dlog("surface.cellMetrics.invalidate surface=\(id.uuidString.prefix(8)) reason=\(reason)")
+        #endif
+        cachedCellPixelSize = .zero
+        // Clearing lastPixel* makes the next updateSize see sizeChanged,
+        // forcing re-measurement via ghostty_surface_size.
+        lastPixelWidth = 0
+        lastPixelHeight = 0
+        _ = hostedView.reconcileGeometryNow()
+    }
+
     /// Force a full size recalculation and surface redraw.
     func forceRefresh(reason: String = "unspecified") {
         let hasSurface = surface != nil
@@ -5049,9 +5069,24 @@ final class TerminalSurface: Identifiable, ObservableObject {
 
     func performBindingAction(_ action: String) -> Bool {
         guard let surface = surface else { return false }
-        return action.withCString { cString in
+        let handled = action.withCString { cString in
             ghostty_surface_binding_action(surface, cString, UInt(strlen(cString)))
         }
+        if handled, Self.actionChangesFontMetrics(action) {
+            invalidateCachedCellMetrics(reason: "binding.\(action)")
+        }
+        return handled
+    }
+
+    /// True for binding actions whose side effect is resizing the
+    /// per-cell font metrics (and therefore invalidating our
+    /// `cachedCellPixelSize`). Keep in sync with Ghostty's action parser.
+    fileprivate static func actionChangesFontMetrics(_ action: String) -> Bool {
+        if action.hasPrefix("set_font_size") { return true }
+        if action.hasPrefix("increase_font_size") { return true }
+        if action.hasPrefix("decrease_font_size") { return true }
+        if action == "reset_font_size" { return true }
+        return false
     }
 
     @discardableResult
@@ -5949,9 +5984,13 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     func performBindingAction(_ action: String) -> Bool {
         guard let surface = surface else { return false }
-        return action.withCString { cString in
+        let handled = action.withCString { cString in
             ghostty_surface_binding_action(surface, cString, UInt(strlen(cString)))
         }
+        if handled, TerminalSurface.actionChangesFontMetrics(action) {
+            terminalSurface?.invalidateCachedCellMetrics(reason: "binding.\(action)")
+        }
+        return handled
     }
 
     @discardableResult
