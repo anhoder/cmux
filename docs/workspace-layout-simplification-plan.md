@@ -2,6 +2,22 @@
 
 ## Status
 
+Implemented on `2026-04-16`:
+
+- pane-content snapshots now carry value-only `surfaceId` descriptors instead of live `TerminalPanel`, `BrowserPanel`, or `MarkdownPanel` references
+- `Workspace` now owns a retained `WorkspaceSurfaceRegistry`, so terminal, browser, and markdown mounting no longer lives inside `WorkspaceLayoutPaneHostView`
+- placeholder empty-pane hosting now also lives in `WorkspaceSurfaceRegistry`, so the pane host no longer carries a parallel SwiftUI placeholder-controller lifecycle
+- the AppKit pane host is now a snapshot applier over slot views plus the workspace-owned surface registry, instead of a type-switched content owner
+- each pane now mounts only its selected content into one active slot view, so the renderer no longer keeps a hidden per-tab mount cache alongside the retained surface registry
+- each pane render snapshot now carries one workspace-chosen displayed-content payload instead of a per-tab content dictionary plus renderer-side selected-content lookup
+- the retained-surface registry is now one map keyed by `WorkspacePaneMountIdentity`, with per-kind retained host adapters behind it instead of parallel browser, markdown, and placeholder host stores
+- retained-surface mounts no longer receive `selectedTabId` from the old per-tab host path, because each pane now mounts only one workspace-selected content payload
+- pane-host content refresh now compares explicit mount identity before reuse, so content-kind transitions tear down deterministically instead of relying on `installContentView` side effects
+- off-window terminal mounts now keep the hosted view installed immediately and only defer the runtime `attachSurface` step until a real window-backed refresh, which removes the blank-pane root-collapse failure during split close
+- regression coverage now checks the new retained-surface contract directly, including off-window terminal mounting, shared-slot content replacement, workspace-selected displayed content, placeholder mounting, terminal-host detachment on surface removal, and later attachment after the host enters a window
+
+The old status list below reflects earlier cleanup work that landed before this bug surfaced. The current migration is the ownership cut that makes close, split, and root collapse deterministic.
+
 Implemented on `issue-2289-appkit-split-host`:
 
 - canonical surface identity now uses the panel UUID directly, so normal layout operations no longer depend on `surfaceIdToPanelId`

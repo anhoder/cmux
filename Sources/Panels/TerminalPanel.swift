@@ -147,27 +147,10 @@ final class TerminalPanel: Panel, ObservableObject {
 
     func close() {
         // The surface will be cleaned up by its deinit
-#if DEBUG
-        let frame = String(format: "%.1fx%.1f", hostedView.frame.width, hostedView.frame.height)
-        let bounds = String(format: "%.1fx%.1f", hostedView.bounds.width, hostedView.bounds.height)
-        dlog(
-            "surface.panel.close.begin panel=\(id.uuidString.prefix(5)) " +
-            "workspace=\(workspaceId.uuidString.prefix(5)) runtimeSurface=\(surface.surface != nil ? 1 : 0) " +
-            "inWindow=\(hostedView.window != nil ? 1 : 0) hasSuperview=\(hostedView.superview != nil ? 1 : 0) " +
-            "hidden=\(hostedView.isHidden ? 1 : 0) frame=\(frame) bounds=\(bounds)"
-        )
-#endif
         unfocus()
         hostedView.setVisibleInUI(false)
         hostedView.removeFromSuperview()
         TerminalWindowPortalRegistry.detach(hostedView: hostedView)
-#if DEBUG
-        dlog(
-            "surface.panel.close.end panel=\(id.uuidString.prefix(5)) " +
-            "inWindow=\(hostedView.window != nil ? 1 : 0) hasSuperview=\(hostedView.superview != nil ? 1 : 0) " +
-            "hidden=\(hostedView.isHidden ? 1 : 0)"
-        )
-#endif
         surface.teardownSurface()
     }
 

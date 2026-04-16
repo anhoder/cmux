@@ -2940,17 +2940,21 @@ final class WorkspaceLayoutController {
 struct WorkspaceLayoutView: View {
     @Bindable private var controller: WorkspaceLayoutController
     private let renderSnapshot: WorkspaceLayoutRenderSnapshot
+    private let surfaceRegistry: WorkspaceSurfaceRegistry
 
     /// Initialize with a controller and the canonical workspace-owned render snapshot.
     /// - Parameters:
     ///   - controller: The WorkspaceLayoutController managing the tab state
     ///   - renderSnapshot: The canonical snapshot resolved by the workspace runtime owner
+    ///   - surfaceRegistry: Workspace-owned retained surface registry
     init(
         controller: WorkspaceLayoutController,
-        renderSnapshot: WorkspaceLayoutRenderSnapshot
+        renderSnapshot: WorkspaceLayoutRenderSnapshot,
+        surfaceRegistry: WorkspaceSurfaceRegistry
     ) {
         self.controller = controller
         self.renderSnapshot = renderSnapshot
+        self.surfaceRegistry = surfaceRegistry
     }
 
     var body: some View {
@@ -2958,6 +2962,7 @@ struct WorkspaceLayoutView: View {
         WorkspaceLayoutNativeHost(
             controller: controller,
             renderSnapshot: renderSnapshot,
+            surfaceRegistry: surfaceRegistry,
             showSplitButtons: showSplitButtons,
             onGeometryChange: { [weak controller] isDragging in
                 controller?.notifyGeometryChange(isDragging: isDragging)
@@ -2974,6 +2979,13 @@ enum WorkspacePaneContent {
     case placeholder(WorkspacePlaceholderPaneContent)
 }
 
+enum WorkspacePaneMountIdentity: Hashable {
+    case terminal(UUID)
+    case browser(UUID)
+    case markdown(UUID)
+    case placeholder(UUID)
+}
+
 extension WorkspacePaneContent {
     var prefersNativeDropOverlay: Bool {
         switch self {
@@ -2983,11 +2995,44 @@ extension WorkspacePaneContent {
             false
         }
     }
+
+    func mountIdentity(contentId: UUID) -> WorkspacePaneMountIdentity {
+        switch self {
+        case .terminal(let descriptor):
+            return .terminal(descriptor.surfaceId)
+        case .browser(let descriptor):
+            return .browser(descriptor.surfaceId)
+        case .markdown(let descriptor):
+            return .markdown(descriptor.surfaceId)
+        case .placeholder:
+            return .placeholder(contentId)
+        }
+    }
+}
+
+@MainActor
+protocol WorkspacePaneContentProvider: Panel {
+    func workspacePaneContent(
+        using context: WorkspacePaneContentBuildContext
+    ) -> WorkspacePaneContent
+}
+
+@MainActor
+struct WorkspacePaneContentBuildContext {
+    let paneId: PaneID
+    let isFocused: Bool
+    let isVisibleInUI: Bool
+    let isSplit: Bool
+    let appearance: PanelAppearance
+    let hasUnreadNotification: Bool
+    let workspacePortalPriority: Int
+    let onRequestFocus: () -> Void
+    let onTriggerFlash: () -> Void
 }
 
 @MainActor
 struct WorkspaceTerminalPaneContent {
-    let panel: TerminalPanel
+    let surfaceId: UUID
     let isFocused: Bool
     let isVisibleInUI: Bool
     let isSplit: Bool
@@ -2999,7 +3044,7 @@ struct WorkspaceTerminalPaneContent {
 
 @MainActor
 struct WorkspaceBrowserPaneContent {
-    let panel: BrowserPanel
+    let surfaceId: UUID
     let paneId: PaneID
     let isFocused: Bool
     let isVisibleInUI: Bool
@@ -3009,7 +3054,7 @@ struct WorkspaceBrowserPaneContent {
 
 @MainActor
 struct WorkspaceMarkdownPaneContent {
-    let panel: MarkdownPanel
+    let surfaceId: UUID
     let isVisibleInUI: Bool
     let onRequestPanelFocus: () -> Void
 }
@@ -3040,15 +3085,8 @@ struct WorkspaceLayoutPaneChromeSnapshot {
 struct WorkspaceLayoutPaneRenderSnapshot {
     let paneId: PaneID
     let chrome: WorkspaceLayoutPaneChromeSnapshot
-    let emptyPaneContent: WorkspacePaneContent?
-    let paneContentByTabId: [UUID: WorkspacePaneContent]
-
-    func paneContent(tabId: UUID) -> WorkspacePaneContent {
-        guard let paneContent = paneContentByTabId[tabId] else {
-            preconditionFailure("Missing pane content for tab \(tabId) in pane \(paneId.id)")
-        }
-        return paneContent
-    }
+    let displayedContentId: UUID
+    let displayedContent: WorkspacePaneContent
 }
 
 struct WorkspaceLayoutSplitRenderSnapshot {

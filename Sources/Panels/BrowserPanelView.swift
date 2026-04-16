@@ -21,14 +21,14 @@ final class BrowserPanelWorkspaceContentView: NSView {
     }
 
     func update(
+        panel: BrowserPanel,
         descriptor: WorkspaceBrowserPaneContent,
-        activeDropZone: DropZone?,
-        selectedTabId: UUID?
+        activeDropZone: DropZone?
     ) {
-        currentPanel = descriptor.panel
+        currentPanel = panel
         let rootView = AnyView(
             BrowserPanelView(
-                panel: descriptor.panel,
+                panel: panel,
                 paneId: descriptor.paneId,
                 isFocused: descriptor.isFocused,
                 isVisibleInUI: descriptor.isVisibleInUI,
@@ -40,7 +40,6 @@ final class BrowserPanelWorkspaceContentView: NSView {
             .transaction { tx in
                 tx.disablesAnimations = true
             }
-            .animation(nil, value: selectedTabId)
         )
 
         hostingController.rootView = rootView

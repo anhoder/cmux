@@ -304,7 +304,8 @@ struct WorkspaceContentView: View {
 
         let splitView = WorkspaceLayoutView(
             controller: workspace.splitController,
-            renderSnapshot: renderSnapshot
+            renderSnapshot: renderSnapshot,
+            surfaceRegistry: workspace.surfaceRegistry
         )
         .internalOnlyTabDrag()
         .frame(maxWidth: .infinity, maxHeight: .infinity)

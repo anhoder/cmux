@@ -274,17 +274,20 @@ private enum WorkspaceLayoutTabChromeTitleSource: String {
 struct WorkspaceLayoutNativeHost: NSViewRepresentable {
     @Bindable private var controller: WorkspaceLayoutController
     private let renderSnapshot: WorkspaceLayoutRenderSnapshot
+    private let surfaceRegistry: WorkspaceSurfaceRegistry
     private let showSplitButtons: Bool
     private let onGeometryChange: ((_ isDragging: Bool) -> Void)?
 
     init(
         controller: WorkspaceLayoutController,
         renderSnapshot: WorkspaceLayoutRenderSnapshot,
+        surfaceRegistry: WorkspaceSurfaceRegistry,
         showSplitButtons: Bool,
         onGeometryChange: ((_ isDragging: Bool) -> Void)?
     ) {
         self.controller = controller
         self.renderSnapshot = renderSnapshot
+        self.surfaceRegistry = surfaceRegistry
         self.showSplitButtons = showSplitButtons
         self.onGeometryChange = onGeometryChange
     }
@@ -293,6 +296,7 @@ struct WorkspaceLayoutNativeHost: NSViewRepresentable {
         let view = WorkspaceLayoutRootHostView(
             controller: controller,
             renderSnapshot: renderSnapshot,
+            surfaceRegistry: surfaceRegistry,
             showSplitButtons: showSplitButtons,
             onGeometryChange: onGeometryChange
         )
@@ -304,6 +308,7 @@ struct WorkspaceLayoutNativeHost: NSViewRepresentable {
         nsView.update(
             controller: controller,
             renderSnapshot: renderSnapshot,
+            surfaceRegistry: surfaceRegistry,
             showSplitButtons: showSplitButtons,
             onGeometryChange: onGeometryChange
         )
@@ -314,6 +319,7 @@ struct WorkspaceLayoutNativeHost: NSViewRepresentable {
 final class WorkspaceLayoutRootHostView: NSView {
     private var controller: WorkspaceLayoutController
     private var renderSnapshot: WorkspaceLayoutRenderSnapshot
+    private let surfaceRegistry: WorkspaceSurfaceRegistry
     private var showSplitButtons: Bool
     private var onGeometryChange: ((_ isDragging: Bool) -> Void)?
 
@@ -327,11 +333,13 @@ final class WorkspaceLayoutRootHostView: NSView {
     init(
         controller: WorkspaceLayoutController,
         renderSnapshot: WorkspaceLayoutRenderSnapshot,
+        surfaceRegistry: WorkspaceSurfaceRegistry,
         showSplitButtons: Bool,
         onGeometryChange: ((_ isDragging: Bool) -> Void)?
     ) {
         self.controller = controller
         self.renderSnapshot = renderSnapshot
+        self.surfaceRegistry = surfaceRegistry
         self.showSplitButtons = showSplitButtons
         self.onGeometryChange = onGeometryChange
         super.init(frame: .zero)
@@ -349,6 +357,7 @@ final class WorkspaceLayoutRootHostView: NSView {
     func update(
         controller: WorkspaceLayoutController,
         renderSnapshot: WorkspaceLayoutRenderSnapshot,
+        surfaceRegistry: WorkspaceSurfaceRegistry,
         showSplitButtons: Bool,
         onGeometryChange: ((_ isDragging: Bool) -> Void)?
     ) {
@@ -406,28 +415,16 @@ final class WorkspaceLayoutRootHostView: NSView {
     private func rebuildTree() {
         let nextPaneIds = renderSnapshot.root.paneIds
         let nextSplitIds = renderSnapshot.root.splitIds
-        let topologyChanged = nextPaneIds != renderedPaneIds || nextSplitIds != renderedSplitIds
-
-        if topologyChanged {
-#if DEBUG
-            startupLog(
-                "startup.host.topologyChanged panes=\(nextPaneIds.count) splits=\(nextSplitIds.count)"
-            )
-            latencyLog(
-                "cmd_d.host.topologyChanged",
-                data: [
-                    "panes": String(nextPaneIds.count),
-                    "splits": String(nextSplitIds.count),
-                ]
-            )
-#endif
-        }
 
         let nextRootView = hostView(for: renderSnapshot.root)
 
         if currentRootView !== nextRootView {
-            currentRootView?.removeFromSuperview()
-            addSubview(nextRootView)
+            if nextRootView.superview !== self {
+                addSubview(nextRootView)
+            }
+            if currentRootView?.superview === self {
+                currentRootView?.removeFromSuperview()
+            }
             currentRootView = nextRootView
         }
 
@@ -479,7 +476,8 @@ final class WorkspaceLayoutRootHostView: NSView {
         let host = WorkspaceLayoutPaneHostView(
             rootHost: self,
             snapshot: snapshot,
-            controller: controller
+            controller: controller,
+            surfaceRegistry: surfaceRegistry
         )
         paneHosts[snapshot.paneId.id] = host
         return host
@@ -603,8 +601,14 @@ private final class WorkspaceLayoutNativeSplitView: NSSplitView, NSSplitViewDele
     }
 
     func removeAllChildren() {
-        firstChild?.removeFromSuperview()
-        secondChild?.removeFromSuperview()
+        if firstChild?.superview === firstContainer {
+            firstChild?.removeFromSuperview()
+        }
+        if secondChild?.superview === secondContainer {
+            secondChild?.removeFromSuperview()
+        }
+        firstChild = nil
+        secondChild = nil
     }
 
     override func layout() {
@@ -757,21 +761,25 @@ private final class WorkspaceLayoutPaneHostView: NSView {
     private weak var rootHost: WorkspaceLayoutRootHostView?
     private var snapshot: WorkspaceLayoutPaneRenderSnapshot
     private var controller: WorkspaceLayoutController
+    private let surfaceRegistry: WorkspaceSurfaceRegistry
 
     private let tabBarView = WorkspaceLayoutNativeTabBarView(frame: .zero)
     private let contentContainer = NSView(frame: .zero)
+    private let contentSlotView = WorkspaceLayoutPaneContentSlotView(frame: .zero)
     private let dropOverlayView = WorkspaceLayoutPaneDropOverlayView(frame: .zero)
-    private var mountedTabContent: [UUID: WorkspaceLayoutMountedPaneContent] = [:]
+    private var activeMountedContent: WorkspaceLayoutMountedTabEntry?
     private var activeDropZone: DropZone? = nil
 
     init(
         rootHost: WorkspaceLayoutRootHostView,
         snapshot: WorkspaceLayoutPaneRenderSnapshot,
-        controller: WorkspaceLayoutController
+        controller: WorkspaceLayoutController,
+        surfaceRegistry: WorkspaceSurfaceRegistry
     ) {
         self.rootHost = rootHost
         self.snapshot = snapshot
         self.controller = controller
+        self.surfaceRegistry = surfaceRegistry
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -780,6 +788,8 @@ private final class WorkspaceLayoutPaneHostView: NSView {
         addSubview(dropOverlayView)
         contentContainer.wantsLayer = true
         contentContainer.layer?.backgroundColor = NSColor.clear.cgColor
+        contentSlotView.autoresizingMask = [.width, .height]
+        contentContainer.addSubview(contentSlotView)
         dropOverlayView.hitTestPassthroughEnabled = true
         update(
             snapshot: snapshot,
@@ -829,8 +839,14 @@ private final class WorkspaceLayoutPaneHostView: NSView {
         needsLayout = true
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        refreshContent()
+    }
+
     func prepareForRemoval() {
-        removeAllMountedTabContent()
+        clearMountedContent()
     }
 
     override func layout() {
@@ -839,10 +855,8 @@ private final class WorkspaceLayoutPaneHostView: NSView {
         let topY = max(0, bounds.height - barHeight)
         tabBarView.frame = CGRect(x: 0, y: topY, width: bounds.width, height: barHeight)
         contentContainer.frame = CGRect(x: 0, y: 0, width: bounds.width, height: topY)
+        contentSlotView.frame = contentContainer.bounds
         dropOverlayView.frame = contentContainer.frame
-        for content in mountedTabContent.values {
-            content.slotView.frame = contentContainer.bounds
-        }
     }
 
     private func setActiveDropZone(_ zone: DropZone?) {
@@ -853,338 +867,58 @@ private final class WorkspaceLayoutPaneHostView: NSView {
     }
 
     private func refreshContent() {
-        guard !snapshot.chrome.tabs.isEmpty else {
-            removeAllMountedTabContent()
-            refreshEmptyPaneContent()
-            return
-        }
-
-        let selectedId = snapshot.chrome.selectedTabId ?? snapshot.chrome.tabs.first?.tab.id.id
-        let targetIds = Set(snapshot.chrome.tabs.map(\.tab.id.id))
-        for tabSnapshot in snapshot.chrome.tabs {
-            refreshContent(for: tabSnapshot.tab, selectedId: selectedId)
-        }
-
-        for (tabId, content) in mountedTabContent where !targetIds.contains(tabId) {
-            tearDownMountedContent(content)
-            mountedTabContent.removeValue(forKey: tabId)
-        }
-    }
-
-    private func refreshEmptyPaneContent() {
-        dropOverlayView.prefersNativeDropOverlay = false
-        guard let emptyPaneContent = snapshot.emptyPaneContent else { return }
-        refreshHostedContent(
-            rootView: rootView(for: emptyPaneContent),
-            for: snapshot.paneId.id,
+        let paneContent = snapshot.displayedContent
+        dropOverlayView.prefersNativeDropOverlay = paneContent.prefersNativeDropOverlay
+        refreshPaneContent(
+            paneContent,
+            for: snapshot.displayedContentId,
             isSelected: true
         )
     }
 
-    private func removeAllMountedTabContent() {
-        for content in mountedTabContent.values {
-            tearDownMountedContent(content)
-        }
-        mountedTabContent.removeAll()
+    private func clearMountedContent() {
+        guard let activeMountedContent else { return }
+        tearDownMountedContent(activeMountedContent)
+        self.activeMountedContent = nil
     }
 
-    private func refreshContent(for tab: WorkspaceLayout.Tab, selectedId: UUID?) {
-        let isSelected = tab.id.id == selectedId
-
-        let paneContent = snapshot.paneContent(tabId: tab.id.id)
-        if isSelected {
-            dropOverlayView.prefersNativeDropOverlay = paneContent.prefersNativeDropOverlay
-        }
-
-        switch paneContent {
-        case .terminal(let descriptor):
-            refreshTerminalContent(
-                descriptor,
-                for: tab.id.id,
-                isSelected: isSelected
-            )
-        case .browser(let descriptor):
-            refreshBrowserContent(
-                descriptor,
-                for: tab.id.id,
-                isSelected: isSelected
-            )
-        case .markdown(let descriptor):
-            refreshHostedContent(rootView: rootView(for: .markdown(descriptor), isSelected: isSelected), for: tab.id.id, isSelected: isSelected)
-        case .placeholder(let descriptor):
-            refreshHostedContent(rootView: rootView(for: .placeholder(descriptor), isSelected: isSelected), for: tab.id.id, isSelected: isSelected)
-        }
-#if DEBUG
-        if isSelected {
-            let paneShort = String(snapshot.paneId.id.uuidString.prefix(5))
-            let tabShort = String(tab.id.id.uuidString.prefix(5))
-            startupLog(
-                "startup.host.refreshContent pane=\(paneShort) " +
-                    "tab=\(tabShort)"
-            )
-        }
-#endif
-    }
-
-    private func rootView(for paneContent: WorkspacePaneContent, isSelected: Bool = true) -> AnyView {
-        switch paneContent {
-        case .markdown(let descriptor):
-            return AnyView(
-                MarkdownPanelView(
-                    panel: descriptor.panel,
-                    isVisibleInUI: descriptor.isVisibleInUI,
-                    onRequestPanelFocus: descriptor.onRequestPanelFocus
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .environment(\.paneDropZone, isSelected ? activeDropZone : nil)
-                .transaction { tx in
-                    tx.disablesAnimations = true
-                }
-                .animation(nil, value: snapshot.chrome.selectedTabId)
-            )
-        case .placeholder(let descriptor):
-            return AnyView(
-                EmptyPanelView(descriptor: descriptor)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transaction { tx in
-                        tx.disablesAnimations = true
-                    }
-                    .animation(nil, value: snapshot.chrome.selectedTabId)
-            )
-        case .terminal, .browser:
-            preconditionFailure("Native pane content should not be hosted through NSHostingController")
-        }
-    }
-
-    private func refreshTerminalContent(
-        _ descriptor: WorkspaceTerminalPaneContent,
-        for tabId: UUID,
+    private func refreshPaneContent(
+        _ paneContent: WorkspacePaneContent,
+        for contentId: UUID,
         isSelected: Bool
     ) {
-        let slotView: WorkspaceLayoutPaneContentSlotView
-        if let existing = mountedTabContent[tabId],
-           case .terminal(let previousDescriptor, let existingSlotView) = existing,
-           previousDescriptor.panel === descriptor.panel {
-            slotView = existingSlotView
-        } else {
-            if let existing = mountedTabContent[tabId] {
-                tearDownMountedContent(existing)
-            }
-            let nextSlotView = WorkspaceLayoutPaneContentSlotView(frame: contentContainer.bounds)
-            nextSlotView.autoresizingMask = [.width, .height]
-            contentContainer.addSubview(nextSlotView)
-            slotView = nextSlotView
+        let mountIdentity = paneContent.mountIdentity(contentId: contentId)
+        if let existing = activeMountedContent,
+           (existing.contentId != contentId || existing.mountIdentity != mountIdentity) {
+            tearDownMountedContent(existing)
+            activeMountedContent = nil
         }
 
-        mountedTabContent[tabId] = .terminal(descriptor: descriptor, slotView: slotView)
-        applyTerminalContent(
-            descriptor,
-            slotView: slotView,
-            isSelected: isSelected
+        surfaceRegistry.mountContent(
+            paneContent,
+            contentId: contentId,
+            in: contentSlotView,
+            isSelected: isSelected,
+            activeDropZone: activeDropZone
+        )
+        activeMountedContent = WorkspaceLayoutMountedTabEntry(
+            contentId: contentId,
+            content: paneContent,
+            mountIdentity: mountIdentity
         )
     }
 
-    private func applyTerminalContent(
-        _ descriptor: WorkspaceTerminalPaneContent,
-        slotView: WorkspaceLayoutPaneContentSlotView,
-        isSelected: Bool
-    ) {
-        if slotView.superview !== contentContainer {
-            slotView.removeFromSuperview()
-            contentContainer.addSubview(slotView)
-        }
-        slotView.frame = contentContainer.bounds
-
-        let panel = descriptor.panel
-        let hostedView = descriptor.panel.hostedView
-        let hostIsWindowed = slotView.window != nil || contentContainer.window != nil
-        if !hostIsWindowed {
-            slotView.isHidden = !isSelected
-#if DEBUG
-            if isSelected {
-                let paneShort = String(snapshot.paneId.id.uuidString.prefix(5))
-                let panelShort = String(panel.id.uuidString.prefix(5))
-                startupLog(
-                    "startup.host.applyTerminal.skipOffWindow pane=\(paneShort) " +
-                        "panel=\(panelShort) " +
-                        "host=\(Unmanaged.passUnretained(self).toOpaque()) " +
-                        "root=\(rootHost.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil")"
-                )
-            }
-#endif
-            return
-        }
-
-        slotView.installContentView(hostedView)
-        slotView.isHidden = !isSelected
-
-        contentContainer.layoutSubtreeIfNeeded()
-        slotView.layoutSubtreeIfNeeded()
-        hostedView.layoutSubtreeIfNeeded()
-        hostedView.attachSurface(panel.surface)
-
-        let canWarmStartRuntime =
-            panel.surface.surface == nil &&
-            (isSelected || descriptor.isVisibleInUI) &&
-            slotView.bounds.width > 1 &&
-            slotView.bounds.height > 1
-        if canWarmStartRuntime {
-            _ = hostedView.reconcileGeometryNow()
-            panel.surface.requestBackgroundSurfaceStartIfNeeded()
-        }
-        hostedView.setFocusHandler { descriptor.onFocus() }
-        hostedView.setTriggerFlashHandler(descriptor.onTriggerFlash)
-        hostedView.setInactiveOverlay(
-            color: descriptor.appearance.unfocusedOverlayNSColor,
-            opacity: CGFloat(descriptor.appearance.unfocusedOverlayOpacity),
-            visible: descriptor.isSplit && !descriptor.isFocused
+    private func tearDownMountedContent(_ content: WorkspaceLayoutMountedTabEntry) {
+        surfaceRegistry.unmountContent(
+            content.content,
+            contentId: content.contentId,
+            from: contentSlotView
         )
-        hostedView.setNotificationRing(visible: descriptor.hasUnreadNotification)
-        hostedView.setSearchOverlay(searchState: panel.searchState)
-        hostedView.syncKeyStateIndicator(text: descriptor.panel.surface.currentKeyStateIndicatorText)
-        hostedView.setDropZoneOverlay(zone: isSelected ? activeDropZone : nil)
-        hostedView.setVisibleInUI(isSelected ? descriptor.isVisibleInUI : false)
-        hostedView.setActive(isSelected ? descriptor.isFocused : false)
-        hostedView.resumeReparentFocusIfSuppressed()
-#if DEBUG
-        if isSelected {
-            let paneShort = String(snapshot.paneId.id.uuidString.prefix(5))
-            let panelShort = String(panel.id.uuidString.prefix(5))
-            let visible = descriptor.isVisibleInUI ? 1 : 0
-            let focused = descriptor.isFocused ? 1 : 0
-            let hostWindow = slotView.window != nil ? 1 : 0
-            let hostedWindow = hostedView.window != nil ? 1 : 0
-            let runtime = panel.surface.surface != nil ? 1 : 0
-            startupLog(
-                "startup.host.applyTerminal pane=\(paneShort) panel=\(panelShort) " +
-                    "visible=\(visible) focused=\(focused) hostWindow=\(hostWindow) " +
-                    "hostedWindow=\(hostedWindow) runtime=\(runtime) " +
-                    "host=\(Unmanaged.passUnretained(self).toOpaque()) " +
-                    "root=\(rootHost.map { String(describing: Unmanaged.passUnretained($0).toOpaque()) } ?? "nil")"
-            )
-            latencyLog(
-                "cmd_d.host.applyTerminal",
-                data: [
-                    "focused": String(focused),
-                    "hostWindow": String(hostWindow),
-                    "hostedWindow": String(hostedWindow),
-                    "pane": paneShort,
-                    "panel": panelShort,
-                    "runtime": String(runtime),
-                    "visible": String(visible),
-                ]
-            )
-        }
-#endif
-    }
-
-    private func refreshBrowserContent(
-        _ descriptor: WorkspaceBrowserPaneContent,
-        for tabId: UUID,
-        isSelected: Bool
-    ) {
-        let entry: WorkspaceLayoutMountedPaneContent
-        if let existing = mountedTabContent[tabId],
-           case .browser(let hostView, let slotView) = existing {
-            hostView.update(
-                descriptor: descriptor,
-                activeDropZone: isSelected ? activeDropZone : nil,
-                selectedTabId: snapshot.chrome.selectedTabId
-            )
-            slotView.installContentView(hostView)
-            entry = .browser(hostView: hostView, slotView: slotView)
-        } else {
-            if let existing = mountedTabContent[tabId] {
-                tearDownMountedContent(existing)
-            }
-            let hostView = BrowserPanelWorkspaceContentView(frame: contentContainer.bounds)
-            hostView.update(
-                descriptor: descriptor,
-                activeDropZone: isSelected ? activeDropZone : nil,
-                selectedTabId: snapshot.chrome.selectedTabId
-            )
-
-            let slotView = WorkspaceLayoutPaneContentSlotView(frame: contentContainer.bounds)
-            slotView.autoresizingMask = [.width, .height]
-            slotView.installContentView(hostView)
-            contentContainer.addSubview(slotView)
-
-            entry = .browser(hostView: hostView, slotView: slotView)
-            mountedTabContent[tabId] = entry
-        }
-
-        guard case .browser(let hostView, let slotView) = entry else { return }
-        if slotView.superview !== contentContainer {
-            slotView.removeFromSuperview()
-            contentContainer.addSubview(slotView)
-        }
-        hostView.frame = contentContainer.bounds
-        slotView.frame = contentContainer.bounds
-        slotView.isHidden = !isSelected
-    }
-
-    private func refreshHostedContent(
-        rootView: AnyView,
-        for tabId: UUID,
-        isSelected: Bool
-    ) {
-        let entry: WorkspaceLayoutMountedPaneContent
-        if let existing = mountedTabContent[tabId],
-           case .hosting(let hostingController, let slotView) = existing {
-            hostingController.rootView = rootView
-            slotView.installContentView(hostingController.view)
-            entry = .hosting(hostingController: hostingController, slotView: slotView)
-        } else {
-            if let existing = mountedTabContent[tabId] {
-                tearDownMountedContent(existing)
-            }
-            let hostingController = NSHostingController(rootView: rootView)
-            hostingController.view.translatesAutoresizingMaskIntoConstraints = true
-            hostingController.view.autoresizingMask = [.width, .height]
-            hostingController.view.frame = contentContainer.bounds
-
-            let slotView = WorkspaceLayoutPaneContentSlotView(frame: contentContainer.bounds)
-            slotView.autoresizingMask = [.width, .height]
-            slotView.installContentView(hostingController.view)
-            contentContainer.addSubview(slotView)
-
-            entry = .hosting(hostingController: hostingController, slotView: slotView)
-            mountedTabContent[tabId] = entry
-        }
-
-        guard case .hosting(_, let slotView) = entry else { return }
-        if slotView.superview !== contentContainer {
-            slotView.removeFromSuperview()
-            contentContainer.addSubview(slotView)
-        }
-        slotView.frame = contentContainer.bounds
-        slotView.isHidden = !isSelected
-    }
-
-    private func tearDownMountedContent(_ content: WorkspaceLayoutMountedPaneContent) {
-        switch content {
-        case .terminal(let descriptor, let slotView):
-            let hostedView = descriptor.panel.hostedView
-            hostedView.setDropZoneOverlay(zone: nil)
-            hostedView.setVisibleInUI(false)
-            hostedView.setActive(false)
-            hostedView.setFocusHandler(nil)
-            hostedView.setTriggerFlashHandler(nil)
-            hostedView.removeFromSuperview()
-            slotView.removeFromSuperview()
-        case .browser(let hostView, let slotView):
-            hostView.prepareForRemoval(reason: "workspaceHostRemoval")
-            hostView.removeFromSuperview()
-            slotView.removeFromSuperview()
-        case .hosting(let hostingController, let slotView):
-            hostingController.view.removeFromSuperview()
-            slotView.removeFromSuperview()
-        }
     }
 }
 
 @MainActor
-private final class WorkspaceLayoutPaneContentSlotView: NSView {
+final class WorkspaceLayoutPaneContentSlotView: NSView {
     private var installedContentView: NSView?
 
     override init(frame frameRect: NSRect) {
@@ -1215,6 +949,11 @@ private final class WorkspaceLayoutPaneContentSlotView: NSView {
         view.autoresizingMask = [.width, .height]
     }
 
+    func clearContentView() {
+        installedContentView?.removeFromSuperview()
+        installedContentView = nil
+    }
+
     override func layout() {
         super.layout()
         installedContentView?.frame = bounds
@@ -1222,17 +961,10 @@ private final class WorkspaceLayoutPaneContentSlotView: NSView {
 }
 
 @MainActor
-private enum WorkspaceLayoutMountedPaneContent {
-    case terminal(descriptor: WorkspaceTerminalPaneContent, slotView: WorkspaceLayoutPaneContentSlotView)
-    case browser(hostView: BrowserPanelWorkspaceContentView, slotView: WorkspaceLayoutPaneContentSlotView)
-    case hosting(hostingController: NSHostingController<AnyView>, slotView: WorkspaceLayoutPaneContentSlotView)
-
-    var slotView: WorkspaceLayoutPaneContentSlotView {
-        switch self {
-        case .terminal(_, let slotView), .browser(_, let slotView), .hosting(_, let slotView):
-            return slotView
-        }
-    }
+private struct WorkspaceLayoutMountedTabEntry {
+    let contentId: UUID
+    let content: WorkspacePaneContent
+    let mountIdentity: WorkspacePaneMountIdentity
 }
 
 @MainActor

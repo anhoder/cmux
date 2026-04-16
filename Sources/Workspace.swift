@@ -240,6 +240,354 @@ struct WorkspaceTabChromeProjectionState {
     let entriesByPanelId: [UUID: Entry]
 }
 
+@MainActor
+final class WorkspaceSurfaceRegistry {
+    private unowned let workspace: Workspace
+    private var retainedHosts: [WorkspacePaneMountIdentity: any WorkspaceRetainedSurfaceHost] = [:]
+
+    init(workspace: Workspace) {
+        self.workspace = workspace
+    }
+
+    func mountContent(
+        _ content: WorkspacePaneContent,
+        contentId: UUID,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone: DropZone?
+    ) {
+        retainedHost(for: content, contentId: contentId).mount(
+            content: content,
+            in: slotView,
+            isSelected: isSelected,
+            activeDropZone: activeDropZone
+        )
+    }
+
+    func unmountContent(
+        _ content: WorkspacePaneContent,
+        contentId: UUID,
+        from slotView: WorkspaceLayoutPaneContentSlotView
+    ) {
+        let identity = content.mountIdentity(contentId: contentId)
+        retainedHosts[identity]?.unmount(from: slotView)
+        if case .placeholder = identity {
+            discardRetainedHost(identity)
+        }
+    }
+
+    func removeSurface(surfaceId: UUID) {
+        discardRetainedHost(.terminal(surfaceId))
+        discardRetainedHost(.browser(surfaceId))
+        discardRetainedHost(.markdown(surfaceId))
+    }
+
+    func removeAllSurfaces() {
+        let identities = Array(retainedHosts.keys)
+        for identity in identities {
+            discardRetainedHost(identity)
+        }
+    }
+
+    private func retainedHost(
+        for content: WorkspacePaneContent,
+        contentId: UUID
+    ) -> any WorkspaceRetainedSurfaceHost {
+        let identity = content.mountIdentity(contentId: contentId)
+        if let existing = retainedHosts[identity] {
+            return existing
+        }
+        let next = makeRetainedHost(for: content, contentId: contentId)
+        retainedHosts[identity] = next
+        return next
+    }
+
+    private func makeRetainedHost(
+        for content: WorkspacePaneContent,
+        contentId: UUID
+    ) -> any WorkspaceRetainedSurfaceHost {
+        switch content {
+        case .terminal(let descriptor):
+            WorkspaceTerminalRetainedSurfaceHost(
+                workspace: workspace,
+                surfaceId: descriptor.surfaceId
+            )
+        case .browser(let descriptor):
+            WorkspaceBrowserRetainedSurfaceHost(
+                workspace: workspace,
+                surfaceId: descriptor.surfaceId
+            )
+        case .markdown(let descriptor):
+            WorkspaceMarkdownRetainedSurfaceHost(
+                workspace: workspace,
+                surfaceId: descriptor.surfaceId
+            )
+        case .placeholder:
+            WorkspacePlaceholderRetainedSurfaceHost(contentId: contentId)
+        }
+    }
+
+    private func discardRetainedHost(_ identity: WorkspacePaneMountIdentity) {
+        if let host = retainedHosts.removeValue(forKey: identity) {
+            host.prepareForSurfaceRemoval()
+        }
+    }
+}
+
+@MainActor
+private protocol WorkspaceRetainedSurfaceHost: AnyObject {
+    var mountIdentity: WorkspacePaneMountIdentity { get }
+
+    func mount(
+        content: WorkspacePaneContent,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone: DropZone?
+    )
+
+    func unmount(from slotView: WorkspaceLayoutPaneContentSlotView)
+
+    func prepareForSurfaceRemoval()
+}
+
+@MainActor
+private final class WorkspaceTerminalRetainedSurfaceHost: WorkspaceRetainedSurfaceHost {
+    let mountIdentity: WorkspacePaneMountIdentity
+
+    private unowned let workspace: Workspace
+    private let surfaceId: UUID
+
+    init(workspace: Workspace, surfaceId: UUID) {
+        self.workspace = workspace
+        self.surfaceId = surfaceId
+        mountIdentity = .terminal(surfaceId)
+    }
+
+    func mount(
+        content: WorkspacePaneContent,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone: DropZone?
+    ) {
+        guard case .terminal(let descriptor) = content,
+              let panel = workspace.panels[surfaceId] as? TerminalPanel else {
+            slotView.clearContentView()
+            return
+        }
+
+        let hostedView = panel.hostedView
+        slotView.installContentView(hostedView)
+        slotView.isHidden = !isSelected
+
+        hostedView.setFocusHandler { descriptor.onFocus() }
+        hostedView.setTriggerFlashHandler(descriptor.onTriggerFlash)
+        hostedView.setInactiveOverlay(
+            color: descriptor.appearance.unfocusedOverlayNSColor,
+            opacity: CGFloat(descriptor.appearance.unfocusedOverlayOpacity),
+            visible: descriptor.isSplit && !descriptor.isFocused
+        )
+        hostedView.setNotificationRing(visible: descriptor.hasUnreadNotification)
+        hostedView.setSearchOverlay(searchState: panel.searchState)
+        hostedView.syncKeyStateIndicator(text: panel.surface.currentKeyStateIndicatorText)
+        hostedView.setDropZoneOverlay(zone: isSelected ? activeDropZone : nil)
+        hostedView.setVisibleInUI(isSelected ? descriptor.isVisibleInUI : false)
+        hostedView.setActive(isSelected ? descriptor.isFocused : false)
+
+        let hostIsWindowed = slotView.window != nil || slotView.superview?.window != nil
+        guard hostIsWindowed else {
+            return
+        }
+
+        slotView.layoutSubtreeIfNeeded()
+        hostedView.layoutSubtreeIfNeeded()
+        hostedView.attachSurface(panel.surface)
+
+        let canWarmStartRuntime =
+            panel.surface.surface == nil &&
+            (isSelected || descriptor.isVisibleInUI) &&
+            slotView.bounds.width > 1 &&
+            slotView.bounds.height > 1
+        if canWarmStartRuntime {
+            _ = hostedView.reconcileGeometryNow()
+            panel.surface.requestBackgroundSurfaceStartIfNeeded()
+        }
+        hostedView.resumeReparentFocusIfSuppressed()
+    }
+
+    func unmount(from slotView: WorkspaceLayoutPaneContentSlotView) {
+        clearHostedView()
+        slotView.clearContentView()
+    }
+
+    func prepareForSurfaceRemoval() {
+        clearHostedView()
+    }
+
+    private func clearHostedView() {
+        guard let panel = workspace.panels[surfaceId] as? TerminalPanel else { return }
+        let hostedView = panel.hostedView
+        hostedView.setDropZoneOverlay(zone: nil)
+        hostedView.setVisibleInUI(false)
+        hostedView.setActive(false)
+        hostedView.setFocusHandler(nil)
+        hostedView.setTriggerFlashHandler(nil)
+        hostedView.removeFromSuperview()
+    }
+}
+
+@MainActor
+private final class WorkspaceBrowserRetainedSurfaceHost: WorkspaceRetainedSurfaceHost {
+    let mountIdentity: WorkspacePaneMountIdentity
+
+    private unowned let workspace: Workspace
+    private let surfaceId: UUID
+    private let hostView = BrowserPanelWorkspaceContentView(frame: .zero)
+
+    init(workspace: Workspace, surfaceId: UUID) {
+        self.workspace = workspace
+        self.surfaceId = surfaceId
+        mountIdentity = .browser(surfaceId)
+    }
+
+    func mount(
+        content: WorkspacePaneContent,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone: DropZone?
+    ) {
+        guard case .browser(let descriptor) = content,
+              let panel = workspace.panels[surfaceId] as? BrowserPanel else {
+            slotView.clearContentView()
+            return
+        }
+
+        hostView.update(
+            panel: panel,
+            descriptor: descriptor,
+            activeDropZone: isSelected ? activeDropZone : nil
+        )
+        slotView.installContentView(hostView)
+        slotView.isHidden = !isSelected
+    }
+
+    func unmount(from slotView: WorkspaceLayoutPaneContentSlotView) {
+        hostView.prepareForRemoval(reason: "workspaceHostRemoval")
+        hostView.removeFromSuperview()
+        slotView.clearContentView()
+    }
+
+    func prepareForSurfaceRemoval() {
+        hostView.prepareForRemoval(reason: "surfaceRemoved")
+        hostView.removeFromSuperview()
+    }
+}
+
+@MainActor
+private final class WorkspaceMarkdownRetainedSurfaceHost: WorkspaceRetainedSurfaceHost {
+    let mountIdentity: WorkspacePaneMountIdentity
+
+    private unowned let workspace: Workspace
+    private let surfaceId: UUID
+    private let hostingController: NSHostingController<AnyView>
+
+    init(workspace: Workspace, surfaceId: UUID) {
+        self.workspace = workspace
+        self.surfaceId = surfaceId
+        mountIdentity = .markdown(surfaceId)
+        hostingController = NSHostingController(rootView: AnyView(EmptyView()))
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = true
+        hostingController.view.autoresizingMask = [.width, .height]
+    }
+
+    func mount(
+        content: WorkspacePaneContent,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone: DropZone?
+    ) {
+        guard case .markdown(let descriptor) = content,
+              let panel = workspace.panels[surfaceId] as? MarkdownPanel else {
+            slotView.clearContentView()
+            return
+        }
+
+        hostingController.rootView = AnyView(
+            MarkdownPanelView(
+                panel: panel,
+                isVisibleInUI: descriptor.isVisibleInUI,
+                onRequestPanelFocus: descriptor.onRequestPanelFocus
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .environment(\.paneDropZone, isSelected ? activeDropZone : nil)
+            .transaction { tx in
+                tx.disablesAnimations = true
+            }
+        )
+
+        slotView.installContentView(hostingController.view)
+        slotView.isHidden = !isSelected
+    }
+
+    func unmount(from slotView: WorkspaceLayoutPaneContentSlotView) {
+        hostingController.view.removeFromSuperview()
+        slotView.clearContentView()
+    }
+
+    func prepareForSurfaceRemoval() {
+        hostingController.view.removeFromSuperview()
+    }
+}
+
+@MainActor
+private final class WorkspacePlaceholderRetainedSurfaceHost: WorkspaceRetainedSurfaceHost {
+    let mountIdentity: WorkspacePaneMountIdentity
+
+    private let contentId: UUID
+    private let hostingController: NSHostingController<AnyView>
+
+    init(contentId: UUID) {
+        self.contentId = contentId
+        mountIdentity = .placeholder(contentId)
+        hostingController = NSHostingController(rootView: AnyView(EmptyView()))
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = true
+        hostingController.view.autoresizingMask = [.width, .height]
+    }
+
+    func mount(
+        content: WorkspacePaneContent,
+        in slotView: WorkspaceLayoutPaneContentSlotView,
+        isSelected: Bool,
+        activeDropZone _: DropZone?
+    ) {
+        guard case .placeholder(let descriptor) = content else {
+            slotView.clearContentView()
+            return
+        }
+
+        let rootView = AnyView(
+            EmptyPanelView(descriptor: descriptor)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transaction { tx in
+                    tx.disablesAnimations = true
+                }
+        )
+
+        hostingController.rootView = rootView
+
+        slotView.installContentView(hostingController.view)
+        slotView.isHidden = !isSelected
+    }
+
+    func unmount(from slotView: WorkspaceLayoutPaneContentSlotView) {
+        hostingController.view.removeFromSuperview()
+        slotView.clearContentView()
+    }
+
+    func prepareForSurfaceRemoval() {
+        hostingController.view.removeFromSuperview()
+    }
+}
+
 private enum RemoteDropUploadError: LocalizedError {
     case unavailable
     case invalidFileURL
@@ -6627,6 +6975,8 @@ final class Workspace: Identifiable, ObservableObject {
     /// Mapping from WorkspaceSplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
 
+    lazy var surfaceRegistry = WorkspaceSurfaceRegistry(workspace: self)
+
     /// Subscriptions for panel updates (e.g., browser title changes)
     private var panelSubscriptions: [UUID: AnyCancellable] = [:]
 
@@ -7564,7 +7914,7 @@ final class Workspace: Identifiable, ObservableObject {
         if let terminalPanel = panel as? TerminalPanel {
             return .terminal(
                 WorkspaceTerminalPaneContent(
-                    panel: terminalPanel,
+                    surfaceId: terminalPanel.id,
                     isFocused: isFocused,
                     isVisibleInUI: isVisibleInUI,
                     isSplit: splitController.allPaneIds.count > 1 || panels.count > 1,
@@ -7587,7 +7937,7 @@ final class Workspace: Identifiable, ObservableObject {
         if let browserPanel = panel as? BrowserPanel {
             return .browser(
                 WorkspaceBrowserPaneContent(
-                    panel: browserPanel,
+                    surfaceId: browserPanel.id,
                     paneId: paneId,
                     isFocused: isFocused,
                     isVisibleInUI: isVisibleInUI,
@@ -7605,7 +7955,7 @@ final class Workspace: Identifiable, ObservableObject {
         if let markdownPanel = panel as? MarkdownPanel {
             return .markdown(
                 WorkspaceMarkdownPaneContent(
-                    panel: markdownPanel,
+                    surfaceId: markdownPanel.id,
                     isVisibleInUI: isVisibleInUI,
                     onRequestPanelFocus: { [weak self, weak markdownPanel] in
                         guard let self, let markdownPanel else { return }
@@ -7693,23 +8043,27 @@ final class Workspace: Identifiable, ObservableObject {
                 projectionState: projectionState,
                 showSplitButtons: context.showSplitButtons
             )
+            let displayedContent: (contentId: UUID, content: WorkspacePaneContent) = {
+                if let selectedTab = chrome.tabs.first(where: { $0.tab.id.id == chrome.selectedTabId })?.tab
+                    ?? chrome.tabs.first?.tab {
+                    return (
+                        selectedTab.id.id,
+                        makePaneContentDescriptor(
+                            for: selectedTab,
+                            in: pane.id,
+                            context: context
+                        )
+                    )
+                }
+
+                return (pane.id.id, makeEmptyPaneContentDescriptor(in: pane.id))
+            }()
             return .pane(
                 WorkspaceLayoutPaneRenderSnapshot(
                     paneId: pane.id,
                     chrome: chrome,
-                    emptyPaneContent: chrome.tabs.isEmpty ? makeEmptyPaneContentDescriptor(in: pane.id) : nil,
-                    paneContentByTabId: Dictionary(
-                        uniqueKeysWithValues: chrome.tabs.map { tabSnapshot in
-                            (
-                                tabSnapshot.tab.id.id,
-                                makePaneContentDescriptor(
-                                    for: tabSnapshot.tab,
-                                    in: pane.id,
-                                    context: context
-                                )
-                            )
-                        }
-                    )
+                    displayedContentId: displayedContent.contentId,
+                    displayedContent: displayedContent.content
                 )
             )
         case .split(let split):
@@ -9836,6 +10190,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         panels.removeAll(keepingCapacity: false)
+        surfaceRegistry.removeAllSurfaces()
         panelSubscriptions.removeAll(keepingCapacity: false)
         pendingRemoteTerminalChildExitSurfaceIds.removeAll(keepingCapacity: false)
         pruneSurfaceMetadata(validSurfaceIds: [])
@@ -11500,7 +11855,6 @@ extension Workspace: WorkspaceLayoutDelegate {
         let selectTabId = postCloseSelectTabId.removeValue(forKey: tabId)
         let closedBrowserRestoreSnapshot = pendingClosedBrowserRestoreSnapshots.removeValue(forKey: tabId)
         let isDetaching = detachingTabIds.remove(tabId) != nil || isDetachingCloseTransaction
-
         // Clean up our panel
         let panelId = tabId.id
         guard let panel = panels[panelId] else {
@@ -11540,6 +11894,7 @@ extension Workspace: WorkspaceLayoutDelegate {
         }
 
         panels.removeValue(forKey: panelId)
+        surfaceRegistry.removeSurface(surfaceId: panelId)
         untrackRemoteTerminalSurface(panelId)
         pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
         removeSurfaceState(panelId: panelId)
@@ -11678,6 +12033,7 @@ extension Workspace: WorkspaceLayoutDelegate {
             for panelId in closedPanelIds {
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
+                surfaceRegistry.removeSurface(surfaceId: panelId)
                 untrackRemoteTerminalSurface(panelId)
                 pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
                 removeSurfaceState(panelId: panelId)
