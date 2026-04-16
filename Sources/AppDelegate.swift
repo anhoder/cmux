@@ -14697,6 +14697,7 @@ final class AuthManager: ObservableObject {
 final class MobileDaemonBridgeInline {
     static let shared = MobileDaemonBridgeInline()
     private var process: Process?
+    private var daemonPid: pid_t?
     private var wsPortFilePath: String?
     #if canImport(TailscaleKit)
     private var tailscaleManager: TailscaleNodeManager?
@@ -14711,8 +14712,9 @@ final class MobileDaemonBridgeInline {
     /// an existing one. Does a live socket check for reused daemons to
     /// avoid treating a dead daemon as running.
     var isRunning: Bool {
+        if let pid = daemonPid, kill(pid, 0) == 0 { return true }
         if process?.isRunning == true { return true }
-        guard daemonReused, let path = daemonSocketPath else { return false }
+        guard let path = daemonSocketPath else { return false }
         return isReachableSocket(path)
     }
 
@@ -14769,22 +14771,40 @@ final class MobileDaemonBridgeInline {
         // No existing daemon — start fresh.
         killDaemonOnSocket(socketPath: daemonSocket)
 
-        // Wrap the spawn in `/usr/bin/nohup` so the daemon ignores SIGHUP.
-        // Swift's Process keeps the child in the mac app's process group —
-        // when the mac app exits (Cmd+Q, force quit, crash) the kernel
-        // sends SIGHUP to the process group. Without nohup the daemon dies
-        // there, even when the user explicitly chose "Keep Daemon", losing
-        // every running shell/TUI the daemon was holding.
+        // Detach the daemon from the mac app's process group + session so
+        // it outlives "Quit (keep daemon)". Swift's Process keeps the
+        // child in our pgrp; when the mac app exits the kernel delivers
+        // SIGHUP to every pgrp member and cmuxd dies. /bin/sh -c '... &
+        // disown' runs the daemon as a backgrounded, disowned job, then
+        // exits the outer shell — the daemon is reparented to launchd
+        // (pid 1) and removed from the shell's job table so no SIGHUP
+        // fires when the shell exits either.
+        func shellEscape(_ s: String) -> String {
+            return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        let daemonCommand = "exec \(shellEscape(binaryPath)) serve --unix --socket \(shellEscape(daemonSocket)) --ws-port \(port) --ws-secret \(shellEscape(secret))"
+        let wrapper = "(\(daemonCommand)) </dev/null >/dev/null 2>&1 & disown; echo $!"
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/nohup")
-        proc.arguments = [binaryPath, "serve", "--unix", "--socket", daemonSocket, "--ws-port", String(port), "--ws-secret", secret]
-        proc.standardOutput = FileHandle.nullDevice
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", wrapper]
+        let pidPipe = Pipe()
+        proc.standardOutput = pidPipe
         proc.standardError = FileHandle.nullDevice
         proc.terminationHandler = { [weak self] _ in self?.cleanup() }
 
         do {
             try proc.run()
-            process = proc
+            // Outer sh exits immediately after backgrounding+disowning the
+            // daemon. Read the PID it printed so we can signal the daemon
+            // directly for the explicit "kill daemon" path.
+            proc.waitUntilExit()
+            let pidData = pidPipe.fileHandleForReading.availableData
+            if let pidStr = String(data: pidData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               let pid = pid_t(pidStr), pid > 0 {
+                self.daemonPid = pid
+                NSLog("📱 MobileBridge: daemon pid=%d (detached from app pgrp)", pid)
+            }
+            process = nil  // outer sh is already dead
             self.wsPort = port
             self.daemonSocketPath = daemonSocket
             self.wsSecret = secret
@@ -14831,9 +14851,14 @@ final class MobileDaemonBridgeInline {
     #endif
 
     func stop(killDaemon shouldKill: Bool = false) {
-        if shouldKill, let p = process, p.isRunning {
-            p.terminate()
-            NSLog("📱 MobileBridge: terminated daemon pid=%d on quit", p.processIdentifier)
+        if shouldKill {
+            if let pid = daemonPid, kill(pid, 0) == 0 {
+                kill(pid, SIGTERM)
+                NSLog("📱 MobileBridge: terminated daemon pid=%d on quit", pid)
+            } else if let p = process, p.isRunning {
+                p.terminate()
+                NSLog("📱 MobileBridge: terminated proc pid=%d on quit", p.processIdentifier)
+            }
         }
         #if canImport(TailscaleKit)
         if let manager = tailscaleManager {
@@ -14842,6 +14867,7 @@ final class MobileDaemonBridgeInline {
         }
         #endif
         process = nil
+        daemonPid = nil
         wsPort = nil
         daemonSocketPath = nil
         wsSecret = nil
@@ -14898,9 +14924,12 @@ final class MobileDaemonBridgeInline {
 
     /// Kill the daemon process explicitly (for cmux daemon stop).
     func killDaemon() {
-        if let p = process, p.isRunning {
+        if let pid = daemonPid, kill(pid, 0) == 0 {
+            kill(pid, SIGTERM)
+            NSLog("📱 MobileBridge: terminated daemon pid=%d", pid)
+        } else if let p = process, p.isRunning {
             p.terminate()
-            NSLog("📱 MobileBridge: terminated daemon pid=%d", p.processIdentifier)
+            NSLog("📱 MobileBridge: terminated proc pid=%d", p.processIdentifier)
         }
         if let socketPath = daemonSocketPath {
             try? FileManager.default.removeItem(atPath: socketPath)
