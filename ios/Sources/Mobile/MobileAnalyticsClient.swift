@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "mobile.analytics")
 
 enum MobileAnalyticsEventName: String, Codable, Equatable, Sendable {
     case mobileMachineSessionIssued = "mobile_machine_session_issued"
@@ -135,7 +138,7 @@ final class MobileAnalyticsClient: MobileAnalyticsTracking {
                     responseType: MobileAcceptedResponse.self
                 )
             } catch {
-                NSLog("📱 MobileAnalyticsClient: Failed to capture \(event.rawValue): \(error)")
+                log.error("Failed to capture \(event.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }

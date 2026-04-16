@@ -1,4 +1,7 @@
 import Foundation
+import OSLog
+
+private let log = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.pool")
 
 /// Process-wide registry of TerminalDaemonConnection actors, keyed by host
 /// stableID. Workspace subscription and terminal sessions for the same daemon
@@ -47,12 +50,7 @@ final class TerminalDaemonConnectionPool: @unchecked Sendable {
             if existing.matches(hostname: hostname, port: port, secret: secret) {
                 return existing
             }
-            NSLog(
-                "[WebSocket] pool invalidating stableID=%@ (endpoint changed -> %@:%d)",
-                stableID,
-                hostname,
-                port
-            )
+            log.info("pool invalidating stableID=\(stableID, privacy: .public) (endpoint changed -> \(hostname, privacy: .public):\(port, privacy: .public))")
             connections.removeValue(forKey: stableID)
         }
         let connection = TerminalDaemonConnection(

@@ -1,4 +1,7 @@
+import OSLog
 import SwiftUI
+
+private let scannerLog = Logger(subsystem: "ai.manaflow.cmux.ios", category: "terminal.scanner")
 
 struct DiscoveredServer: Identifiable {
     let id = UUID()
@@ -33,7 +36,7 @@ final class ScannerLog: @unchecked Sendable {
         entries.append(line)
         if entries.count > maxEntries { entries.removeFirst(entries.count - maxEntries) }
         lock.unlock()
-        NSLog("📡 Scanner: %@", message)
+        scannerLog.debug("\(message, privacy: .public)")
     }
 
     func allEntries() -> String {
