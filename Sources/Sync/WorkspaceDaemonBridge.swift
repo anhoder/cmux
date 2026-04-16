@@ -97,6 +97,11 @@ final class WorkspaceDaemonBridge {
             .dropFirst()
             .sink { [weak self] _ in self?.scheduleSyncNow() }
             .store(in: &cancellables)
+
+        NotificationCenter.default
+            .publisher(for: .terminalSurfaceDaemonSessionAssigned)
+            .sink { [weak self] _ in self?.scheduleSyncNow() }
+            .store(in: &cancellables)
     }
 
     func stop() {
@@ -280,10 +285,33 @@ final class WorkspaceDaemonBridge {
             lastSyncTime = Date()
             return
         }
+        // Defer while any terminal panel is still waiting on workspace.open_pane
+        // to mint its daemon session id. The daemon's syncAll rebuilds the
+        // pane tree from the sync payload, so emitting a partial payload
+        // mid-openPane would drop the freshly-minted pane. The openPane
+        // completion posts .terminalSurfaceDaemonSessionAssigned which
+        // re-kicks this sync once the id lands.
+        if hasPendingDaemonSessionAssignments() {
+            return
+        }
         guard let params = buildSyncParams() else { return }
         connection.sendWorkspaceSync(params)
         lastSyncTime = Date()
         syncCount += 1
+    }
+
+    private func hasPendingDaemonSessionAssignments() -> Bool {
+        guard let tabManager else { return false }
+        for workspace in tabManager.tabs {
+            for panel in workspace.panels.values {
+                guard let terminal = panel as? TerminalPanel else { continue }
+                if terminal.surface.savedDaemonSessionID == nil,
+                   terminal.surface.daemonBridge != nil {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func buildSyncParams() -> [String: Any]? {
@@ -292,11 +320,11 @@ final class WorkspaceDaemonBridge {
         let workspaces: [[String: Any]] = tabManager.tabs.map { workspace in
             let preview = workspacePreview(for: workspace)
             let terminalPanels = workspace.panels.values.compactMap { $0 as? TerminalPanel }
-            // Only surface panels whose daemon session id is already known.
-            // A newly-created panel whose `workspace.open_pane` RPC is still
-            // in flight has no authoritative id yet; the daemon has already
-            // recorded the pane (openPane is what bound it), so omitting
-            // it here is preferable to inventing a fabricated id.
+            // performSync defers while any panel is still waiting on
+            // openPane, so every panel we see here has either a
+            // daemon-minted id or no daemon bridge at all (release
+            // builds / daemon-down). Panels without a bridge are
+            // elided — they aren't daemon-visible anyway.
             let sessionIDs: [String] = terminalPanels.compactMap { panel in
                 panel.surface.savedDaemonSessionID
             }

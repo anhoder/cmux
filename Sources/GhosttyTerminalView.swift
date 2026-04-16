@@ -4331,6 +4331,15 @@ final class TerminalSurface: Identifiable, ObservableObject {
                         self?.savedDaemonSessionID = sid
                         bridge?.assignSessionID(sid)
                         dlog("surface.daemonBridge.assign session=\(sid)")
+                        // Nudge workspace.sync: without this the next sync
+                        // might still be the one scheduled before openPane
+                        // landed, filtered of this pane, which the daemon's
+                        // syncAll would use to drop our fresh pane.
+                        NotificationCenter.default.post(
+                            name: .terminalSurfaceDaemonSessionAssigned,
+                            object: nil,
+                            userInfo: ["workspaceId": workspaceID, "sessionId": sid]
+                        )
                     }
                 }
             }
@@ -8714,6 +8723,12 @@ extension Notification.Name {
     static let ghosttyDidReceiveWheelScroll = Notification.Name("ghosttyDidReceiveWheelScroll")
     static let ghosttySearchFocus = Notification.Name("ghosttySearchFocus")
     static let ghosttyConfigDidReload = Notification.Name("ghosttyConfigDidReload")
+    /// Posted on the main actor when a TerminalSurface's daemon session id
+    /// is resolved (openPane completed or saved id adopted). Gives the
+    /// workspace.sync pipeline a signal to rebroadcast authoritative ids
+    /// so the daemon's syncAll doesn't rebuild the pane tree with a
+    /// pending/missing session.
+    static let terminalSurfaceDaemonSessionAssigned = Notification.Name("terminalSurfaceDaemonSessionAssigned")
     static let ghosttyDefaultBackgroundDidChange = Notification.Name("ghosttyDefaultBackgroundDidChange")
     static let browserSearchFocus = Notification.Name("browserSearchFocus")
 }
