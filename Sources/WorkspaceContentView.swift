@@ -274,8 +274,12 @@ struct WorkspaceContentView: View {
         let isSplit = workspace.splitController.allPaneIds.count > 1 ||
             workspace.panels.count > 1
         let usesWorkspacePaneOverlay = TmuxOverlayExperimentSettings.target().usesWorkspacePaneOverlay
-        let tabChromeProjectionState = workspace.makeTabChromeProjectionState(
-            notificationStore: notificationStore
+        let showSplitButtons =
+            workspace.splitController.configuration.allowSplits &&
+            workspace.splitController.configuration.appearance.showSplitButtons
+        let renderSnapshot = workspace.makeLayoutRenderSnapshot(
+            notificationStore: notificationStore,
+            showSplitButtons: showSplitButtons
         )
 
         // Inactive workspaces are kept alive in a ZStack (for state preservation) but their
@@ -297,6 +301,7 @@ struct WorkspaceContentView: View {
 
         let splitView = WorkspaceLayoutView(
             controller: workspace.splitController,
+            renderSnapshot: renderSnapshot,
             nativeContent: { tab, paneId in
                 let _ = Self.debugPanelLookup(tab: tab, workspace: workspace)
                 guard let panel = workspace.panel(for: tab.id) else {
@@ -355,9 +360,6 @@ struct WorkspaceContentView: View {
                 }
 
                 return nil
-            },
-            tabChrome: { tab, _ in
-                workspace.renderTabChrome(for: tab, using: tabChromeProjectionState)
             }
         ) { tab, paneId in
             let _ = Self.debugPanelLookup(tab: tab, workspace: workspace)

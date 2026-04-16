@@ -37,6 +37,9 @@ Implemented on `issue-2289-appkit-split-host`:
 - the window now keeps all workspaces mounted and lets selection control visibility and input instead of maintaining a second mount cache
 - `TabManager` no longer defers unfocus through `pendingWorkspaceUnfocusTarget`; switching workspaces now focuses the target and unfocuses the previous workspace directly
 - temporary blank-pane debug probes such as `close.blankstate.*`, `ws.handoff.*`, and `ws.mount.reconcile` are gone
+- `Workspace` now owns canonical per-surface runtime metadata in one `surfaceStatesByPanelId` map instead of parallel title, directory, pin, unread, browser chrome, git, PR, port, and tty stores
+- `Workspace` internals now read and mutate that canonical surface state directly for session restore, focus, close, detach/attach, sidebar ordering, browser/markdown creation, remote tty/port updates, and tab chrome projection
+- `WorkspaceContentView` no longer assembles tab chrome projection state locally, and `Workspace` now builds the layout render snapshot that the AppKit host applies
 
 Current remaining work is the fresh architecture pass:
 

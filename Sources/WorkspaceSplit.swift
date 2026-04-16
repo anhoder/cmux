@@ -2899,6 +2899,7 @@ import SwiftUI
 /// ```
 struct WorkspaceLayoutView<Content: View, EmptyContent: View>: View {
     @Bindable private var controller: WorkspaceLayoutController
+    private let renderSnapshot: WorkspaceLayoutRenderSnapshot?
     private let contentBuilder: (WorkspaceLayout.Tab, PaneID) -> Content
     private let emptyPaneBuilder: (PaneID) -> EmptyContent
     private let nativeContentBuilder: ((WorkspaceLayout.Tab, PaneID) -> WorkspaceNativePaneContent?)?
@@ -2911,12 +2912,14 @@ struct WorkspaceLayoutView<Content: View, EmptyContent: View>: View {
     ///   - emptyPane: A ViewBuilder closure that provides content for empty panes
     init(
         controller: WorkspaceLayoutController,
+        renderSnapshot: WorkspaceLayoutRenderSnapshot? = nil,
         nativeContent: ((WorkspaceLayout.Tab, PaneID) -> WorkspaceNativePaneContent?)? = nil,
         tabChrome: WorkspaceLayoutTabChromeProvider? = nil,
         @ViewBuilder content: @escaping (WorkspaceLayout.Tab, PaneID) -> Content,
         @ViewBuilder emptyPane: @escaping (PaneID) -> EmptyContent
     ) {
         self.controller = controller
+        self.renderSnapshot = renderSnapshot
         self.nativeContentBuilder = nativeContent
         self.tabChromeProvider = tabChrome
         self.contentBuilder = content
@@ -2924,18 +2927,19 @@ struct WorkspaceLayoutView<Content: View, EmptyContent: View>: View {
     }
 
     var body: some View {
-        let renderSnapshot = workspaceLayoutMakeRenderSnapshot(
+        let showSplitButtons = controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons
+        let resolvedRenderSnapshot = renderSnapshot ?? workspaceLayoutMakeRenderSnapshot(
             controller: controller,
             tabChromeBuilder: tabChromeProvider,
-            showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons
+            showSplitButtons: showSplitButtons
         )
         WorkspaceLayoutNativeHost(
             controller: controller,
-            renderSnapshot: renderSnapshot,
+            renderSnapshot: resolvedRenderSnapshot,
             nativeContent: nativeContentBuilder,
             content: contentBuilder,
             emptyPane: emptyPaneBuilder,
-            showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons,
+            showSplitButtons: showSplitButtons,
             onGeometryChange: { [weak controller] isDragging in
                 controller?.notifyGeometryChange(isDragging: isDragging)
             }
@@ -2952,11 +2956,13 @@ extension WorkspaceLayoutView where EmptyContent == DefaultEmptyPaneView {
     ///   - content: A ViewBuilder closure that provides content for each tab. Receives the tab and pane ID.
     init(
         controller: WorkspaceLayoutController,
+        renderSnapshot: WorkspaceLayoutRenderSnapshot? = nil,
         nativeContent: ((WorkspaceLayout.Tab, PaneID) -> WorkspaceNativePaneContent?)? = nil,
         tabChrome: WorkspaceLayoutTabChromeProvider? = nil,
         @ViewBuilder content: @escaping (WorkspaceLayout.Tab, PaneID) -> Content
     ) {
         self.controller = controller
+        self.renderSnapshot = renderSnapshot
         self.nativeContentBuilder = nativeContent
         self.tabChromeProvider = tabChrome
         self.contentBuilder = content
