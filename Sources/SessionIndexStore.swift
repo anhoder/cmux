@@ -99,19 +99,14 @@ struct SessionEntry: Identifiable, Hashable {
         }
     }
 
-    /// Shell command that resumes this session, prefixed with `cd <cwd> && ` when
-    /// the caller isn't already in the session's working directory. Use
-    /// `alreadyInCwd: true` for the in-app path that opens a new tab in the same
-    /// workspace as the session's cwd, so we don't emit a redundant `cd`. For the
-    /// clipboard / drag-drop / new-workspace paths, pass `false` (or leave default)
-    /// so the resume works regardless of where the receiving shell lands.
-    func resumeCommand(alreadyInCwd: Bool) -> String {
+    /// Shell command that resumes this session, prefixed with `cd <cwd> && `
+    /// when a cwd is known. Always include `cd`: every caller drops this into a
+    /// fresh or unrelated shell (clipboard, drag-drop, or a newly spawned
+    /// terminal whose rc files can land it anywhere), so we can never assume
+    /// the receiver is already in the session's working directory.
+    var resumeCommandWithCwd: String {
         let base = resumeCommand
-        guard !alreadyInCwd,
-              let cwd,
-              !cwd.isEmpty else {
-            return base
-        }
+        guard let cwd, !cwd.isEmpty else { return base }
         return "cd \(Self.shellQuote(cwd)) && \(base)"
     }
 
@@ -482,12 +477,20 @@ final class SessionIndexStore: ObservableObject {
     nonisolated private static func extractClaudeMetadata(head: String, tail: String, projectDir: String) -> ClaudeParsed {
         var out = ClaudeParsed()
         out.cwd = decodeClaudeProjectDir(projectDir)
+        // Claude records the cwd on every event (including later tool calls that
+        // may have cd'd into a subdirectory). `--resume` needs the *project* cwd,
+        // which is the cwd Claude was launched with, i.e. the first cwd seen in
+        // the transcript. Lock it in the first time and don't let later cwd's
+        // overwrite it.
+        var cwdLocked = false
 
         for line in head.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            if let cwdField = obj["cwd"] as? String, !cwdField.isEmpty {
+            if !cwdLocked,
+               let cwdField = obj["cwd"] as? String, !cwdField.isEmpty {
                 out.cwd = cwdField
+                cwdLocked = true
             }
             if let branchField = obj["gitBranch"] as? String, !branchField.isEmpty {
                 out.branch = branchField

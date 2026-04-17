@@ -11144,7 +11144,7 @@ final class Workspace: Identifiable, ObservableObject {
         // else (e.g. an auto-chdir in zshrc). Prepend `cd` so the resume
         // lands in the session's cwd regardless of the shell's post-startup
         // cwd.
-        let inputWithReturn = entry.resumeCommand(alreadyInCwd: false) + "\n"
+        let inputWithReturn = entry.resumeCommandWithCwd + "\n"
         switch destination {
         case .insert(let paneId, _):
             let panel = newTerminalSurface(

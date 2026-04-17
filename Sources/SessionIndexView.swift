@@ -489,7 +489,7 @@ private func sessionRowMenuItems(entry: SessionEntry, onResume: ((SessionEntry) 
         pb.clearContents()
         // Always include `cd` when copied: the user could paste this into any
         // shell regardless of its current directory.
-        pb.setString(entry.resumeCommand(alreadyInCwd: false), forType: .string)
+        pb.setString(entry.resumeCommandWithCwd, forType: .string)
     } label: {
         Text(String(localized: "sessionIndex.row.copyResume", defaultValue: "Copy Resume Command"))
     }

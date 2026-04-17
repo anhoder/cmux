@@ -2995,15 +2995,15 @@ struct ContentView: View {
             return lhs == rhs
         }()
 
-        // Only skip the `cd` prefix when the receiving terminal is guaranteed to
-        // already be in the session's cwd. That's only the cwd-match path where a
-        // fresh tab is spawned in the same workspace. For the new-workspace path,
-        // we still want the `cd` as a safety net in case the shell's rc files land
-        // it somewhere else.
+        // Always prepend `cd`: every path here spawns a NEW shell, and the
+        // shell's rc files can cd elsewhere before our typed input runs. The
+        // cost of a redundant `cd` is zero; the cost of landing in the wrong
+        // repo is a broken `claude --resume`.
+        let inputWithReturn = entry.resumeCommandWithCwd + "\n"
+
         if pwdMatches,
            let workspace = selected,
            let paneId = workspace.bonsplitController.focusedPaneId {
-            let inputWithReturn = entry.resumeCommand(alreadyInCwd: true) + "\n"
             workspace.newTerminalSurface(
                 inPane: paneId,
                 focus: true,
@@ -3013,7 +3013,6 @@ struct ContentView: View {
             return
         }
 
-        let inputWithReturn = entry.resumeCommand(alreadyInCwd: false) + "\n"
         tabManager.addWorkspace(
             workingDirectory: targetCwd,
             initialTerminalInput: inputWithReturn
