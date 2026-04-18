@@ -124,6 +124,22 @@ struct SessionIndexView: View {
         // draggedKey transition only re-renders the two sections whose
         // isDragged flipped — not every section.
         let draggedKey = dragCoordinator.draggedKey
+
+        // Build closure bundles ONCE per render. Every handle the list
+        // subtree needs is a closure; the subtree never sees `store` or
+        // `dragCoordinator` directly so rows can't observe them.
+        let store = self.store
+        let dragCoordinator = self.dragCoordinator
+        let onResumeClosure = onResume
+        let gapActions = SectionGapActions(
+            currentDraggedKey: { dragCoordinator.draggedKey },
+            moveSection: { key, before in store.moveSection(key, before: before) },
+            clearDraggedKey: { dragCoordinator.draggedKey = nil }
+        )
+        let searchFn: SessionSearchFn = { query, scope, offset, limit in
+            await store.searchSessions(query: query, scope: scope, offset: offset, limit: limit)
+        }
+
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(sections.enumerated()), id: \.element.key) { index, section in
@@ -131,8 +147,7 @@ struct SessionIndexView: View {
                     SectionReorderGap(
                         beforeKey: section.key,
                         isValidDrop: draggedKey == nil || draggedKey != section.key,
-                        store: store,
-                        dragCoordinator: dragCoordinator
+                        actions: gapActions
                     ).equatable()
                     IndexSectionView(
                         section: section,
@@ -154,9 +169,11 @@ struct SessionIndexView: View {
                                 openPopoverSection = newValue ? section.key : nil
                             }
                         ),
-                        store: store,
-                        dragCoordinator: dragCoordinator,
-                        onResume: onResume
+                        actions: IndexSectionActions(
+                            onBeginDrag: { dragCoordinator.draggedKey = section.key },
+                            onResume: onResumeClosure,
+                            search: searchFn
+                        )
                     ).equatable()
                     let _ = index
                 }
@@ -164,8 +181,7 @@ struct SessionIndexView: View {
                 SectionReorderGap(
                     beforeKey: nil,
                     isValidDrop: true,
-                    store: store,
-                    dragCoordinator: dragCoordinator
+                    actions: gapActions
                 ).equatable()
             }
             .padding(.bottom, 8)
@@ -206,6 +222,34 @@ private struct GroupingButton: View {
     }
 }
 
+/// Closure type for paginated session search. Handed down into the popover
+/// instead of a `SessionIndexStore` reference so views inside the lazy list
+/// subtree cannot observe the store by accident.
+typealias SessionSearchFn = @MainActor (
+    _ query: String,
+    _ scope: SessionIndexStore.SearchScope,
+    _ offset: Int,
+    _ limit: Int
+) async -> SessionIndexStore.SearchOutcome
+
+/// Callback bundle handed to `IndexSectionView` in place of a store reference.
+/// Every capability the row needs is expressed as a closure so no child view
+/// below the snapshot boundary can subscribe to `ObservableObject` updates —
+/// a future `@ObservedObject var store` on a row becomes a type error rather
+/// than a silent 100% CPU regression.
+struct IndexSectionActions {
+    let onBeginDrag: @MainActor () -> Void
+    let onResume: ((SessionEntry) -> Void)?
+    let search: SessionSearchFn
+}
+
+/// Callback bundle for `SectionReorderGap` / `SectionGapDropDelegate`.
+struct SectionGapActions {
+    let currentDraggedKey: @MainActor () -> SectionKey?
+    let moveSection: @MainActor (SectionKey, SectionKey?) -> Void
+    let clearDraggedKey: @MainActor () -> Void
+}
+
 private struct IndexSectionView: View, Equatable {
     let section: IndexSection
     let rowLimit: Int
@@ -215,18 +259,15 @@ private struct IndexSectionView: View, Equatable {
     let isDragged: Bool
     @Binding var isCollapsed: Bool
     @Binding var isPopoverOpen: Bool
-    /// Plain (non-observing) reference used only for passing through to the
-    /// popover host and for the section drag's `onDrag` callback writing the
-    /// dragged key into `dragCoordinator`. Reads that would trigger view
-    /// invalidation are intentionally absent.
-    let store: SessionIndexStore
-    let dragCoordinator: SessionDragCoordinator
-    let onResume: ((SessionEntry) -> Void)?
+    /// Value-type action bundle. See `IndexSectionActions` — replaces the
+    /// earlier `store` / `dragCoordinator` class references so rows can't
+    /// observe the store.
+    let actions: IndexSectionActions
 
-    /// Skip body re-eval when this view's inputs are unchanged. `store` and
-    /// `dragCoordinator` identities are stable per-panel so they aren't part
-    /// of `==`; `onResume` is not comparable but is stable from the parent
-    /// chain. This is the core optimization that keeps LazyVStack's layout
+    /// Skip body re-eval when this view's inputs are unchanged. `actions` is
+    /// not comparable (closures) but is expected to be stable (closures
+    /// capture stable object references above the list boundary). Excluding
+    /// it from `==` is the core optimization that keeps LazyVStack's layout
     /// cache from thrashing when unrelated store fields change.
     static func == (lhs: IndexSectionView, rhs: IndexSectionView) -> Bool {
         lhs.section == rhs.section
@@ -248,7 +289,7 @@ private struct IndexSectionView: View, Equatable {
                         .padding(.vertical, 4)
                 } else {
                     ForEach(Array(section.entries.prefix(rowLimit))) { entry in
-                        SessionRow(entry: entry, onResume: onResume)
+                        SessionRow(entry: entry, onResume: actions.onResume)
                             .equatable()
                     }
                     if section.entries.count > rowLimit {
@@ -277,8 +318,8 @@ private struct IndexSectionView: View, Equatable {
             SectionPopoverHost(
                 isPresented: $isPopoverOpen,
                 section: section,
-                store: store,
-                onResume: onResume
+                search: actions.search,
+                onResume: actions.onResume
             )
         )
     }
@@ -306,9 +347,8 @@ private struct IndexSectionView: View, Equatable {
         }
         .buttonStyle(.plain)
         .onDrag {
-            DispatchQueue.main.async { [dragCoordinator, section] in
-                dragCoordinator.draggedKey = section.key
-            }
+            let beginDrag = actions.onBeginDrag
+            DispatchQueue.main.async { beginDrag() }
             return NSItemProvider(object: section.key.raw as NSString)
         } preview: {
             HStack(spacing: 8) {
@@ -347,10 +387,9 @@ private struct SectionReorderGap: View, Equatable {
     /// Precomputed in the parent from the single draggedKey snapshot. Keeps
     /// the gap from reading drag state itself.
     let isValidDrop: Bool
-    /// Plain references. `store` for `moveSection`; `dragCoordinator` so the
-    /// drop delegate can clear the dragged key when the drop completes.
-    let store: SessionIndexStore
-    let dragCoordinator: SessionDragCoordinator
+    /// Closure bundle — the gap never sees `SessionIndexStore` or
+    /// `SessionDragCoordinator` directly, so it cannot `@ObservedObject` them.
+    let actions: SectionGapActions
     @State private var isDropTarget: Bool = false
 
     static func == (lhs: SectionReorderGap, rhs: SectionReorderGap) -> Bool {
@@ -373,8 +412,7 @@ private struct SectionReorderGap: View, Equatable {
                 of: [.text],
                 delegate: SectionGapDropDelegate(
                     beforeKey: beforeKey,
-                    store: store,
-                    dragCoordinator: dragCoordinator,
+                    actions: actions,
                     isDropTarget: $isDropTarget
                 )
             )
@@ -383,13 +421,12 @@ private struct SectionReorderGap: View, Equatable {
 
 private struct SectionGapDropDelegate: DropDelegate {
     let beforeKey: SectionKey?
-    let store: SessionIndexStore
-    let dragCoordinator: SessionDragCoordinator
+    let actions: SectionGapActions
     @Binding var isDropTarget: Bool
 
     func validateDrop(info: DropInfo) -> Bool {
         guard info.hasItemsConforming(to: [.text]) else { return false }
-        guard let dragged = dragCoordinator.draggedKey else { return true }
+        guard let dragged = actions.currentDraggedKey() else { return true }
         return dragged != beforeKey
     }
 
@@ -399,18 +436,17 @@ private struct SectionGapDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         isDropTarget = false
         guard let provider = info.itemProviders(for: [.text]).first else {
-            dragCoordinator.draggedKey = nil
+            actions.clearDraggedKey()
             return false
         }
         let beforeKey = self.beforeKey
-        let store = self.store
-        let dragCoordinator = self.dragCoordinator
+        let actions = self.actions
         provider.loadObject(ofClass: NSString.self) { object, _ in
             DispatchQueue.main.async {
-                defer { dragCoordinator.draggedKey = nil }
+                defer { actions.clearDraggedKey() }
                 guard let raw = object as? String else { return }
                 let key = SectionKey(raw: raw)
-                store.moveSection(key, before: beforeKey)
+                actions.moveSection(key, beforeKey)
             }
         }
         return true
@@ -566,7 +602,9 @@ private func sessionRowMenuItems(entry: SessionEntry, onResume: ((SessionEntry) 
 
 private struct SectionPopoverView: View {
     let section: IndexSection
-    let store: SessionIndexStore
+    /// Closure-typed search handle. The popover never holds a reference to
+    /// `SessionIndexStore`; the parent view is the only owner.
+    let search: SessionSearchFn
     let onResume: ((SessionEntry) -> Void)?
     let onDismiss: () -> Void
 
@@ -744,14 +782,11 @@ private struct SectionPopoverView: View {
         isLoading = true
         errorMessages = []
         let scope = sectionSearchScope
-        let store = self.store
+        let search = self.search
         loadTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled || generation != loadGeneration { return }
-            let outcome = await store.searchSessions(
-                query: trimmed, scope: scope,
-                offset: 0, limit: Self.pageSize
-            )
+            let outcome = await search(trimmed, scope, 0, Self.pageSize)
             if Task.isCancelled || generation != loadGeneration { return }
             applyOutcome(outcome, append: false)
         }
@@ -763,14 +798,11 @@ private struct SectionPopoverView: View {
         isLoading = true
         let generation = loadGeneration
         let scope = sectionSearchScope
-        let store = self.store
+        let search = self.search
         let query = activeQuery
         let offset = loaded.count
         loadTask = Task { @MainActor in
-            let outcome = await store.searchSessions(
-                query: query, scope: scope,
-                offset: offset, limit: Self.pageSize
-            )
+            let outcome = await search(query, scope, offset, Self.pageSize)
             if Task.isCancelled || generation != loadGeneration { return }
             applyOutcome(outcome, append: true)
         }
@@ -955,7 +987,9 @@ private func sessionDragItemProvider(for entry: SessionEntry) -> NSItemProvider 
 private struct SectionPopoverHost: NSViewRepresentable {
     @Binding var isPresented: Bool
     let section: IndexSection
-    let store: SessionIndexStore
+    /// Closure-typed search handle passed through to the SwiftUI popover
+    /// body. The host no longer holds a `SessionIndexStore` reference.
+    let search: SessionSearchFn
     let onResume: ((SessionEntry) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(isPresented: $isPresented) }
@@ -972,7 +1006,7 @@ private struct SectionPopoverHost: NSViewRepresentable {
         coordinator.anchorView = nsView
         coordinator.update(
             section: section,
-            store: store,
+            search: search,
             onResume: onResume
         )
         if isPresented {
@@ -1003,7 +1037,7 @@ private struct SectionPopoverHost: NSViewRepresentable {
         }()
         private var popover: NSPopover?
         private var currentSection: IndexSection?
-        private var currentStore: SessionIndexStore?
+        private var currentSearch: SessionSearchFn?
         private var currentOnResume: ((SessionEntry) -> Void)?
         /// Bumped on every present(). Used as the SwiftUI view identity so each
         /// open gets fresh @State (empty query, fresh focus, no stale results).
@@ -1013,19 +1047,23 @@ private struct SectionPopoverHost: NSViewRepresentable {
             _isPresented = isPresented
         }
 
-        func update(section: IndexSection, store: SessionIndexStore, onResume: ((SessionEntry) -> Void)?) {
+        func update(
+            section: IndexSection,
+            search: @escaping SessionSearchFn,
+            onResume: ((SessionEntry) -> Void)?
+        ) {
             currentSection = section
-            currentStore = store
+            currentSearch = search
             currentOnResume = onResume
             refreshContent()
         }
 
         private func refreshContent() {
-            guard let section = currentSection, let store = currentStore else { return }
+            guard let section = currentSection, let search = currentSearch else { return }
             let onResume = currentOnResume
             let identity = presentationCount
             hostingController.rootView = AnyView(
-                SectionPopoverView(section: section, store: store, onResume: onResume) { [weak self] in
+                SectionPopoverView(section: section, search: search, onResume: onResume) { [weak self] in
                     self?.closeFromContent()
                 }
                 // Tied to presentationCount so reopening the popover discards
