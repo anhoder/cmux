@@ -104,6 +104,54 @@ while ! mkdir "$LOCK_DIR" 2>/dev/null; do
 done
 trap 'rmdir "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
 
+try_fetch_prebuilt_xcframework() {
+  # Only attempt when Ghostty submodule is clean — dirty trees won't match any
+  # published release. Opt-out via CMUX_GHOSTTYKIT_NO_PREBUILT=1.
+  if [[ "$GHOSTTY_KEY" != "$GHOSTTY_SHA" ]]; then
+    return 1
+  fi
+  if [[ "${CMUX_GHOSTTYKIT_NO_PREBUILT:-0}" == "1" ]]; then
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local url="https://github.com/manaflow-ai/ghostty/releases/download/xcframework-${GHOSTTY_SHA}/GhosttyKit.xcframework.tar.gz"
+  local tmp_tar
+  tmp_tar="$(mktemp "$CACHE_ROOT/.ghosttykit-prebuilt.XXXXXX.tar.gz")"
+  echo "==> Fetching prebuilt GhosttyKit.xcframework for ${GHOSTTY_SHA:0:12}..."
+  if ! curl -fSL --retry 3 --retry-delay 2 -o "$tmp_tar" "$url"; then
+    rm -f "$tmp_tar"
+    echo "==> Prebuilt xcframework not available; falling back to local build."
+    return 1
+  fi
+
+  local tmp_extract
+  tmp_extract="$(mktemp -d "$CACHE_ROOT/.ghosttykit-extract.XXXXXX")"
+  if ! tar -xzf "$tmp_tar" -C "$tmp_extract"; then
+    rm -rf "$tmp_tar" "$tmp_extract"
+    echo "==> Failed to extract prebuilt xcframework; falling back to local build." >&2
+    return 1
+  fi
+  rm -f "$tmp_tar"
+
+  local extracted="$tmp_extract/GhosttyKit.xcframework"
+  if [[ ! -d "$extracted" ]]; then
+    rm -rf "$tmp_extract"
+    echo "==> Prebuilt archive did not contain GhosttyKit.xcframework; falling back." >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$LOCAL_XCFRAMEWORK")"
+  rm -rf "$LOCAL_XCFRAMEWORK"
+  mv "$extracted" "$LOCAL_XCFRAMEWORK"
+  rmdir "$tmp_extract" 2>/dev/null || rm -rf "$tmp_extract"
+  echo "$GHOSTTY_KEY" > "$LOCAL_KEY_STAMP"
+  echo "$GHOSTTY_SHA" > "$LEGACY_LOCAL_SHA_STAMP"
+  return 0
+}
+
 if [[ -d "$CACHE_XCFRAMEWORK" ]]; then
   echo "==> Reusing cached GhosttyKit.xcframework"
 else
@@ -116,6 +164,8 @@ else
 
   if [[ -d "$LOCAL_XCFRAMEWORK" && "$LOCAL_KEY" == "$GHOSTTY_KEY" ]]; then
     echo "==> Seeding cache from existing local GhosttyKit.xcframework (build key matches)"
+  elif try_fetch_prebuilt_xcframework; then
+    echo "==> Seeding cache from prebuilt GhosttyKit.xcframework"
   else
     echo "==> Building GhosttyKit.xcframework (this may take a few minutes)..."
     (
