@@ -562,6 +562,311 @@ private func sessionRowMenuItems(entry: SessionEntry, onResume: ((SessionEntry) 
 }
 
 
+// MARK: - "Show more" popover with search
+
+private struct SectionPopoverView: View {
+    let section: IndexSection
+    let store: SessionIndexStore
+    let onResume: ((SessionEntry) -> Void)?
+    let onDismiss: () -> Void
+
+    @State private var query: String = ""
+    @FocusState private var searchFocused: Bool
+
+    /// Pages of results loaded so far. Each page is `pageSize` rows from the store's
+    /// paginated search.
+    @State private var loaded: [SessionEntry] = []
+    @State private var hasMore: Bool = true
+    @State private var isLoading: Bool = false
+    @State private var activeQuery: String = ""
+    @State private var loadTask: Task<Void, Never>?
+    @State private var errorMessages: [String] = []
+    /// Bumped on each query reset so an in-flight task knows it's been superseded
+    /// even if cancellation hasn't propagated yet.
+    @State private var loadGeneration: Int = 0
+
+    private static let pageSize = 30
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                sectionIconView
+                Text(section.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                TextField(
+                    String(localized: "sessionIndex.popover.searchPlaceholder",
+                           defaultValue: "Search sessions"),
+                    text: $query
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($searchFocused)
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
+
+            Divider()
+
+            if !errorMessages.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(errorMessages, id: \.self) { msg in
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                            Text(msg)
+                                .font(.system(size: 11))
+                                .foregroundColor(.primary.opacity(0.85))
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.10))
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if isLoading && loaded.isEmpty {
+                        loadingRow
+                    } else if loaded.isEmpty {
+                        Text(String(localized: "sessionIndex.popover.noMatches",
+                                    defaultValue: "No matches"))
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ForEach(loaded) { entry in
+                            PopoverRow(entry: entry) {
+                                onResume?(entry)
+                                onDismiss()
+                            }
+                            .equatable()
+                        }
+                        if hasMore {
+                            loadingRow
+                                .onAppear { loadMore() }
+                        }
+                    }
+                }
+                .padding(.top, 4)
+                .padding(.bottom, 10)
+            }
+            .frame(maxHeight: 420)
+        }
+        .frame(width: 360)
+        .background(
+            EscapeKeyCatcher { onDismiss() }
+        )
+        .onAppear {
+            resetAndLoad(query: "")
+            DispatchQueue.main.async { searchFocused = true }
+        }
+        .onChange(of: query) { newValue in
+            resetAndLoad(query: newValue)
+        }
+        .onDisappear {
+            loadTask?.cancel()
+            loadTask = nil
+            isLoading = false
+        }
+    }
+
+    private var loadingRow: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text(String(localized: "sessionIndex.popover.loading", defaultValue: "Loading…"))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Reset the page and load page 0.
+    /// - Empty query: synchronous fast path. Show the cached top-N from
+    ///   `section.entries` immediately so opening the popover never flashes a
+    ///   loading spinner. The sentinel row's loadMore will then fetch any
+    ///   additional pages from disk/SQL when the user scrolls past them.
+    /// - Non-empty query: 200ms debounce then deep search via the store.
+    private func resetAndLoad(query newValue: String) {
+        loadTask?.cancel()
+        loadGeneration += 1
+        let generation = loadGeneration
+        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        activeQuery = trimmed
+
+        if trimmed.isEmpty {
+            loaded = section.entries
+            // Optimistic: assume there might be more on disk; loadMore will
+            // discover the truth and flip hasMore off if a fetch returns nothing.
+            hasMore = !section.entries.isEmpty
+            isLoading = false
+            errorMessages = []
+            return
+        }
+
+        loaded = []
+        hasMore = true
+        isLoading = true
+        errorMessages = []
+        let scope = sectionSearchScope
+        let store = self.store
+        loadTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if Task.isCancelled || generation != loadGeneration { return }
+            let outcome = await store.searchSessions(
+                query: trimmed, scope: scope,
+                offset: 0, limit: Self.pageSize
+            )
+            if Task.isCancelled || generation != loadGeneration { return }
+            applyOutcome(outcome, append: false)
+        }
+    }
+
+    /// Append the next page to `loaded`. Triggered by the sentinel row's onAppear.
+    private func loadMore() {
+        guard !isLoading, hasMore else { return }
+        isLoading = true
+        let generation = loadGeneration
+        let scope = sectionSearchScope
+        let store = self.store
+        let query = activeQuery
+        let offset = loaded.count
+        loadTask = Task { @MainActor in
+            let outcome = await store.searchSessions(
+                query: query, scope: scope,
+                offset: offset, limit: Self.pageSize
+            )
+            if Task.isCancelled || generation != loadGeneration { return }
+            applyOutcome(outcome, append: true)
+        }
+    }
+
+    /// Merge a fetch result into the popover's display state. Both the
+    /// initial-page and load-more paths converge here so the count/hasMore/
+    /// error/loading bookkeeping lives in one place.
+    @MainActor
+    private func applyOutcome(_ outcome: SessionIndexStore.SearchOutcome, append: Bool) {
+        if append {
+            loaded.append(contentsOf: outcome.entries)
+        } else {
+            loaded = outcome.entries
+        }
+        hasMore = outcome.entries.count >= Self.pageSize
+        errorMessages = outcome.errors
+        isLoading = false
+    }
+
+    private var sectionSearchScope: SessionIndexStore.SearchScope {
+        let raw = section.key.raw
+        if raw.hasPrefix("agent:"),
+           let agent = SessionAgent(rawValue: String(raw.dropFirst("agent:".count))) {
+            return .agent(agent)
+        }
+        if raw.hasPrefix("dir:") {
+            let path = String(raw.dropFirst("dir:".count))
+            return .directory(path.isEmpty ? nil : path)
+        }
+        return .directory(nil)
+    }
+
+    @ViewBuilder
+    private var sectionIconView: some View {
+        switch section.icon {
+        case .agent(let agent):
+            Image(agent.assetName)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 14, height: 14)
+        case .folder:
+            Image(systemName: "folder")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundColor(.secondary)
+                .frame(width: 14, height: 14)
+        }
+    }
+}
+
+private struct PopoverRow: View, Equatable {
+    let entry: SessionEntry
+    let onActivate: () -> Void
+
+    @State private var isHovered: Bool = false
+
+    static func == (lhs: PopoverRow, rhs: PopoverRow) -> Bool {
+        lhs.entry == rhs.entry
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(entry.agent.assetName)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 12, height: 12)
+            Text(entry.displayTitle)
+                .font(.system(size: 12))
+                .foregroundColor(.primary.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Text(SessionIndexView.relativeFormatter.localizedString(for: entry.modified, relativeTo: Date()))
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundColor(.secondary.opacity(0.7))
+                .fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
+        .onHover { isHovered = $0 }
+        .onTapGesture(count: 2) { onActivate() }
+        .onDrag {
+            sessionDragItemProvider(for: entry)
+        }
+        .help(entry.cwdLabel ?? entry.displayTitle)
+        .contextMenu {
+            sessionRowMenuItems(entry: entry, onResume: { _ in onActivate() })
+        }
+    }
+}
+
 // MARK: - Drag payload
 
 /// Mirrors `Bonsplit.TabItem`'s Codable shape so we can produce a JSON payload
@@ -642,13 +947,11 @@ private func sessionDragItemProvider(for entry: SessionEntry) -> NSItemProvider 
     return provider
 }
 
-// MARK: - Show-more popover (AppKit)
+// MARK: - NSPopover host
 
-/// Anchors an NSPopover hosting `SessionSearchPopoverController`. The popover
-/// is pure AppKit — NSSearchField + NSScrollView + NSTableView — so we get
-/// honest virtualization, native scroll-based pagination triggers, and
-/// AppKit's own size propagation into NSPopover instead of SwiftUI's
-/// LazyVStack layout-cache heuristics.
+/// Hosts SectionPopoverView in a real NSPopover. SwiftUI's native `.popover()`
+/// doesn't reliably let the embedded TextField become first responder in cmux's
+/// focus-managed environment — the terminal keeps grabbing focus back.
 private struct SectionPopoverHost: NSViewRepresentable {
     @Binding var isPresented: Bool
     let section: IndexSection
@@ -667,9 +970,11 @@ private struct SectionPopoverHost: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         let coordinator = context.coordinator
         coordinator.anchorView = nsView
-        coordinator.section = section
-        coordinator.store = store
-        coordinator.onResume = onResume
+        coordinator.update(
+            section: section,
+            store: store,
+            onResume: onResume
+        )
         if isPresented {
             coordinator.present()
         } else {
@@ -684,41 +989,81 @@ private struct SectionPopoverHost: NSViewRepresentable {
     final class Coordinator: NSObject, NSPopoverDelegate {
         @Binding var isPresented: Bool
         weak var anchorView: NSView?
-        var section: IndexSection?
-        var store: SessionIndexStore?
-        var onResume: ((SessionEntry) -> Void)?
 
+        private let hostingController: NSHostingController<AnyView> = {
+            let hc = NSHostingController(rootView: AnyView(EmptyView()))
+            // Let SwiftUI drive the hosting controller's intrinsic size so
+            // NSPopover resizes as @State loads (search results streaming in,
+            // pagination appending rows). Without this, the popover would be
+            // frozen at whatever fittingSize reported the instant we set
+            // rootView — which, on re-opens with a fresh view identity, is
+            // the empty-content size because .onAppear hasn't fired yet.
+            hc.sizingOptions = [.preferredContentSize, .intrinsicContentSize]
+            return hc
+        }()
         private var popover: NSPopover?
+        private var currentSection: IndexSection?
+        private var currentStore: SessionIndexStore?
+        private var currentOnResume: ((SessionEntry) -> Void)?
+        /// Bumped on every present(). Used as the SwiftUI view identity so each
+        /// open gets fresh @State (empty query, fresh focus, no stale results).
+        private var presentationCount = 0
 
         init(isPresented: Binding<Bool>) {
             _isPresented = isPresented
         }
 
+        func update(section: IndexSection, store: SessionIndexStore, onResume: ((SessionEntry) -> Void)?) {
+            currentSection = section
+            currentStore = store
+            currentOnResume = onResume
+            refreshContent()
+        }
+
+        private func refreshContent() {
+            guard let section = currentSection, let store = currentStore else { return }
+            let onResume = currentOnResume
+            let identity = presentationCount
+            hostingController.rootView = AnyView(
+                SectionPopoverView(section: section, store: store, onResume: onResume) { [weak self] in
+                    self?.closeFromContent()
+                }
+                // Tied to presentationCount so reopening the popover discards
+                // the prior open's @State (typed query, scrolled position, etc.).
+                .id(identity)
+            )
+            hostingController.view.invalidateIntrinsicContentSize()
+            hostingController.view.layoutSubtreeIfNeeded()
+            updateContentSize()
+        }
+
         func present() {
-            guard let anchorView, anchorView.window != nil,
-                  let section, let store else {
+            guard let anchorView, anchorView.window != nil else {
                 isPresented = false
                 return
             }
-            if let existing = popover, existing.isShown { return }
-            let controller = SessionSearchPopoverController(section: section, store: store)
-            controller.onResume = onResume
-            controller.onDismiss = { [weak self] in
-                guard let self else { return }
-                self.isPresented = false
-                self.popover?.performClose(nil)
+            anchorView.superview?.layoutSubtreeIfNeeded()
+            let popover = popover ?? makePopover()
+            // Only bump identity on a hidden→shown transition. Bumping on every
+            // updateNSView (which fires on parent re-renders, e.g. ObservedObject
+            // store changes) would reset SectionPopoverView's @State on every
+            // tick — typed query gone, loaded reset, looks like infinite loading.
+            if !popover.isShown {
+                presentationCount += 1
+                refreshContent()
             }
-            let p = NSPopover()
-            p.behavior = .transient
-            p.animates = true
-            p.contentViewController = controller
-            p.delegate = self
-            self.popover = p
-            p.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
+            updateContentSize()
+            guard !popover.isShown else { return }
+            popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxX)
         }
 
         func dismiss() {
             popover?.performClose(nil)
+        }
+
+        func closeFromContent() {
+            isPresented = false
+            dismiss()
         }
 
         func popoverDidClose(_ notification: Notification) {
@@ -727,655 +1072,71 @@ private struct SectionPopoverHost: NSViewRepresentable {
                 isPresented = false
             }
         }
+
+        private func makePopover() -> NSPopover {
+            let p = NSPopover()
+            p.behavior = .transient
+            p.animates = true
+            p.contentViewController = hostingController
+            p.delegate = self
+            self.popover = p
+            return p
+        }
+
+        private func updateContentSize() {
+            let fitting = hostingController.view.fittingSize
+            guard fitting.width > 0, fitting.height > 0 else { return }
+            popover?.contentSize = NSSize(
+                width: ceil(max(fitting.width, 360)),
+                height: ceil(min(fitting.height, 480))
+            )
+        }
     }
 }
 
-/// NSViewController hosted in the Show-more NSPopover.
-///
-/// Behaviour parity with the previous SwiftUI implementation:
-/// - Empty query: instantly shows `section.entries` (no spinner flash).
-/// - Non-empty query: 150 ms debounce then hits `store.searchSessions`.
-/// - Pagination: next page fetched when the visible rect nears the end of
-///   the table. NSTableView handles virtualization natively — the row views
-///   are cached and reused regardless of how far the list grows.
-/// - Escape dismisses via `cancelOperation(_:)` on the container view.
-/// - Rows support double-click to resume, drag-out to a terminal pane
-///   (`com.splittabbar.tabtransfer`), and a right-click context menu.
-private final class SessionSearchPopoverController: NSViewController, NSMenuDelegate {
-    var onResume: ((SessionEntry) -> Void)?
-    var onDismiss: (() -> Void)?
+// MARK: - Escape key catcher
 
-    private let store: SessionIndexStore
-    private let section: IndexSection
+/// Invisible AppKit view that fires `onEscape` when Escape is pressed while
+/// the popover content is key. Lives in the popover's view tree so it inherits
+/// the popover's responder chain.
+private struct EscapeKeyCatcher: NSViewRepresentable {
+    let onEscape: () -> Void
 
-    private let searchField = NSSearchField()
-    private let scrollView = NSScrollView()
-    private let tableView = NSTableView()
-    private let headerIcon = NSImageView()
-    private let headerLabel = NSTextField(labelWithString: "")
-    private let errorLabel = NSTextField(wrappingLabelWithString: "")
-    private let emptyLabel = NSTextField(labelWithString: "")
-
-    private var loaded: [SessionEntry] = []
-    private var hasMore: Bool = false
-    private var isLoading: Bool = false
-    private var activeQuery: String = ""
-    private var loadGeneration: Int = 0
-    private var currentTask: Task<Void, Never>?
-    private var debounceWorkItem: DispatchWorkItem?
-    /// The scroll view's dynamic height. Updated each time the result list
-    /// changes so the popover shrinks to fit short lists and caps at
-    /// `maxScrollHeight` for long ones.
-    private var scrollHeightConstraint: NSLayoutConstraint!
-
-    private static let pageSize = 30
-    private static let rowHeight: CGFloat = 28
-    private static let maxScrollHeight: CGFloat = 420
-
-    init(section: IndexSection, store: SessionIndexStore) {
-        self.section = section
-        self.store = store
-        super.init(nibName: nil, bundle: nil)
+    func makeNSView(context: Context) -> NSView {
+        let view = EscapeMonitorView()
+        view.onEscape = onEscape
+        return view
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
-
-    override func loadView() {
-        let root = EscapeDismissView()
-        root.onEscape = { [weak self] in self?.onDismiss?() }
-        self.view = root
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? EscapeMonitorView)?.onEscape = onEscape
     }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        configureHeader()
-        configureSearch()
-        configureTable()
-        configureErrorLabel()
-        configureEmptyLabel()
-        layoutSubviews()
-        resetAndLoad(query: "")
-    }
+    private final class EscapeMonitorView: NSView {
+        var onEscape: (() -> Void)?
+        private var monitor: Any?
 
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        view.window?.makeFirstResponder(searchField)
-    }
-
-    private func configureHeader() {
-        switch section.icon {
-        case .agent(let agent):
-            headerIcon.image = NSImage(named: agent.assetName)
-        case .folder:
-            headerIcon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
-            headerIcon.contentTintColor = .secondaryLabelColor
-        }
-        headerIcon.imageScaling = .scaleProportionallyUpOrDown
-
-        headerLabel.stringValue = section.title
-        headerLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        headerLabel.textColor = .labelColor
-        headerLabel.lineBreakMode = .byTruncatingMiddle
-        headerLabel.maximumNumberOfLines = 1
-    }
-
-    private func configureSearch() {
-        searchField.placeholderString = String(localized: "sessionIndex.popover.searchPlaceholder",
-                                               defaultValue: "Search sessions")
-        searchField.font = .systemFont(ofSize: 12)
-        searchField.target = self
-        searchField.action = #selector(searchQueryChanged(_:))
-        searchField.sendsSearchStringImmediately = false
-        searchField.sendsWholeSearchString = false
-    }
-
-    private func configureTable() {
-        tableView.style = .plain
-        tableView.backgroundColor = .clear
-        tableView.headerView = nil
-        tableView.intercellSpacing = NSSize(width: 0, height: 0)
-        tableView.allowsEmptySelection = true
-        tableView.selectionHighlightStyle = .none
-        tableView.rowHeight = Self.rowHeight
-        tableView.rowSizeStyle = .custom
-        tableView.doubleAction = #selector(tableDoubleClicked)
-        tableView.target = self
-
-        let rowMenu = NSMenu()
-        rowMenu.delegate = self
-        tableView.menu = rowMenu
-
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("session"))
-        col.resizingMask = [.autoresizingMask]
-        tableView.addTableColumn(col)
-
-        tableView.dataSource = self
-        tableView.delegate = self
-
-        tableView.setDraggingSourceOperationMask([.copy, .generic], forLocal: true)
-        tableView.setDraggingSourceOperationMask([.copy], forLocal: false)
-
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.drawsBackground = false
-        scrollView.borderType = .noBorder
-        scrollView.documentView = tableView
-        scrollView.contentView.postsBoundsChangedNotifications = true
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(scrollContentDidChange(_:)),
-            name: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView
-        )
-    }
-
-    private func configureErrorLabel() {
-        errorLabel.font = .systemFont(ofSize: 11)
-        errorLabel.textColor = .labelColor
-        errorLabel.isHidden = true
-    }
-
-    private func configureEmptyLabel() {
-        emptyLabel.stringValue = String(localized: "sessionIndex.popover.noMatches",
-                                        defaultValue: "No matches")
-        emptyLabel.font = .systemFont(ofSize: 12)
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.isHidden = true
-    }
-
-    private func layoutSubviews() {
-        let headerStack = NSStackView(views: [headerIcon, headerLabel])
-        headerStack.orientation = .horizontal
-        headerStack.spacing = 8
-        headerStack.alignment = .centerY
-        headerStack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 6, right: 12)
-
-        let searchContainer = NSView()
-        searchContainer.addSubview(searchField)
-
-        let divider = NSBox()
-        divider.boxType = .separator
-
-        let vstack = NSStackView(views: [headerStack, searchContainer, divider, errorLabel, emptyLabel, scrollView])
-        vstack.orientation = .vertical
-        vstack.spacing = 0
-        vstack.alignment = .leading
-        vstack.distribution = .fill
-        vstack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(vstack)
-
-        for subview in [headerIcon, headerLabel, searchField, errorLabel, emptyLabel, scrollView, searchContainer] {
-            (subview as NSView).translatesAutoresizingMaskIntoConstraints = false
-        }
-
-        NSLayoutConstraint.activate([
-            vstack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            vstack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            vstack.topAnchor.constraint(equalTo: view.topAnchor),
-            vstack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
-            headerIcon.widthAnchor.constraint(equalToConstant: 14),
-            headerIcon.heightAnchor.constraint(equalToConstant: 14),
-
-            headerStack.leadingAnchor.constraint(equalTo: vstack.leadingAnchor),
-            headerStack.trailingAnchor.constraint(equalTo: vstack.trailingAnchor),
-
-            searchContainer.leadingAnchor.constraint(equalTo: vstack.leadingAnchor),
-            searchContainer.trailingAnchor.constraint(equalTo: vstack.trailingAnchor),
-
-            searchField.leadingAnchor.constraint(equalTo: searchContainer.leadingAnchor, constant: 10),
-            searchField.trailingAnchor.constraint(equalTo: searchContainer.trailingAnchor, constant: -10),
-            searchField.topAnchor.constraint(equalTo: searchContainer.topAnchor, constant: 0),
-            searchField.bottomAnchor.constraint(equalTo: searchContainer.bottomAnchor, constant: -8),
-
-            divider.leadingAnchor.constraint(equalTo: vstack.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: vstack.trailingAnchor),
-            divider.heightAnchor.constraint(equalToConstant: 1),
-
-            errorLabel.leadingAnchor.constraint(equalTo: vstack.leadingAnchor, constant: 12),
-            errorLabel.trailingAnchor.constraint(equalTo: vstack.trailingAnchor, constant: -12),
-
-            emptyLabel.leadingAnchor.constraint(equalTo: vstack.leadingAnchor, constant: 12),
-            emptyLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
-
-            scrollView.leadingAnchor.constraint(equalTo: vstack.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: vstack.trailingAnchor),
-
-            view.widthAnchor.constraint(equalToConstant: 360),
-        ])
-
-        // Mutable height: starts tall enough for one row so the initial
-        // `fittingSize` is sane even before the first reload. The real
-        // value is recomputed in `updatePopoverSize()` after every content
-        // state change.
-        scrollHeightConstraint = scrollView.heightAnchor.constraint(
-            equalToConstant: Self.rowHeight
-        )
-        scrollHeightConstraint.isActive = true
-    }
-
-    // MARK: Search / pagination
-
-    @objc private func searchQueryChanged(_ sender: NSSearchField) {
-        let q = sender.stringValue
-        debounceWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.resetAndLoad(query: q) }
-        debounceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
-    }
-
-    private func resetAndLoad(query: String) {
-        currentTask?.cancel()
-        loadGeneration += 1
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        activeQuery = trimmed
-        errorLabel.isHidden = true
-
-        if trimmed.isEmpty {
-            loaded = section.entries
-            // Assume there may be more on disk; loadMore flips hasMore off
-            // once a fetch returns fewer than pageSize rows.
-            hasMore = !section.entries.isEmpty
-            isLoading = false
-            reloadAndRefresh()
-            return
-        }
-
-        loaded = []
-        hasMore = true
-        isLoading = true
-        reloadAndRefresh()
-        let scope = sectionSearchScope
-        let store = self.store
-        let generation = loadGeneration
-        currentTask = Task { @MainActor [weak self] in
-            let outcome = await store.searchSessions(
-                query: trimmed, scope: scope,
-                offset: 0, limit: Self.pageSize
-            )
-            guard let self, !Task.isCancelled, generation == self.loadGeneration else { return }
-            self.applyOutcome(outcome, append: false)
-        }
-    }
-
-    private func loadMore() {
-        guard hasMore, !isLoading else { return }
-        isLoading = true
-        let generation = loadGeneration
-        let scope = sectionSearchScope
-        let store = self.store
-        let query = activeQuery
-        let offset = loaded.count
-        currentTask = Task { @MainActor [weak self] in
-            let outcome = await store.searchSessions(
-                query: query, scope: scope,
-                offset: offset, limit: Self.pageSize
-            )
-            guard let self, !Task.isCancelled, generation == self.loadGeneration else { return }
-            self.applyOutcome(outcome, append: true)
-        }
-    }
-
-    @MainActor
-    private func applyOutcome(_ outcome: SessionIndexStore.SearchOutcome, append: Bool) {
-        if append {
-            loaded.append(contentsOf: outcome.entries)
-        } else {
-            loaded = outcome.entries
-        }
-        hasMore = outcome.entries.count >= Self.pageSize
-        isLoading = false
-        if outcome.errors.isEmpty {
-            errorLabel.isHidden = true
-        } else {
-            errorLabel.stringValue = outcome.errors.joined(separator: "\n")
-            errorLabel.isHidden = false
-        }
-        reloadAndRefresh()
-    }
-
-    private func reloadAndRefresh() {
-        // Show "No matches" only once a fetch finished and returned nothing.
-        emptyLabel.isHidden = isLoading || !loaded.isEmpty
-        tableView.reloadData()
-        updatePopoverSize()
-    }
-
-    /// Single owner of popover vertical size. NSScrollView will not propagate
-    /// its document view's content height upward, so the controller has to
-    /// drive it — derive the desired scroll height from the row count,
-    /// clamp to `maxScrollHeight`, then publish via `preferredContentSize`
-    /// so NSPopover animates to the new size.
-    private func updatePopoverSize() {
-        let rows = max(1, loaded.count)
-        let desired = CGFloat(rows) * Self.rowHeight
-        scrollHeightConstraint.constant = min(desired, Self.maxScrollHeight)
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = view.fittingSize
-    }
-
-    private var sectionSearchScope: SessionIndexStore.SearchScope {
-        let raw = section.key.raw
-        if raw.hasPrefix("agent:"),
-           let agent = SessionAgent(rawValue: String(raw.dropFirst("agent:".count))) {
-            return .agent(agent)
-        }
-        if raw.hasPrefix("dir:") {
-            let path = String(raw.dropFirst("dir:".count))
-            return .directory(path.isEmpty ? nil : path)
-        }
-        return .directory(nil)
-    }
-
-    // MARK: Scroll-driven pagination
-
-    @objc private func scrollContentDidChange(_ note: Notification) {
-        guard hasMore, !isLoading else { return }
-        let visible = scrollView.contentView.bounds
-        let contentHeight = tableView.bounds.height
-        // Trigger when within two row-heights of the bottom.
-        if visible.maxY >= contentHeight - Self.rowHeight * 2 {
-            loadMore()
-        }
-    }
-
-    // MARK: Row actions
-
-    @objc private func tableDoubleClicked() {
-        let row = tableView.clickedRow
-        guard row >= 0, row < loaded.count else { return }
-        let entry = loaded[row]
-        onResume?(entry)
-        onDismiss?()
-    }
-
-    // MARK: NSMenuDelegate (right-click context menu)
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        let row = tableView.clickedRow
-        guard row >= 0, row < loaded.count else { return }
-        let entry = loaded[row]
-
-        menu.addItem(makeMenuItem(
-            title: String(localized: "sessionIndex.row.resume", defaultValue: "Resume in New Tab")
-        ) { [weak self] in
-            self?.onResume?(entry)
-            self?.onDismiss?()
-        })
-        menu.addItem(.separator())
-        if let url = entry.fileURL {
-            menu.addItem(makeMenuItem(
-                title: String(localized: "sessionIndex.row.open", defaultValue: "Open")
-            ) {
-                NSWorkspace.shared.open(url)
-            })
-            menu.addItem(makeMenuItem(
-                title: String(localized: "sessionIndex.row.reveal", defaultValue: "Reveal in Finder")
-            ) {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
-            })
-            menu.addItem(.separator())
-            menu.addItem(makeMenuItem(
-                title: String(localized: "sessionIndex.row.copyPath", defaultValue: "Copy File Path")
-            ) {
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setString(url.path, forType: .string)
-            })
-        }
-        menu.addItem(makeMenuItem(
-            title: String(localized: "sessionIndex.row.copyResume", defaultValue: "Copy Resume Command")
-        ) {
-            let pb = NSPasteboard.general
-            pb.clearContents()
-            pb.setString(entry.resumeCommand, forType: .string)
-        })
-        if let cwd = entry.cwd, !cwd.isEmpty {
-            menu.addItem(makeMenuItem(
-                title: String(localized: "sessionIndex.row.openCwd", defaultValue: "Open Working Directory")
-            ) {
-                NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
-            })
-        }
-        if let pr = entry.pullRequest, let url = URL(string: pr.url) {
-            menu.addItem(.separator())
-            menu.addItem(makeMenuItem(
-                title: String(localized: "sessionIndex.row.openPR", defaultValue: "Open Pull Request")
-            ) {
-                NSWorkspace.shared.open(url)
-            })
-        }
-    }
-
-    private func makeMenuItem(title: String, action: @escaping () -> Void) -> NSMenuItem {
-        let item = ClosureMenuItem(
-            title: title,
-            action: #selector(ClosureMenuItem.invoke(_:)),
-            keyEquivalent: ""
-        )
-        item.closure = action
-        item.target = item
-        return item
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
-        currentTask?.cancel()
-        debounceWorkItem?.cancel()
-    }
-}
-
-extension SessionSearchPopoverController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        loaded.count
-    }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        Self.rowHeight
-    }
-
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        // Use a transparent row view so NSTableView's default selection/
-        // separator drawing doesn't bleed through the clear-background popover.
-        PlainSessionRowView()
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("SessionRow")
-        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? SessionPopoverRowView)
-            ?? SessionPopoverRowView()
-        cell.identifier = id
-        cell.configure(with: loaded[row])
-        return cell
-    }
-
-    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        guard row >= 0, row < loaded.count else { return nil }
-        let entry = loaded[row]
-        let dragId = SessionDragRegistry.shared.register(entry)
-        let item = NSPasteboardItem()
-        if let data = sessionTabTransferData(for: entry, dragId: dragId) {
-            let type = NSPasteboard.PasteboardType("com.splittabbar.tabtransfer")
-            item.setData(data, forType: type)
-            // Mirror onto the drag pasteboard. Bonsplit's external-drop
-            // decoder reads from the drag pasteboard directly — same
-            // behavior as the SwiftUI `.onDrag` path.
-            DispatchQueue.main.async {
-                let pb = NSPasteboard(name: .drag)
-                pb.addTypes([type], owner: nil)
-                pb.setData(data, forType: type)
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let win = self.window, win.isKeyWindow else { return event }
+                if event.keyCode == 53 { // kVK_Escape
+                    self.onEscape?()
+                    return nil
+                }
+                return event
             }
         }
-        return item
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
     }
-}
-
-/// Transparent row view for the popover's NSTableView. Skips the default
-/// selection/separator drawing so the popover's dark material background
-/// shows cleanly and nothing paints behind the cell's manual layout.
-private final class PlainSessionRowView: NSTableRowView {
-    override var isEmphasized: Bool {
-        get { false }
-        set { /* no-op */ }
-    }
-    override func drawBackground(in dirtyRect: NSRect) { /* no-op */ }
-    override func drawSelection(in dirtyRect: NSRect) { /* no-op */ }
-    override func drawSeparator(in dirtyRect: NSRect) { /* no-op */ }
-}
-
-/// Row cell for the popover's NSTableView. Manual layout (not autolayout) so
-/// the cell is bulletproof against NSTableView's frame-driven sizing — row
-/// views get reused as the table scrolls, and autolayout in a row cell kept
-/// producing overlapping text on reuse.
-private final class SessionPopoverRowView: NSView {
-    private let hoverBackground = NSView()
-    private let iconView = NSImageView()
-    private let titleField = NSTextField(labelWithString: "")
-    private let dateField = NSTextField(labelWithString: "")
-    private var trackingArea: NSTrackingArea?
-
-    override var isFlipped: Bool { true }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.masksToBounds = true
-
-        hoverBackground.wantsLayer = true
-        hoverBackground.layer?.backgroundColor = NSColor.clear.cgColor
-        hoverBackground.layer?.cornerRadius = 4
-        addSubview(hoverBackground)
-
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        addSubview(iconView)
-
-        titleField.font = .systemFont(ofSize: 12)
-        titleField.textColor = NSColor.labelColor.withAlphaComponent(0.92)
-        titleField.lineBreakMode = .byTruncatingTail
-        titleField.maximumNumberOfLines = 1
-        titleField.cell?.usesSingleLineMode = true
-        titleField.isEditable = false
-        titleField.isSelectable = false
-        titleField.isBordered = false
-        titleField.drawsBackground = false
-        addSubview(titleField)
-
-        dateField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        dateField.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.7)
-        dateField.isEditable = false
-        dateField.isSelectable = false
-        dateField.isBordered = false
-        dateField.drawsBackground = false
-        addSubview(dateField)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        let w = bounds.width
-        let h = bounds.height
-
-        hoverBackground.frame = NSRect(x: 4, y: 1, width: max(0, w - 8), height: max(0, h - 2))
-
-        let iconSize: CGFloat = 12
-        let iconX: CGFloat = 12
-        iconView.frame = NSRect(x: iconX, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
-
-        // Use each field's font line height rather than intrinsicContentSize.
-        // intrinsicContentSize reports the full MULTI-LINE height when the
-        // string has embedded newlines (session titles often wrap because
-        // they include `<command-message>...\n\n...` envelopes), even with
-        // usesSingleLineMode = true. That inflated height drove the frame
-        // off the top of the cell and into the row above.
-        let dateLineHeight = lineHeight(for: dateField.font)
-        let dateContentWidth = dateField.intrinsicContentSize.width
-        let datePaddingRight: CGFloat = 12
-        let dateX = max(0, w - datePaddingRight - dateContentWidth)
-        dateField.frame = NSRect(
-            x: dateX,
-            y: (h - dateLineHeight) / 2,
-            width: dateContentWidth,
-            height: dateLineHeight
-        )
-
-        let titleX = iconX + iconSize + 6
-        let titleWidth = max(0, dateX - 8 - titleX)
-        let titleLineHeight = lineHeight(for: titleField.font)
-        titleField.frame = NSRect(
-            x: titleX,
-            y: (h - titleLineHeight) / 2,
-            width: titleWidth,
-            height: titleLineHeight
-        )
-    }
-
-    private func lineHeight(for font: NSFont?) -> CGFloat {
-        guard let font else { return 16 }
-        return ceil(font.ascender - font.descender + font.leading)
-    }
-
-    func configure(with entry: SessionEntry) {
-        iconView.image = NSImage(named: entry.agent.assetName)
-        // Flatten newlines / tabs so the single-line truncation lines up
-        // with the cell's line-height. Session titles routinely include
-        // embedded newlines in structured command envelopes.
-        titleField.stringValue = Self.flatten(entry.displayTitle)
-        dateField.stringValue = SessionIndexView.relativeFormatter.localizedString(
-            for: entry.modified, relativeTo: Date()
-        )
-        toolTip = entry.cwdLabel ?? entry.displayTitle
-        needsLayout = true
-    }
-
-    private static func flatten(_ s: String) -> String {
-        var out = s
-        out = out.replacingOccurrences(of: "\r\n", with: " ")
-        out = out.replacingOccurrences(of: "\n", with: " ")
-        out = out.replacingOccurrences(of: "\r", with: " ")
-        out = out.replacingOccurrences(of: "\t", with: " ")
-        return out
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hoverBackground.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        hoverBackground.layer?.backgroundColor = NSColor.clear.cgColor
-    }
-}
-
-/// NSView subclass that dismisses the popover on Escape via the standard
-/// responder-chain `cancelOperation(_:)` hook. Lives in the popover's view
-/// tree so it inherits the popover window's responder chain.
-private final class EscapeDismissView: NSView {
-    var onEscape: (() -> Void)?
-    override var acceptsFirstResponder: Bool { true }
-    override func cancelOperation(_ sender: Any?) { onEscape?() }
-}
-
-/// NSMenuItem subclass that invokes an arbitrary closure on selection so
-/// each row's context-menu items can carry per-row state without a shared
-/// dispatch table.
-private final class ClosureMenuItem: NSMenuItem {
-    var closure: (() -> Void)?
-    @objc func invoke(_ sender: Any?) { closure?() }
 }
 
 // MARK: - Drag cancel monitor
