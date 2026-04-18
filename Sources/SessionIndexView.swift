@@ -116,7 +116,12 @@ struct SessionIndexView: View {
     private var sessionsList: some View {
         let sections = store.sectionsForCurrentGrouping()
         return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+            // VStack (not LazyVStack): the view tree is bounded — the collapsed
+            // row limit caps each section at a handful of rows, and sections
+            // come from a small fixed set of agents or a user's project
+            // directories. LazyVStack's internal layout-cache reconciliation
+            // burned 100% of the main thread on idle updates.
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(sections.enumerated()), id: \.element.key) { index, section in
                     // Drop above this row → insert dragged section BEFORE this section's key.
                     SectionReorderGap(beforeKey: section.key, store: store)

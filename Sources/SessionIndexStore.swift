@@ -258,7 +258,12 @@ final class SessionIndexStore: ObservableObject {
     @Published var currentDirectory: String? = nil
 
     @Published var grouping: SessionGrouping {
-        didSet { UserDefaults.standard.set(grouping.rawValue, forKey: Self.groupingKey) }
+        didSet {
+            UserDefaults.standard.set(grouping.rawValue, forKey: Self.groupingKey)
+            // Switching into directory grouping can expose cwds that were never
+            // backfilled while the user was viewing agent grouping.
+            if grouping == .directory { backfillDirectoryOrderFromEntries() }
+        }
     }
 
     /// Persisted order for agent sections.
@@ -300,7 +305,13 @@ final class SessionIndexStore: ObservableObject {
             }
         case .directory:
             let buckets = Dictionary(grouping: visible) { $0.cwd ?? "" }
-            // Discover any directories not yet in saved order; append by most-recent activity.
+            // Any cwds that aren't yet in the saved order still need to show
+            // up. They get appended by most-recent activity, purely locally,
+            // without mutating `directoryOrder` from inside this view-body
+            // computation — scheduling a Task here created a state-update
+            // feedback loop that pegged the main thread at 100% CPU.
+            // Persistent backfill happens via `backfillDirectoryOrderFromEntries`,
+            // called from `reload()` and `grouping.didSet`.
             let knownPaths = Set(directoryOrder)
             let unknownSorted = buckets.keys
                 .filter { !knownPaths.contains($0) }
@@ -309,10 +320,6 @@ final class SessionIndexStore: ObservableObject {
                     let rMax = buckets[rhs]?.map(\.modified).max() ?? .distantPast
                     return lMax > rMax
                 }
-            if !unknownSorted.isEmpty {
-                let nextOrder = directoryOrder + unknownSorted
-                Task { @MainActor in self.directoryOrder = nextOrder }
-            }
             return (directoryOrder + unknownSorted)
                 .filter { buckets[$0] != nil }
                 .map { path in
@@ -324,6 +331,27 @@ final class SessionIndexStore: ObservableObject {
                     )
                 }
         }
+    }
+
+    /// Extend `directoryOrder` with any cwds seen in `entries` that aren't
+    /// already tracked. Kept out of the view-body path: it mutates `@Published`
+    /// state and must only run in response to real data changes (new scan
+    /// results, grouping switch) — not on every SwiftUI update tick.
+    private func backfillDirectoryOrderFromEntries() {
+        var seen = Set(directoryOrder)
+        var additions: [(path: String, latest: Date)] = []
+        for entry in entries {
+            let path = entry.cwd ?? ""
+            if seen.insert(path).inserted {
+                additions.append((path, entry.modified))
+            } else if let idx = additions.firstIndex(where: { $0.path == path }),
+                      additions[idx].latest < entry.modified {
+                additions[idx].latest = entry.modified
+            }
+        }
+        guard !additions.isEmpty else { return }
+        additions.sort { $0.latest > $1.latest }
+        directoryOrder.append(contentsOf: additions.map(\.path))
     }
 
     private func filteredEntriesForCurrentScope() -> [SessionEntry] {
@@ -421,6 +449,7 @@ final class SessionIndexStore: ObservableObject {
                 if Task.isCancelled { return }
                 self.entries = scanned
                 self.isLoading = false
+                self.backfillDirectoryOrderFromEntries()
             }
         }
     }
