@@ -2136,6 +2136,16 @@ class GhosttyApp {
         ) != nil
     }
 
+    /// Stub: returns the input family name unchanged. Replaced by the pinning
+    /// implementation in the follow-up fix commit.
+    static func resolvedInjectedCJKFontName(
+        named name: String,
+        size: CGFloat = 12
+    ) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? name : trimmed
+    }
+
     private static func configuredCTFont(
         named name: String,
         size: CGFloat = 12
@@ -2156,6 +2166,34 @@ class GhosttyApp {
         }
 
         return font
+    }
+
+    /// Mirror Ghostty's family-name CoreText discovery path so injected
+    /// `font-codepoint-map` values are validated against the same lookup mode.
+    static func discoveredCTFont(
+        named name: String,
+        size: CGFloat = 12,
+        weightTrait: CGFloat? = nil
+    ) -> CTFont? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var attributes: [CFString: Any] = [
+            kCTFontFamilyNameAttribute: trimmed,
+            kCTFontSizeAttribute: size,
+        ]
+        if let weightTrait {
+            attributes[kCTFontTraitsAttribute] = [
+                kCTFontWeightTrait: weightTrait,
+            ] as CFDictionary
+        }
+
+        let descriptor = CTFontDescriptorCreateWithAttributes(attributes as CFDictionary)
+        let collection = CTFontCollectionCreateWithFontDescriptors([descriptor] as CFArray, nil)
+        guard let match = (CTFontCollectionCreateMatchingFontDescriptors(collection) as? [CTFontDescriptor])?.first else {
+            return nil
+        }
+        return CTFontCreateWithFontDescriptor(match, size, nil)
     }
 
     private static func fontContainsGlyphs(
