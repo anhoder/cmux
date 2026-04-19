@@ -2014,6 +2014,11 @@ final class TerminalNotificationDirectInteractionTests: XCTestCase {
         hostedView.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
 
+        XCTAssertNotNil(
+            surface.surface,
+            "Expected runtime surface before measuring visibility-restore redraws"
+        )
+
         hostedView.setActive(false)
         hostedView.setVisibleInUI(false)
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
@@ -2025,7 +2030,7 @@ final class TerminalNotificationDirectInteractionTests: XCTestCase {
         DispatchQueue.main.async { drained.fulfill() }
         wait(for: [drained], timeout: 1.0)
 
-        XCTAssertGreaterThanOrEqual(
+        XCTAssertEqual(
             surface.debugForceRefreshCount(),
             1,
             "Restoring panel visibility should force a redraw even when focus recovery is inactive"
