@@ -17,6 +17,69 @@ struct CLIError: Error, CustomStringConvertible {
     var description: String { message }
 }
 
+private enum CLIBrokenPipeDisposition {
+    case exit(Int32)
+    case ignore
+}
+
+// Route CLI stdio through write(2) so broken pipes never surface as NSFileHandle exceptions.
+@discardableResult
+private func cliWrite(_ data: Data, to handle: FileHandle, onBrokenPipe: CLIBrokenPipeDisposition) -> Bool {
+    guard !data.isEmpty else { return true }
+    return data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+            return true
+        }
+
+        var offset = 0
+        while offset < rawBuffer.count {
+            let written = Darwin.write(handle.fileDescriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+            if written > 0 {
+                offset += written
+                continue
+            }
+            if written == 0 {
+                return false
+            }
+
+            switch errno {
+            case EINTR:
+                continue
+            case EPIPE:
+                switch onBrokenPipe {
+                case .exit(let code):
+                    Darwin.exit(code)
+                case .ignore:
+                    return false
+                }
+            default:
+                return false
+            }
+        }
+
+        return true
+    }
+}
+
+@discardableResult
+private func cliWrite(_ text: String, to handle: FileHandle, onBrokenPipe: CLIBrokenPipeDisposition) -> Bool {
+    guard let data = text.data(using: .utf8) else { return true }
+    return cliWrite(data, to: handle, onBrokenPipe: onBrokenPipe)
+}
+
+private func cliWriteStdout(_ text: String) {
+    _ = cliWrite(text, to: FileHandle.standardOutput, onBrokenPipe: .exit(0))
+}
+
+private func cliWriteStderr(_ text: String) {
+    _ = cliWrite(text, to: FileHandle.standardError, onBrokenPipe: .exit(0))
+}
+
+private func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+    let body = items.map { String(describing: $0) }.joined(separator: separator)
+    cliWriteStdout(body + terminator)
+}
+
 private final class CLISocketSentryTelemetry {
     private let command: String
     private let subcommand: String
@@ -1512,7 +1575,7 @@ enum CLIProcessRunner {
 
         if let stdinText, let stdinPipe {
             if let data = stdinText.data(using: .utf8) {
-                stdinPipe.fileHandleForWriting.write(data)
+                _ = cliWrite(data, to: stdinPipe.fileHandleForWriting, onBrokenPipe: .ignore)
             }
             stdinPipe.fileHandleForWriting.closeFile()
         }
@@ -4293,7 +4356,7 @@ struct CMUXCLI {
                 _ = try client.sendV2(method: "workspace.close", params: ["workspace_id": workspaceId])
             } catch {
                 let warning = "Warning: failed to rollback workspace \(workspaceId): \(error)\n"
-                FileHandle.standardError.write(Data(warning.utf8))
+                cliWriteStderr(warning)
             }
             throw error
         }
@@ -10912,7 +10975,7 @@ struct CMUXCLI {
         if !fm.fileExists(atPath: pluginPackageDir.path) {
             let installDir = shadowDir
             if let bunPath = resolveExecutableInPath("bun") {
-                FileHandle.standardError.write("Installing oh-my-opencode plugin (this may take a minute on first run)...\n".data(using: .utf8)!)
+                cliWriteStderr("Installing oh-my-opencode plugin (this may take a minute on first run)...\n")
                 let installArguments = ["add", Self.omoPluginName]
                 let firstAttemptStatus = try omoRunPackageInstall(
                     executablePath: bunPath,
@@ -10920,7 +10983,7 @@ struct CMUXCLI {
                     currentDirectoryURL: installDir
                 )
                 if firstAttemptStatus != 0 {
-                    FileHandle.standardError.write("Retrying oh-my-opencode install with a clean shadow package state...\n".data(using: .utf8)!)
+                    cliWriteStderr("Retrying oh-my-opencode install with a clean shadow package state...\n")
                     try? fm.removeItem(at: shadowBunLockURL)
                     try? fm.removeItem(at: shadowNodeModules)
                     try omoEnsureShadowNodeModulesSymlink(shadowNodeModules: shadowNodeModules, userNodeModules: userNodeModules)
@@ -10934,7 +10997,7 @@ struct CMUXCLI {
                     }
                 }
             } else if let npmPath = resolveExecutableInPath("npm") {
-                FileHandle.standardError.write("Installing oh-my-opencode plugin (this may take a minute on first run)...\n".data(using: .utf8)!)
+                cliWriteStderr("Installing oh-my-opencode plugin (this may take a minute on first run)...\n")
                 let status = try omoRunPackageInstall(
                     executablePath: npmPath,
                     arguments: ["install", Self.omoPluginName],
@@ -10946,7 +11009,7 @@ struct CMUXCLI {
             } else {
                 throw CLIError(message: "Neither bun nor npm found in PATH. Install oh-my-opencode manually: bunx oh-my-opencode install")
             }
-            FileHandle.standardError.write("oh-my-opencode plugin installed\n".data(using: .utf8)!)
+            cliWriteStderr("oh-my-opencode plugin installed\n")
         }
 
         // Ensure tmux mode is enabled in oh-my-opencode config.
@@ -12012,7 +12075,7 @@ struct CMUXCLI {
 
         try process.run()
         if let data = stdinText.data(using: .utf8) {
-            stdinPipe.fileHandleForWriting.write(data)
+            _ = cliWrite(data, to: stdinPipe.fileHandleForWriting, onBrokenPipe: .ignore)
         }
         stdinPipe.fileHandleForWriting.closeFile()
         process.waitUntilExit()
@@ -14514,7 +14577,7 @@ struct CMUXTermMain {
         do {
             try cli.run()
         } catch {
-            FileHandle.standardError.write(Data("Error: \(error)\n".utf8))
+            cliWriteStderr("Error: \(error)\n")
             exit(1)
         }
     }
