@@ -10415,6 +10415,10 @@ final class GhosttySurfaceScrollView: NSView {
                 window.makeFirstResponder(nil)
             }
         } else {
+            // Workspace/sidebar selection can make an already-sized terminal visible again
+            // without a portal frame delta or a focus handoff. Reuse the portal refresh
+            // path so the Metal layer is nudged immediately on plain visibility restores.
+            refreshSurfaceNow(reason: "setVisibleInUI")
             scheduleAutomaticFirstResponderApply(reason: "setVisibleInUI")
         }
     }
