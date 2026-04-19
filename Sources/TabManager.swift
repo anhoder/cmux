@@ -258,7 +258,11 @@ private struct WorkspaceGitStatusSnapshot: Sendable {
 
 private final class WorkspaceGitEventWatcher {
     private static let debounceDelay: TimeInterval = 0.25
-    static var forceStartFailureForTesting = false
+    // Test-only toggle; flipped from `@MainActor` test hooks and read from
+    // `start()` which may run on any queue. Tests never exercise it
+    // concurrently from multiple actors, so `nonisolated(unsafe)` matches the
+    // sibling `forceGitStatusFailureForTesting` flag.
+    nonisolated(unsafe) static var forceStartFailureForTesting = false
 
     private let repositoryInfo: WorkspaceGitRepositoryInfo
     private let queue: DispatchQueue
@@ -313,11 +317,13 @@ private final class WorkspaceGitEventWatcher {
         guard shouldTearDownStream, let stream else { return }
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
+        // Release may drop the last strong reference held by the stream
+        // context; the matching `Unmanaged.release` fires from the context's
+        // release callback.
         FSEventStreamRelease(stream)
 
-        // Drain any in-flight callbacks already dispatched onto `queue` so the
-        // FSEvents trampoline cannot reference `self` (captured unretained)
-        // after this call returns.
+        // Drain any in-flight callbacks already dispatched onto `queue` so
+        // FSEvents cannot invoke `handle(paths:)` after this call returns.
         queue.sync { }
     }
 
@@ -326,11 +332,18 @@ private final class WorkspaceGitEventWatcher {
             startFailureReason = "forcedForTesting"
             return
         }
+        // Retain `self` for the stream's lifetime so the FSEvents trampoline
+        // cannot reach a deallocated object if a callback lands after the
+        // owning TabManager has dropped its reference. The matching release
+        // fires when FSEventStreamRelease tears the stream down.
         var context = FSEventStreamContext(
             version: 0,
-            info: UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()),
+            info: UnsafeMutableRawPointer(Unmanaged.passRetained(self).toOpaque()),
             retain: nil,
-            release: nil,
+            release: { info in
+                guard let info else { return }
+                Unmanaged<WorkspaceGitEventWatcher>.fromOpaque(info).release()
+            },
             copyDescription: nil
         )
 
@@ -358,6 +371,11 @@ private final class WorkspaceGitEventWatcher {
             0.05,
             flags
         ) else {
+            // FSEventStreamCreate never took ownership of the context info, so
+            // balance the `passRetained` above to avoid leaking `self`.
+            Unmanaged<WorkspaceGitEventWatcher>
+                .fromOpaque(context.info!)
+                .release()
             startFailureReason = "createFailed"
             return
         }

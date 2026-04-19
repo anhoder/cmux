@@ -309,7 +309,14 @@ extension Workspace {
             customDescription: customDescription,
             customColor: customColor,
             isPinned: isPinned,
-            gitMetadataWatcherDisabled: isRemoteWorkspace ? false : gitMetadataWatcherDisabled,
+            // Preserve the user's local-watcher preference even while the
+            // workspace is remote: the flag is a stored preference scoped to
+            // local mode, not runtime state. Runtime consumers gate on
+            // `!isRemoteWorkspace` before reading it, so preserving the stored
+            // value here means a user's "disabled" choice is remembered if the
+            // workspace later flips back to local (or is restored locally in a
+            // future session).
+            gitMetadataWatcherDisabled: gitMetadataWatcherDisabled,
             terminalScrollBarHidden: terminalScrollBarHidden ? true : nil,
             currentDirectory: currentDirectory,
             focusedPanelId: focusedPanelId,
@@ -6508,6 +6515,9 @@ final class Workspace: Identifiable, ObservableObject {
     static let terminalScrollBarHiddenDidChangeNotification = Notification.Name(
         "cmux.workspaceTerminalScrollBarHiddenDidChange"
     )
+    static let gitMetadataWatcherDisabledDidChangeNotification = Notification.Name(
+        "cmux.workspaceGitMetadataWatcherDisabledDidChange"
+    )
 
     let id: UUID
     @Published var title: String
@@ -6517,7 +6527,12 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var customColor: String?  // hex string, e.g. "#C0392B"
     @Published var gitMetadataWatcherDisabled: Bool = false {
         didSet {
-            guard gitMetadataWatcherDisabled, gitMetadataWatcherDisabled != oldValue else { return }
+            guard gitMetadataWatcherDisabled != oldValue else { return }
+            NotificationCenter.default.post(
+                name: Self.gitMetadataWatcherDisabledDidChangeNotification,
+                object: self
+            )
+            guard gitMetadataWatcherDisabled else { return }
             // The flag only controls the local git metadata watcher. Remote
             // workspaces receive git state through the remote daemon and must
             // keep their cached sidebar metadata even if this flag was set
@@ -8174,12 +8189,10 @@ final class Workspace: Identifiable, ObservableObject {
             clearCachedSidebarGitMetadata()
         }
         remoteConfiguration = configuration
-        // The watcher-disabled flag only governs the local FS watcher; clear
-        // any stale `true` inherited from a prior local-mode session so remote
-        // git state is not accidentally suppressed here or in session snapshots.
-        if gitMetadataWatcherDisabled {
-            gitMetadataWatcherDisabled = false
-        }
+        // The watcher-disabled flag is a stored preference scoped to the local
+        // FS watcher. Remote consumers already gate on `!isRemoteWorkspace`
+        // before reading it, so we preserve the user's choice across remote
+        // transitions instead of silently clearing it.
         seedInitialRemoteTerminalSessionIfNeeded(configuration: configuration)
         clearRemoteDetectedSurfacePorts()
         remoteDetectedPorts = []

@@ -10131,6 +10131,7 @@ struct VerticalTabsSidebar: View {
     @State private var dropIndicator: SidebarDropIndicator?
     @State private var frozenTabItemPresentation: SidebarTabItemPresentationSnapshot?
     @State private var terminalScrollBarVisibilityGeneration: UInt64 = 0
+    @State private var gitMetadataWatcherDisabledGeneration: UInt64 = 0
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
 
@@ -10154,6 +10155,7 @@ struct VerticalTabsSidebar: View {
 
     var body: some View {
         let _ = terminalScrollBarVisibilityGeneration
+        let _ = gitMetadataWatcherDisabledGeneration
         let tabs = tabManager.tabs
         let workspaceCount = tabs.count
         let canCloseWorkspace = workspaceCount > 1
@@ -10391,6 +10393,20 @@ struct VerticalTabsSidebar: View {
             // Workspace scrollbar visibility changes do not publish on TabManager.tabs,
             // so bump a local generation to refresh the precomputed context-menu state.
             terminalScrollBarVisibilityGeneration &+= 1
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: Workspace.gitMetadataWatcherDisabledDidChangeNotification)
+                .receive(on: RunLoop.main)
+        ) { notification in
+            guard let workspace = notification.object as? Workspace,
+                  tabManager.tabs.contains(where: { $0 === workspace }) else {
+                return
+            }
+
+            // The per-workspace `gitMetadataWatcherDisabled` flag does not publish on
+            // TabManager.tabs, so the precomputed context-menu mode goes stale after a
+            // toggle. Bump a local generation to force re-evaluation on the next render.
+            gitMetadataWatcherDisabledGeneration &+= 1
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }

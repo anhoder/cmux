@@ -1065,8 +1065,10 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertEqual(workspace.panelGitBranches[panelId]?.branch, "feature/local-stale")
 
         // Promoting local → remote must clear local-origin cached sidebar git
-        // metadata AND reset the disabled flag so remote git state is not
-        // accidentally suppressed going forward.
+        // metadata but preserve the stored disabled flag. The flag is a local
+        // preference; remote consumers gate on `isRemoteWorkspace` before
+        // reading it, so preserving it remembers the user's choice if the
+        // workspace ever flips back to local.
         workspace.configureRemoteConnection(
             WorkspaceRemoteConfiguration(
                 destination: "cmux-macmini",
@@ -1083,7 +1085,7 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
             autoConnect: false
         )
 
-        XCTAssertFalse(workspace.gitMetadataWatcherDisabled)
+        XCTAssertTrue(workspace.gitMetadataWatcherDisabled, "local preference must survive remote promotion")
         XCTAssertTrue(workspace.panelGitBranches.isEmpty, "local-origin git branches should be cleared on promotion")
         XCTAssertTrue(workspace.panelPullRequests.isEmpty, "local-origin PRs should be cleared on promotion")
 
