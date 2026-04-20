@@ -238,7 +238,7 @@ func sidebarWorkspaceRowBackgroundStyle(
         if let customBackground {
             return SidebarWorkspaceRowBackgroundStyle(
                 color: customBackground,
-                opacity: isMultiSelected ? 0.28 : 0.16
+                opacity: 1
             )
         }
         if isMultiSelected {
@@ -13073,10 +13073,6 @@ private struct TabItemView: View, Equatable {
         .semibold
     }
 
-    private var showsLeadingRail: Bool {
-        explicitRailColor != nil
-    }
-
     private var activeBorderLineWidth: CGFloat {
         switch activeTabIndicatorStyle {
         case .leftRail:
@@ -13504,16 +13500,6 @@ private struct TabItemView: View, Equatable {
                 .overlay {
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(activeBorderColor, lineWidth: activeBorderLineWidth)
-                }
-                .overlay(alignment: .leading) {
-                    if showsLeadingRail {
-                        Capsule(style: .continuous)
-                            .fill(railColor)
-                            .frame(width: 3)
-                            .padding(.leading, 4)
-                            .padding(.vertical, 5)
-                            .offset(x: -1)
-                    }
                 }
         )
         .padding(.horizontal, 6)
@@ -13955,27 +13941,6 @@ private struct TabItemView: View, Equatable {
         )
         guard let color = style.color else { return .clear }
         return Color(nsColor: color).opacity(style.opacity)
-    }
-
-    private var railColor: Color {
-        explicitRailColor ?? .clear
-    }
-
-    private var explicitRailColor: Color? {
-        guard activeTabIndicatorStyle == .leftRail,
-              let custom = resolvedCustomTabColor else {
-            return nil
-        }
-        return custom.opacity(0.95)
-    }
-
-    private var resolvedCustomTabColor: Color? {
-        guard let hex = workspaceSnapshot.customColorHex else { return nil }
-        return WorkspaceTabColorSettings.displayColor(
-            hex: hex,
-            colorScheme: colorScheme,
-            forceBright: activeTabIndicatorStyle == .leftRail
-        )
     }
 
     private func tabColorSwatchColor(for hex: String) -> NSColor {
