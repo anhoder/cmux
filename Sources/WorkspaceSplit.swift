@@ -3347,6 +3347,13 @@ struct WorkspacePaneDropOverlayCoordinator {
         return previousZone != nil || previousPresentation != nextPresentation
     }
 
+    mutating func clearZoneImmediately(for paneId: PaneID) -> Bool {
+        let key = paneId.id
+        let previousZone = activeDropZones.removeValue(forKey: key)
+        let previousPresentation = presentations.removeValue(forKey: key) ?? .hidden
+        return previousZone != nil || previousPresentation != .hidden
+    }
+
     mutating func completeHide(for paneId: PaneID, generation: UInt64) -> Bool {
         let key = paneId.id
         guard let presentation = presentations[key],

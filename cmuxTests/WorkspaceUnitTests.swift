@@ -3092,6 +3092,20 @@ final class WorkspaceLayoutSimplificationTests: XCTestCase {
         XCTAssertEqual(coordinator.overlayPresentation(for: paneId), .hidden)
     }
 
+    func testPaneDropOverlayCoordinatorClearsImmediatelyOnSuccessfulDrop() {
+        let paneId = PaneID(id: UUID())
+        var coordinator = WorkspacePaneDropOverlayCoordinator()
+
+        XCTAssertTrue(coordinator.setZone(.right, for: paneId))
+        let visiblePresentation = coordinator.overlayPresentation(for: paneId)
+        XCTAssertEqual(visiblePresentation.phase, .visible)
+        XCTAssertEqual(visiblePresentation.zone, .right)
+
+        XCTAssertTrue(coordinator.clearZoneImmediately(for: paneId))
+        XCTAssertEqual(coordinator.overlayPresentation(for: paneId), .hidden)
+        XCTAssertNil(coordinator.activeDropZone(for: paneId))
+    }
+
     func testRenderSnapshotProjectsContextMenuStateFromWorkspaceFacts() throws {
         let workspace = Workspace()
         guard let panelId = workspace.focusedPanelId else {

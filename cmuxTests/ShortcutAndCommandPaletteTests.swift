@@ -972,6 +972,139 @@ final class ShortcutHintModifierPolicyTests: XCTestCase {
 }
 
 
+final class WorkspaceLayoutPaneTabShortcutHintPolicyTests: XCTestCase {
+    func testPaneTabShortcutHintDefaultsToConfiguredSurfaceShortcut() {
+        let action = KeyboardShortcutSettings.Action.selectSurfaceByNumber
+        let originalShortcut = KeyboardShortcutSettings.shortcut(for: action)
+        defer {
+            KeyboardShortcutSettings.setShortcut(originalShortcut, for: action)
+        }
+
+        KeyboardShortcutSettings.setShortcut(
+            StoredShortcut(key: "1", command: false, shift: false, option: false, control: true),
+            for: action
+        )
+
+        withDefaultsSuite { defaults in
+            defaults.removeObject(forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
+
+            XCTAssertEqual(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.control],
+                    defaults: defaults
+                )?.symbol,
+                "⌃"
+            )
+            XCTAssertEqual(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.command],
+                    defaults: defaults
+                )?.symbol,
+                "⌃"
+            )
+        }
+    }
+
+    func testPaneTabShortcutHintTracksCustomizedModifiers() {
+        let action = KeyboardShortcutSettings.Action.selectSurfaceByNumber
+        let originalShortcut = KeyboardShortcutSettings.shortcut(for: action)
+        defer {
+            KeyboardShortcutSettings.setShortcut(originalShortcut, for: action)
+        }
+
+        KeyboardShortcutSettings.setShortcut(
+            StoredShortcut(key: "1", command: true, shift: false, option: false, control: false),
+            for: action
+        )
+
+        withDefaultsSuite { defaults in
+            defaults.set(true, forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
+
+            XCTAssertEqual(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.command],
+                    defaults: defaults
+                )?.symbol,
+                "⌘"
+            )
+            XCTAssertNil(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.control],
+                    defaults: defaults
+                )
+            )
+        }
+    }
+
+    func testPaneTabShortcutHintCanBeDisabled() {
+        withDefaultsSuite { defaults in
+            defaults.set(false, forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
+
+            XCTAssertNil(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.control],
+                    defaults: defaults
+                )
+            )
+        }
+    }
+
+    func testPaneTabShortcutHintIgnoresChordedShortcut() {
+        let action = KeyboardShortcutSettings.Action.selectSurfaceByNumber
+        let originalShortcut = KeyboardShortcutSettings.shortcut(for: action)
+        defer {
+            KeyboardShortcutSettings.setShortcut(originalShortcut, for: action)
+        }
+
+        KeyboardShortcutSettings.setShortcut(
+            StoredShortcut(
+                key: "1",
+                command: false,
+                shift: false,
+                option: false,
+                control: true,
+                chordKey: "2",
+                chordCommand: false,
+                chordShift: false,
+                chordOption: false,
+                chordControl: true
+            ),
+            for: action
+        )
+
+        withDefaultsSuite { defaults in
+            defaults.set(true, forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
+
+            XCTAssertNil(
+                WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(
+                    for: [.control],
+                    defaults: defaults
+                )
+            )
+        }
+    }
+
+    func testPaneTabShortcutDigitMapsLastDigitToLastTab() {
+        XCTAssertEqual(workspaceLayoutTabControlShortcutDigit(for: 0, tabCount: 12), 1)
+        XCTAssertEqual(workspaceLayoutTabControlShortcutDigit(for: 7, tabCount: 12), 8)
+        XCTAssertNil(workspaceLayoutTabControlShortcutDigit(for: 8, tabCount: 12))
+        XCTAssertEqual(workspaceLayoutTabControlShortcutDigit(for: 11, tabCount: 12), 9)
+    }
+
+    private func withDefaultsSuite(_ body: (UserDefaults) -> Void) {
+        let suiteName = "WorkspaceLayoutPaneTabShortcutHintPolicyTests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create defaults suite")
+            return
+        }
+
+        defaults.removePersistentDomain(forName: suiteName)
+        body(defaults)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+}
+
+
 final class ShortcutHintDebugSettingsTests: XCTestCase {
     func testClampKeepsValuesWithinSupportedRange() {
         XCTAssertEqual(ShortcutHintDebugSettings.clamped(0.0), 0.0)

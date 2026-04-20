@@ -434,6 +434,11 @@ final class WorkspaceLayoutRootHostView: NSView {
         syncPaneDropState(for: paneId)
     }
 
+    fileprivate func clearPaneDropZoneImmediately(for paneId: PaneID) {
+        guard dropOverlayCoordinator.clearZoneImmediately(for: paneId) else { return }
+        syncPaneDropState(for: paneId)
+    }
+
     fileprivate func completePaneDropOverlayHide(for paneId: PaneID, generation: UInt64) {
         guard dropOverlayCoordinator.completeHide(for: paneId, generation: generation) else { return }
         syncPaneDropState(for: paneId)
@@ -1073,6 +1078,9 @@ private final class WorkspaceLayoutPaneHostView: NSView {
             onZoneCleared: { [weak self] in
                 self?.rootHost?.clearPaneDropZone(for: snapshot.paneId)
             },
+            onDropSucceeded: { [weak self] in
+                self?.rootHost?.clearPaneDropZoneImmediately(for: snapshot.paneId)
+            },
             onHideAnimationCompleted: { [weak self] generation in
                 self?.rootHost?.completePaneDropOverlayHide(for: snapshot.paneId, generation: generation)
             },
@@ -1526,12 +1534,284 @@ private struct WorkspaceLayoutMountedTabEntry {
     let mountIdentity: WorkspacePaneMountIdentity
 }
 
+struct WorkspaceLayoutPaneTabShortcutHintModifier: Equatable {
+    let modifierFlags: NSEvent.ModifierFlags
+    let symbol: String
+}
+
+enum WorkspaceLayoutPaneTabShortcutHintPolicy {
+    static let intentionalHoldDelay: TimeInterval = 0.30
+
+    static func hintModifier(
+        for modifierFlags: NSEvent.ModifierFlags,
+        defaults: UserDefaults = .standard
+    ) -> WorkspaceLayoutPaneTabShortcutHintModifier? {
+        guard ShortcutHintDebugSettings.showHintsOnCommandHoldEnabled(defaults: defaults) else {
+            return nil
+        }
+        let shortcut = KeyboardShortcutSettings.selectSurfaceByNumberShortcut()
+        guard !shortcut.hasChord else { return nil }
+        let normalized = modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function, .capsLock])
+        guard normalized == shortcut.modifierFlags || normalized == [.command] else { return nil }
+        return WorkspaceLayoutPaneTabShortcutHintModifier(
+            modifierFlags: shortcut.modifierFlags,
+            symbol: shortcut.modifierDisplayString
+        )
+    }
+
+    static func isCurrentWindow(
+        hostWindowNumber: Int?,
+        hostWindowIsKey: Bool,
+        eventWindowNumber: Int?,
+        keyWindowNumber: Int?
+    ) -> Bool {
+        guard let hostWindowNumber, hostWindowIsKey else { return false }
+        if let eventWindowNumber {
+            return eventWindowNumber == hostWindowNumber
+        }
+        return keyWindowNumber == hostWindowNumber
+    }
+
+    static func shouldShowHints(
+        for modifierFlags: NSEvent.ModifierFlags,
+        hostWindowNumber: Int?,
+        hostWindowIsKey: Bool,
+        eventWindowNumber: Int?,
+        keyWindowNumber: Int?,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        hintModifier(for: modifierFlags, defaults: defaults) != nil &&
+            isCurrentWindow(
+                hostWindowNumber: hostWindowNumber,
+                hostWindowIsKey: hostWindowIsKey,
+                eventWindowNumber: eventWindowNumber,
+                keyWindowNumber: keyWindowNumber
+            )
+    }
+}
+
+func workspaceLayoutTabControlShortcutDigit(for index: Int, tabCount: Int) -> Int? {
+    for digit in 1...9 {
+        if workspaceLayoutTabIndexForControlShortcutDigit(digit, tabCount: tabCount) == index {
+            return digit
+        }
+    }
+    return nil
+}
+
+func workspaceLayoutTabIndexForControlShortcutDigit(_ digit: Int, tabCount: Int) -> Int? {
+    guard tabCount > 0, digit >= 1, digit <= 9 else { return nil }
+    if digit == 9 {
+        return tabCount - 1
+    }
+    let index = digit - 1
+    return index < tabCount ? index : nil
+}
+
+@MainActor
+private final class WorkspaceLayoutPaneTabShortcutHintMonitor {
+    private(set) var isShortcutHintVisible = false {
+        didSet {
+            guard isShortcutHintVisible != oldValue else { return }
+            onChange?()
+        }
+    }
+
+    private(set) var shortcutModifierSymbol = "⌃" {
+        didSet {
+            guard shortcutModifierSymbol != oldValue else { return }
+            onChange?()
+        }
+    }
+
+    var onChange: (() -> Void)?
+
+    private weak var hostWindow: NSWindow?
+    private var hostWindowDidBecomeKeyObserver: NSObjectProtocol?
+    private var hostWindowDidResignKeyObserver: NSObjectProtocol?
+    private var flagsMonitor: Any?
+    private var keyDownMonitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var pendingShowWorkItem: DispatchWorkItem?
+    private var pendingModifier: WorkspaceLayoutPaneTabShortcutHintModifier?
+
+    func setHostWindow(_ window: NSWindow?) {
+        guard hostWindow !== window else { return }
+        removeHostWindowObservers()
+        hostWindow = window
+        guard let window else {
+            cancelPendingHintShow(resetVisible: true)
+            return
+        }
+
+        hostWindowDidBecomeKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.update(from: NSEvent.modifierFlags, eventWindow: nil)
+            }
+        }
+
+        hostWindowDidResignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cancelPendingHintShow(resetVisible: true)
+            }
+        }
+
+        update(from: NSEvent.modifierFlags, eventWindow: nil)
+    }
+
+    func start() {
+        guard flagsMonitor == nil else {
+            update(from: NSEvent.modifierFlags, eventWindow: nil)
+            return
+        }
+
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.update(from: event.modifierFlags, eventWindow: event.window)
+            return event
+        }
+
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard self?.isCurrentWindow(eventWindow: event.window) == true else { return event }
+            self?.cancelPendingHintShow(resetVisible: true)
+            return event
+        }
+
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cancelPendingHintShow(resetVisible: true)
+            }
+        }
+
+        update(from: NSEvent.modifierFlags, eventWindow: nil)
+    }
+
+    func stop() {
+        if let flagsMonitor {
+            NSEvent.removeMonitor(flagsMonitor)
+            self.flagsMonitor = nil
+        }
+        if let keyDownMonitor {
+            NSEvent.removeMonitor(keyDownMonitor)
+            self.keyDownMonitor = nil
+        }
+        if let resignObserver {
+            NotificationCenter.default.removeObserver(resignObserver)
+            self.resignObserver = nil
+        }
+        removeHostWindowObservers()
+        cancelPendingHintShow(resetVisible: true)
+    }
+
+    private func isCurrentWindow(eventWindow: NSWindow?) -> Bool {
+        WorkspaceLayoutPaneTabShortcutHintPolicy.isCurrentWindow(
+            hostWindowNumber: hostWindow?.windowNumber,
+            hostWindowIsKey: hostWindow?.isKeyWindow ?? false,
+            eventWindowNumber: eventWindow?.windowNumber,
+            keyWindowNumber: NSApp.keyWindow?.windowNumber
+        )
+    }
+
+    private func update(from modifierFlags: NSEvent.ModifierFlags, eventWindow: NSWindow?) {
+        guard WorkspaceLayoutPaneTabShortcutHintPolicy.shouldShowHints(
+            for: modifierFlags,
+            hostWindowNumber: hostWindow?.windowNumber,
+            hostWindowIsKey: hostWindow?.isKeyWindow ?? false,
+            eventWindowNumber: eventWindow?.windowNumber,
+            keyWindowNumber: NSApp.keyWindow?.windowNumber
+        ) else {
+            cancelPendingHintShow(resetVisible: true)
+            return
+        }
+
+        guard let modifier = WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(for: modifierFlags) else {
+            cancelPendingHintShow(resetVisible: true)
+            return
+        }
+
+        if isShortcutHintVisible {
+            shortcutModifierSymbol = modifier.symbol
+            return
+        }
+
+        queueHintShow(for: modifier)
+    }
+
+    private func queueHintShow(for modifier: WorkspaceLayoutPaneTabShortcutHintModifier) {
+        if pendingModifier == modifier, pendingShowWorkItem != nil {
+            return
+        }
+
+        pendingShowWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingShowWorkItem = nil
+            self.pendingModifier = nil
+            guard WorkspaceLayoutPaneTabShortcutHintPolicy.shouldShowHints(
+                for: NSEvent.modifierFlags,
+                hostWindowNumber: self.hostWindow?.windowNumber,
+                hostWindowIsKey: self.hostWindow?.isKeyWindow ?? false,
+                eventWindowNumber: nil,
+                keyWindowNumber: NSApp.keyWindow?.windowNumber
+            ) else {
+                return
+            }
+            guard let currentModifier = WorkspaceLayoutPaneTabShortcutHintPolicy.hintModifier(for: NSEvent.modifierFlags) else {
+                return
+            }
+            self.shortcutModifierSymbol = currentModifier.symbol
+            self.isShortcutHintVisible = true
+        }
+
+        pendingModifier = modifier
+        pendingShowWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + WorkspaceLayoutPaneTabShortcutHintPolicy.intentionalHoldDelay,
+            execute: workItem
+        )
+    }
+
+    private func cancelPendingHintShow(resetVisible: Bool) {
+        pendingShowWorkItem?.cancel()
+        pendingShowWorkItem = nil
+        pendingModifier = nil
+        if resetVisible {
+            isShortcutHintVisible = false
+        }
+    }
+
+    private func removeHostWindowObservers() {
+        if let hostWindowDidBecomeKeyObserver {
+            NotificationCenter.default.removeObserver(hostWindowDidBecomeKeyObserver)
+            self.hostWindowDidBecomeKeyObserver = nil
+        }
+        if let hostWindowDidResignKeyObserver {
+            NotificationCenter.default.removeObserver(hostWindowDidResignKeyObserver)
+            self.hostWindowDidResignKeyObserver = nil
+        }
+    }
+}
+
 @MainActor
 private final class WorkspaceLayoutNativeTabBarView: NSView {
     private var snapshot: WorkspaceLayoutPaneChromeSnapshot?
     private var hostBridge: (WorkspaceLayoutInteractionHandlers)?
     private var presentation: WorkspaceLayoutPresentationSnapshot?
     private var localTabDrag: WorkspaceLayoutLocalDragSnapshot?
+    private let shortcutHintMonitor = WorkspaceLayoutPaneTabShortcutHintMonitor()
 
     private let scrollView = NSScrollView(frame: .zero)
     private let documentView = WorkspaceLayoutTabDocumentView(frame: .zero)
@@ -1566,6 +1846,11 @@ private final class WorkspaceLayoutNativeTabBarView: NSView {
         documentView.onDropPerformed = { [weak self] in
             self?.onTabMutation?()
         }
+        shortcutHintMonitor.onChange = { [weak self] in
+            self?.rebuildButtons()
+            self?.needsLayout = true
+            self?.needsDisplay = true
+        }
     }
 
     @available(*, unavailable)
@@ -1596,6 +1881,16 @@ private final class WorkspaceLayoutNativeTabBarView: NSView {
     override func mouseExited(with event: NSEvent) {
         isHovering = false
         updateSplitButtonsVisibility()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        shortcutHintMonitor.setHostWindow(window)
+        if window != nil {
+            shortcutHintMonitor.start()
+        } else {
+            shortcutHintMonitor.stop()
+        }
     }
 
     func update(
@@ -1721,11 +2016,12 @@ private final class WorkspaceLayoutNativeTabBarView: NSView {
 
     private func rebuildButtons() {
         guard let snapshot, let hostBridge, let presentation else { return }
+        let showsControlShortcutHints = snapshot.isFocused && shortcutHintMonitor.isShortcutHintVisible
 
         let existingById = Dictionary(uniqueKeysWithValues: tabButtons.map { ($0.tab.id, $0) })
         var nextButtons: [WorkspaceLayoutNativeTabButtonView] = []
 
-        for tabSnapshot in snapshot.tabs {
+        for (index, tabSnapshot) in snapshot.tabs.enumerated() {
             let tab = tabSnapshot.tab
             let button = existingById[tab.id] ?? WorkspaceLayoutNativeTabButtonView(frame: .zero)
             button.update(
@@ -1734,6 +2030,9 @@ private final class WorkspaceLayoutNativeTabBarView: NSView {
                 isSelected: tabSnapshot.isSelected,
                 isPaneFocused: snapshot.isFocused,
                 showsZoomIndicator: tabSnapshot.showsZoomIndicator,
+                controlShortcutDigit: workspaceLayoutTabControlShortcutDigit(for: index, tabCount: snapshot.tabs.count),
+                showsControlShortcutHint: showsControlShortcutHints,
+                shortcutModifierSymbol: shortcutHintMonitor.shortcutModifierSymbol,
                 appearance: presentation.appearance,
                 contextMenuState: tabSnapshot.contextMenuState,
                 onSelect: { [weak self] in
@@ -2270,12 +2569,69 @@ private final class WorkspaceLayoutZeroPaddingTextFieldCell: NSTextFieldCell {
 }
 
 @MainActor
+private struct WorkspaceLayoutPaneTabShortcutHintPill: View {
+    let text: String
+    let fontSize: CGFloat
+    let textColor: NSColor
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundStyle(Color(nsColor: textColor))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(ShortcutHintPillBackground())
+    }
+}
+
+private final class WorkspaceLayoutShortcutHintPillView: NSHostingView<WorkspaceLayoutPaneTabShortcutHintPill> {
+
+    required init(rootView: WorkspaceLayoutPaneTabShortcutHintPill) {
+        super.init(rootView: rootView)
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    convenience init(frame frameRect: NSRect) {
+        self.init(
+            rootView: WorkspaceLayoutPaneTabShortcutHintPill(
+                text: "",
+                fontSize: 9,
+                textColor: .labelColor
+            )
+        )
+        frame = frameRect
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(text: String, fontSize: CGFloat, textColor: NSColor) {
+        rootView = WorkspaceLayoutPaneTabShortcutHintPill(
+            text: text,
+            fontSize: fontSize,
+            textColor: textColor
+        )
+        invalidateIntrinsicContentSize()
+    }
+
+    func applyAppearance() {}
+}
+
+@MainActor
 final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
     private(set) var tab: WorkspaceLayout.Tab = WorkspaceLayout.Tab(title: "")
     private var paneId: PaneID = PaneID()
     private var isSelected: Bool = false
     private var isPaneFocused: Bool = false
     private var showsZoomIndicator: Bool = false
+    private var controlShortcutDigit: Int?
+    private var showsControlShortcutHint = false
+    private var shortcutModifierSymbol = "⌃"
     private var splitAppearance: WorkspaceLayoutConfiguration.Appearance = .default
     private var contextMenuState = TabContextMenuState(
         isPinned: false,
@@ -2307,6 +2663,7 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
     private let dirtyDot = NSView(frame: .zero)
     private let unreadDot = NSView(frame: .zero)
     private let spinner = NSProgressIndicator(frame: .zero)
+    private let shortcutHintView = WorkspaceLayoutShortcutHintPillView(frame: .zero)
     private var trackingArea: NSTrackingArea?
     private var isHovered = false
     private var isCloseHovered = false
@@ -2447,6 +2804,10 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         spinner.isDisplayedWhenStopped = false
         spinner.alphaValue = 0
         addSubview(spinner)
+
+        shortcutHintView.alphaValue = 0
+        shortcutHintView.isHidden = true
+        addSubview(shortcutHintView)
     }
 
     @available(*, unavailable)
@@ -2489,6 +2850,9 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         isSelected: Bool,
         isPaneFocused: Bool,
         showsZoomIndicator: Bool,
+        controlShortcutDigit: Int?,
+        showsControlShortcutHint: Bool,
+        shortcutModifierSymbol: String,
         appearance: WorkspaceLayoutConfiguration.Appearance,
         contextMenuState: TabContextMenuState,
         onSelect: @escaping () -> Void,
@@ -2503,6 +2867,9 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         self.isSelected = isSelected
         self.isPaneFocused = isPaneFocused
         self.showsZoomIndicator = showsZoomIndicator
+        self.controlShortcutDigit = controlShortcutDigit
+        self.showsControlShortcutHint = showsControlShortcutHint
+        self.shortcutModifierSymbol = shortcutModifierSymbol
         self.splitAppearance = appearance
         self.contextMenuState = contextMenuState
         self.onSelect = onSelect
@@ -2550,20 +2917,21 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
             iconUsesTemplateSymbol = false
         }
 
-        closeButton.isHidden = tab.isPinned || !(isSelected || isHovered || isCloseHovered)
+        let nextShowsShortcutHint = showsShortcutHint
+        closeButton.isHidden = nextShowsShortcutHint || tab.isPinned || !(isSelected || isHovered || isCloseHovered)
         if closeButton.isHidden {
             isCloseHovered = false
             isClosePressed = false
         }
-        pinView.isHidden = !tab.isPinned || closeButton.isHidden == false
+        pinView.isHidden = nextShowsShortcutHint || !tab.isPinned || closeButton.isHidden == false
         zoomButton.isHidden = !showsZoomIndicator
         if zoomButton.isHidden {
             isZoomHovered = false
             isZoomPressed = false
         }
 
-        unreadDot.isHidden = isSelected || isHovered || isCloseHovered || !tab.showsNotificationBadge
-        dirtyDot.isHidden = isSelected || isHovered || isCloseHovered || !tab.isDirty
+        unreadDot.isHidden = nextShowsShortcutHint || isSelected || isHovered || isCloseHovered || !tab.showsNotificationBadge
+        dirtyDot.isHidden = nextShowsShortcutHint || isSelected || isHovered || isCloseHovered || !tab.isDirty
         unreadDot.layer?.backgroundColor = NSColor.systemBlue.cgColor
         dirtyDot.layer?.backgroundColor = TabBarColors.nsColorActiveText(for: splitAppearance).withAlphaComponent(0.72).cgColor
 
@@ -2588,6 +2956,34 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         iconView.alphaValue = usesSubviewChrome && !tab.isLoading && iconView.image != nil ? 1 : 0
         pinView.alphaValue = 0
         spinner.alphaValue = 0
+        shortcutHintView.applyAppearance()
+        if let shortcutHintLabel {
+            shortcutHintView.update(
+                text: shortcutHintLabel,
+                fontSize: accessoryFontSize,
+                textColor: isSelected
+                    ? TabBarColors.nsColorActiveText(for: splitAppearance)
+                    : TabBarColors.nsColorInactiveText(for: splitAppearance)
+            )
+        }
+        if nextShowsShortcutHint != !shortcutHintView.isHidden {
+            shortcutHintView.layer?.removeAllAnimations()
+            shortcutHintView.isHidden = false
+            let shouldRemainVisible = nextShowsShortcutHint
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                shortcutHintView.animator().alphaValue = nextShowsShortcutHint ? 1 : 0
+            } completionHandler: { [weak self] in
+                guard let self else { return }
+                if !shouldRemainVisible {
+                    self.shortcutHintView.isHidden = true
+                }
+            }
+        } else {
+            shortcutHintView.alphaValue = nextShowsShortcutHint ? 1 : 0
+            shortcutHintView.isHidden = !nextShowsShortcutHint
+        }
         syncSpinnerAnimation()
 
         needsLayout = true
@@ -2600,8 +2996,8 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         ]
         let titleWidth = ceil((tab.title as NSString).size(withAttributes: titleAttributes).width)
         let trailingAccessoryWidth: CGFloat = showsZoomIndicator
-            ? (accessorySlotSize * 2)
-            : accessorySlotSize
+            ? (accessorySlotSize + trailingAccessorySlotWidth)
+            : trailingAccessorySlotWidth
         let titleToAccessorySpacing: CGFloat = showsZoomIndicator ? TabBarMetrics.contentSpacing : 0
         let chromeWidth =
             (TabBarMetrics.tabHorizontalPadding * 2)
@@ -2646,17 +3042,24 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
         )
 
         closeButton.frame = CGRect(
-            x: bounds.maxX - TabBarMetrics.tabHorizontalPadding - accessorySlotSize,
+            x: bounds.maxX - TabBarMetrics.tabHorizontalPadding - trailingAccessorySlotWidth + ((trailingAccessorySlotWidth - accessorySlotSize) / 2),
             y: centerY - (accessorySlotSize / 2),
             width: accessorySlotSize,
             height: accessorySlotSize
         )
         closeButton.layer?.cornerRadius = closeButton.bounds.height / 2
         pinView.frame = closeButton.frame
+        let shortcutHintSlotFrame = CGRect(
+            x: bounds.maxX - TabBarMetrics.tabHorizontalPadding - trailingAccessorySlotWidth,
+            y: centerY - (accessorySlotSize / 2),
+            width: trailingAccessorySlotWidth,
+            height: accessorySlotSize
+        )
+        shortcutHintView.frame = shortcutHintSlotFrame.offsetBy(dx: paneShortcutHintXOffset, dy: paneShortcutHintYOffset)
 
         if showsZoomIndicator {
             zoomButton.frame = CGRect(
-                x: closeButton.frame.minX - accessorySlotSize,
+                x: shortcutHintSlotFrame.minX - accessorySlotSize,
                 y: centerY - (accessorySlotSize / 2),
                 width: accessorySlotSize,
                 height: accessorySlotSize
@@ -2666,7 +3069,7 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
             zoomButton.frame = .zero
         }
 
-        let trailingAccessoryMinX = showsZoomIndicator ? zoomButton.frame.minX : closeButton.frame.minX
+        let trailingAccessoryMinX = showsZoomIndicator ? zoomButton.frame.minX : shortcutHintSlotFrame.minX
         let titleMinX = iconSlotRect.maxX + TabBarMetrics.contentSpacing
         let titleMaxX = trailingAccessoryMinX - (showsZoomIndicator ? TabBarMetrics.contentSpacing : 0)
         let titleFrameMinX = titleMinX + tuning.titleDX + tuning.iconDX
@@ -2676,7 +3079,8 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
             width: max(0, titleMaxX - titleFrameMinX),
             height: 14
         )
-        let indicatorStartX = bounds.maxX - TabBarMetrics.tabHorizontalPadding - accessorySlotSize
+        let indicatorCenterX = closeButton.frame.midX
+        let indicatorStartX = indicatorCenterX - (TabBarMetrics.notificationBadgeSize / 2)
         unreadDot.frame = CGRect(
             x: indicatorStartX,
             y: centerY - (TabBarMetrics.notificationBadgeSize / 2),
@@ -2952,6 +3356,9 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
             isSelected: isSelected,
             isPaneFocused: isPaneFocused,
             showsZoomIndicator: showsZoomIndicator,
+            controlShortcutDigit: controlShortcutDigit,
+            showsControlShortcutHint: showsControlShortcutHint,
+            shortcutModifierSymbol: shortcutModifierSymbol,
             appearance: splitAppearance,
             contextMenuState: contextMenuState,
             onSelect: onSelect,
@@ -3100,6 +3507,10 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
     }
 
     private func drawTrailingAccessory() {
+        if showsShortcutHint {
+            return
+        }
+
         if shouldShowIndicators {
             if !unreadDot.isHidden {
                 NSColor.systemBlue.setFill()
@@ -3138,6 +3549,59 @@ final class WorkspaceLayoutNativeTabButtonView: NSView, NSDraggingSource {
 
     private var shouldShowIndicators: Bool {
         (!isSelected && !isHovered && !isCloseHovered) && (tab.isDirty || tab.showsNotificationBadge)
+    }
+
+    private var shortcutHintLabel: String? {
+        guard let controlShortcutDigit else { return nil }
+        return "\(shortcutModifierSymbol)\(controlShortcutDigit)"
+    }
+
+    private var showsShortcutHint: Bool {
+        (showsControlShortcutHint || alwaysShowShortcutHints) && shortcutHintLabel != nil
+    }
+
+    private var alwaysShowShortcutHints: Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: ShortcutHintDebugSettings.alwaysShowHintsKey) != nil else {
+            return ShortcutHintDebugSettings.defaultAlwaysShowHints
+        }
+        return defaults.bool(forKey: ShortcutHintDebugSettings.alwaysShowHintsKey)
+    }
+
+    private var paneShortcutHintXOffset: CGFloat {
+        let defaults = UserDefaults.standard
+        let value: Double
+        if defaults.object(forKey: ShortcutHintDebugSettings.paneHintXKey) != nil {
+            value = defaults.double(forKey: ShortcutHintDebugSettings.paneHintXKey)
+        } else {
+            value = ShortcutHintDebugSettings.defaultPaneHintX
+        }
+        return CGFloat(ShortcutHintDebugSettings.clamped(value))
+    }
+
+    private var paneShortcutHintYOffset: CGFloat {
+        let defaults = UserDefaults.standard
+        let value: Double
+        if defaults.object(forKey: ShortcutHintDebugSettings.paneHintYKey) != nil {
+            value = defaults.double(forKey: ShortcutHintDebugSettings.paneHintYKey)
+        } else {
+            value = ShortcutHintDebugSettings.defaultPaneHintY
+        }
+        return CGFloat(ShortcutHintDebugSettings.clamped(value))
+    }
+
+    private var trailingAccessorySlotWidth: CGFloat {
+        guard let label = shortcutHintLabel else {
+            return accessorySlotSize
+        }
+        let font = shortcutHintFont()
+        let textWidth = ceil((label as NSString).size(withAttributes: [.font: font]).width)
+        let positiveDebugInset = max(0, paneShortcutHintXOffset) + 2
+        return max(accessorySlotSize, textWidth + 8 + positiveDebugInset)
+    }
+
+    private func shortcutHintFont() -> NSFont {
+        NSFont.systemFont(ofSize: accessoryFontSize, weight: .semibold)
     }
 
     private func drawAccessoryButton(
@@ -3253,6 +3717,7 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
     private var localTabDrag: WorkspaceLayoutLocalDragSnapshot?
     private var onZoneUpdated: ((DropZone) -> Void)?
     private var onZoneCleared: (() -> Void)?
+    private var onDropSucceeded: (() -> Void)?
     private var onHideAnimationCompleted: ((UInt64) -> Void)?
     private var onDropPerformed: (() -> Void)?
     private let overlayShapeView = NSView(frame: .zero)
@@ -3307,6 +3772,7 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
         overlayPresentation: WorkspacePaneDropOverlayPresentation,
         onZoneUpdated: @escaping (DropZone) -> Void,
         onZoneCleared: @escaping () -> Void,
+        onDropSucceeded: @escaping () -> Void,
         onHideAnimationCompleted: @escaping (UInt64) -> Void,
         onDropPerformed: @escaping () -> Void
     ) {
@@ -3316,6 +3782,7 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
         self.localTabDrag = localTabDrag
         self.onZoneUpdated = onZoneUpdated
         self.onZoneCleared = onZoneCleared
+        self.onDropSucceeded = onDropSucceeded
         self.onHideAnimationCompleted = onHideAnimationCompleted
         self.onDropPerformed = onDropPerformed
         updateOverlayPresentation(overlayPresentation)
@@ -3481,17 +3948,20 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
                 let draggedTabId = localDrag.tabId
                 let sourcePaneId = localDrag.sourcePaneId
                 hostBridge.clearDragState()
-                onZoneCleared?()
 
                 if zone == .center {
                     if sourcePaneId != paneId {
                         _ = hostBridge.moveTab(draggedTabId, toPane: paneId, atIndex: nil)
                     }
+                    onDropSucceeded?()
                     onDropPerformed?()
                     return true
                 }
 
-                guard let orientation = zone.orientation else { return false }
+                guard let orientation = zone.orientation else {
+                    onZoneCleared?()
+                    return false
+                }
                 _ = hostBridge.splitPane(
                     paneId,
                     orientation: orientation,
@@ -3499,6 +3969,7 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
                     insertFirst: zone.insertsFirst,
                     focusNewPane: true
                 )
+                onDropSucceeded?()
                 onDropPerformed?()
                 return true
             }
@@ -3524,18 +3995,22 @@ private final class WorkspaceLayoutPaneDropOverlayView: NSView {
                 destination: destination
             )
             let handled = hostBridge.handleExternalTabDrop(request)
-            onZoneCleared?()
             if handled {
+                onDropSucceeded?()
                 onDropPerformed?()
+            } else {
+                onZoneCleared?()
             }
             return handled
         }
 
         let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] ?? []
         let handled = hostBridge.handleFileDrop(urls, in: paneId)
-        onZoneCleared?()
         if handled {
+            onDropSucceeded?()
             onDropPerformed?()
+        } else {
+            onZoneCleared?()
         }
         return handled
     }
@@ -4291,6 +4766,9 @@ func workspaceLayoutRenderAppKitTabChromeImage(
         isSelected: scenario.isSelected,
         isPaneFocused: true,
         showsZoomIndicator: scenario.showsZoomIndicator,
+        controlShortcutDigit: nil,
+        showsControlShortcutHint: false,
+        shortcutModifierSymbol: "⌃",
         appearance: scenario.appearance,
         contextMenuState: TabContextMenuState(
             isPinned: scenario.tab.isPinned,
@@ -4561,6 +5039,9 @@ final class WorkspaceLayoutNativeTabButtonDebugPreviewHost: NSView {
             isSelected: isSelected,
             isPaneFocused: true,
             showsZoomIndicator: false,
+            controlShortcutDigit: nil,
+            showsControlShortcutHint: false,
+            shortcutModifierSymbol: "⌃",
             appearance: appearance,
             contextMenuState: contextMenuState,
             onSelect: {},
