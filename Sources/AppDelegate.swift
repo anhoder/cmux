@@ -2529,6 +2529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 } catch {
                     NSLog("auth.callback failed: %@", "\(error)")
                 }
+                self.focusAppAfterAuthCallback()
             }
         }
 
@@ -6776,6 +6777,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if !didAttemptStartupSessionRestore {
             startupSessionSnapshot = nil
             didAttemptStartupSessionRestore = true
+        }
+    }
+
+    private func focusAppAfterAuthCallback() {
+        // When the sign-in deeplink returns through the browser only the
+        // Settings window gets re-fronted by default, leaving any regular
+        // cmux workspace windows buried behind other apps. Activate the
+        // app, re-front every visible cmux window in back-to-front order
+        // to preserve relative z-order, then raise Settings on top.
+        NSApplication.shared.activate(ignoringOtherApps: true)
+
+        let settingsWindow = SettingsWindowController.shared.window
+        let visible = NSApp.orderedWindows.filter { $0.isVisible }
+        for window in visible.reversed() where window !== settingsWindow {
+            window.orderFront(nil)
+        }
+        if let settingsWindow, settingsWindow.isVisible {
+            settingsWindow.makeKeyAndOrderFront(nil)
         }
     }
 
