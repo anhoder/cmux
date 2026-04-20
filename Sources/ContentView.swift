@@ -238,7 +238,7 @@ func sidebarWorkspaceRowBackgroundStyle(
         if let customBackground {
             return SidebarWorkspaceRowBackgroundStyle(
                 color: customBackground,
-                opacity: 1
+                opacity: isMultiSelected ? 0.35 : 0.7
             )
         }
         if isMultiSelected {
