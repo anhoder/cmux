@@ -83,19 +83,17 @@ actor VMClient {
     }
 
     func exec(id: String, command: String, timeoutMs: Int = 30_000) async throws -> VMExecResult {
-        let body: [String: Any] = ["args": [command, timeoutMs]]
+        let body: [String: Any] = ["command": command, "timeoutMs": timeoutMs]
         let (data, http) = try await request(
             "POST",
-            path: "/api/rivet/actors/vmActor/\(id)/actions/exec",
+            path: "/api/vm/\(id)/exec",
             jsonBody: body
         )
         try ensureOK(http, data: data)
         let obj = try decodeJSONObject(data)
-        // The RivetKit action-endpoint payload wraps the return value in { output: ... }.
-        let output = (obj["output"] as? [String: Any]) ?? obj
-        let exitCode = (output["exitCode"] as? Int) ?? ((output["exitCode"] as? Double).map(Int.init) ?? -1)
-        let stdout = (output["stdout"] as? String) ?? ""
-        let stderr = (output["stderr"] as? String) ?? ""
+        let exitCode = (obj["exitCode"] as? Int) ?? ((obj["exitCode"] as? Double).map(Int.init) ?? -1)
+        let stdout = (obj["stdout"] as? String) ?? ""
+        let stderr = (obj["stderr"] as? String) ?? ""
         return VMExecResult(exitCode: exitCode, stdout: stdout, stderr: stderr)
     }
 

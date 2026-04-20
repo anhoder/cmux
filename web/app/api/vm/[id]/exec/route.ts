@@ -1,6 +1,6 @@
 import { createClient } from "rivetkit/client";
-import type { Registry } from "../../../../services/vms/registry";
-import { unauthorized, verifyRequest } from "../../../../services/vms/auth";
+import type { Registry } from "../../../../../services/vms/registry";
+import { unauthorized, verifyRequest } from "../../../../../services/vms/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -25,8 +25,6 @@ function clientFor(request: Request, bearer: { accessToken: string; refreshToken
   });
 }
 
-// `Response.json(...)` misbehaves under Next.js 16's turbopack dev build; use an explicit
-// `new Response(JSON.stringify(...))` for both success and error paths. See web/app/api/vm/route.ts.
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -34,7 +32,7 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-export async function DELETE(
+export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<Response> {
@@ -43,15 +41,21 @@ export async function DELETE(
     if (!user) return unauthorized();
     const bearer = bearerFrom(request);
     if (!bearer) return unauthorized();
+
+    const body = (await request.json().catch(() => ({}))) as {
+      command?: string;
+      timeoutMs?: number;
+    };
+    if (!body.command) return jsonResponse({ error: "command is required" }, 400);
+
     const { id } = await params;
     const client = clientFor(request, bearer);
-    // vmActor.remove() runs provider.destroy() then c.destroy(); the coordinator drops the id.
-    const vm = client.vmActor.getOrCreate([id]);
-    await vm.remove();
-    await client.userVmsActor.getOrCreate([user.id]).forget(id);
-    return jsonResponse({ ok: true });
+    const result = await client.vmActor
+      .getOrCreate([id])
+      .exec(body.command, body.timeoutMs ?? 30_000);
+    return jsonResponse(result);
   } catch (err) {
-    console.error("/api/vm/[id] DELETE failed", err);
+    console.error("/api/vm/[id]/exec POST failed", err);
     return jsonResponse(
       { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) },
       500,
