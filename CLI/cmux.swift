@@ -99,7 +99,9 @@ private func cliWrite(_ data: Data, to handle: FileHandle, onBrokenPipe: CLIBrok
                 case EPIPE:
                     switch onBrokenPipe {
                     case .exit(let code):
-                        Darwin.exit(code)
+                        // _exit skips atexit/stdio flush so we can't re-enter cliWrite under the held lock,
+                        // and matches the default SIGPIPE termination this replaces.
+                        Darwin._exit(code)
                     case .ignore:
                         return false
                     }
