@@ -835,7 +835,7 @@ class TabManager: ObservableObject {
     }
 
     private struct WorkspacePullRequestRESTItem: Decodable, Sendable {
-        struct Head: Decodable, Sendable {
+        struct Ref: Decodable, Sendable {
             let ref: String
         }
 
@@ -844,7 +844,8 @@ class TabManager: ObservableObject {
         let htmlURL: String
         let updatedAt: String?
         let mergedAt: String?
-        let head: Head
+        let head: Ref
+        let base: Ref?
 
         enum CodingKeys: String, CodingKey {
             case number
@@ -853,6 +854,7 @@ class TabManager: ObservableObject {
             case updatedAt = "updated_at"
             case mergedAt = "merged_at"
             case head
+            case base
         }
     }
 
@@ -861,20 +863,26 @@ class TabManager: ObservableObject {
         let state: String
         let url: String
         let updatedAt: String?
+        let mergedAt: String?
         let headRefName: String?
+        let baseRefName: String?
 
         init(
             number: Int,
             state: String,
             url: String,
             updatedAt: String?,
-            headRefName: String? = nil
+            mergedAt: String? = nil,
+            headRefName: String? = nil,
+            baseRefName: String? = nil
         ) {
             self.number = number
             self.state = state
             self.url = url
             self.updatedAt = updatedAt
+            self.mergedAt = mergedAt
             self.headRefName = headRefName
+            self.baseRefName = baseRefName
         }
     }
 
@@ -900,6 +908,7 @@ class TabManager: ObservableObject {
     private nonisolated static let workspacePullRequestTerminalStateSweepInterval: TimeInterval = 15 * 60
     private nonisolated static let workspacePullRequestPollJitterFraction = 0.10
     private nonisolated static let workspacePullRequestProbeTimeout: TimeInterval = 5.0
+    private nonisolated static let mergedPullRequestBadgeStaleAfter: TimeInterval = 14 * 24 * 60 * 60
     @Published var selectedTabId: UUID? {
         willSet {
 #if DEBUG
@@ -2889,7 +2898,9 @@ class TabManager: ObservableObject {
             state: rawState,
             url: pullRequest.htmlURL,
             updatedAt: pullRequest.updatedAt,
-            headRefName: pullRequest.head.ref
+            mergedAt: pullRequest.mergedAt,
+            headRefName: pullRequest.head.ref,
+            baseRefName: pullRequest.base?.ref
         )
     }
 
@@ -2944,20 +2955,30 @@ class TabManager: ObservableObject {
         return "Bearer \(token)"
     }
 
+    nonisolated static func pullRequestMapByNormalizedBranchForTesting(
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date
+    ) -> [String: GitHubPullRequestProbeItem] {
+        pullRequestMapByNormalizedBranch(from: pullRequests, now: now)
+    }
+
     private nonisolated static func pullRequestMapByNormalizedBranch(
-        from pullRequests: [GitHubPullRequestProbeItem]
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date = Date()
     ) -> [String: GitHubPullRequestProbeItem] {
         var pullRequestsByBranch: [String: GitHubPullRequestProbeItem] = [:]
 
         for pullRequest in pullRequests {
             guard let branch = normalizedBranchName(pullRequest.headRefName),
-                  pullRequestStatus(from: pullRequest.state) != nil,
-                  URL(string: pullRequest.url) != nil else {
+                  isSidebarPullRequestCandidate(pullRequest, now: now) else {
                 continue
             }
 
             if let currentBest = pullRequestsByBranch[branch] {
-                pullRequestsByBranch[branch] = preferredPullRequest(from: [currentBest, pullRequest]) ?? currentBest
+                pullRequestsByBranch[branch] = preferredPullRequest(
+                    from: [currentBest, pullRequest],
+                    now: now
+                ) ?? currentBest
             } else {
                 pullRequestsByBranch[branch] = pullRequest
             }
@@ -2967,7 +2988,8 @@ class TabManager: ObservableObject {
     }
 
     nonisolated static func preferredPullRequest(
-        from pullRequests: [GitHubPullRequestProbeItem]
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date = Date()
     ) -> GitHubPullRequestProbeItem? {
         func statusPriority(_ status: SidebarPullRequestStatus) -> Int {
             switch status {
@@ -3006,8 +3028,7 @@ class TabManager: ObservableObject {
 
         var best: GitHubPullRequestProbeItem?
         for pullRequest in pullRequests {
-            guard pullRequestStatus(from: pullRequest.state) != nil,
-                  URL(string: pullRequest.url) != nil else {
+            guard isSidebarPullRequestCandidate(pullRequest, now: now) else {
                 continue
             }
             guard let currentBest = best else {
@@ -3019,6 +3040,41 @@ class TabManager: ObservableObject {
             }
         }
         return best
+    }
+
+    private nonisolated static func isSidebarPullRequestCandidate(
+        _ pullRequest: GitHubPullRequestProbeItem,
+        now: Date
+    ) -> Bool {
+        guard pullRequestStatus(from: pullRequest.state) != nil,
+              URL(string: pullRequest.url) != nil else {
+            return false
+        }
+        return !isStaleMergedPullRequest(pullRequest, now: now)
+    }
+
+    private nonisolated static func isStaleMergedPullRequest(
+        _ pullRequest: GitHubPullRequestProbeItem,
+        now: Date
+    ) -> Bool {
+        guard pullRequestStatus(from: pullRequest.state) == .merged,
+              let mergedAt = githubTimestampDate(from: pullRequest.mergedAt) else {
+            return false
+        }
+        return now.timeIntervalSince(mergedAt) > mergedPullRequestBadgeStaleAfter
+    }
+
+    private nonisolated static func githubTimestampDate(from rawTimestamp: String?) -> Date? {
+        let timestamp = rawTimestamp?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !timestamp.isEmpty else { return nil }
+
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: timestamp) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: timestamp)
     }
 
     private nonisolated static func pullRequestStatus(
