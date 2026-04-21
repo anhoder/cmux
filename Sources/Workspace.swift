@@ -3585,6 +3585,13 @@ final class WorkspaceRemoteSessionController {
                 // serve --stdio on the remote. Skip them until we wire the baked unix-socket
                 // transport. The interactive terminal still works — it's a plain shell session.
                 debugLog("remote.relay.skipped reason=vm-baked")
+                // Without the proxy broker, nothing later transitions the workspace to
+                // `.connected`. Publish it here so the workspace card / sidebar reflect
+                // the actual state (the shell session is up, proxy features aren't).
+                publishState(
+                    .connected,
+                    detail: "Connected to \(configuration.displayTarget) (VM, proxy disabled)"
+                )
             } else {
                 startReverseRelayLocked(remotePath: hello.remotePath)
                 requestBootstrapRemoteTTYIfNeededLocked()
