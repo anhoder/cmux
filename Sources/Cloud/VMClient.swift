@@ -88,7 +88,11 @@ actor VMClient {
         var body: [String: Any] = [:]
         if let image { body["image"] = image }
         if let provider { body["provider"] = provider }
-        let (data, http) = try await request("POST", path: "/api/vm", jsonBody: body)
+        // Send an Idempotency-Key so a retry after a timeout / bad Wi-Fi doesn't provision
+        // a second paid provider VM. The backend stores this against the existing entry and
+        // short-circuits duplicate calls (web/services/vms/actors/userVms.ts).
+        let headers = ["Idempotency-Key": UUID().uuidString.lowercased()]
+        let (data, http) = try await request("POST", path: "/api/vm", jsonBody: body, extraHeaders: headers)
         try ensureOK(http, data: data)
         let obj = try decodeJSONObject(data)
         guard let id = obj["id"] as? String,
@@ -161,7 +165,8 @@ actor VMClient {
     private func request(
         _ method: String,
         path: String,
-        jsonBody: [String: Any]? = nil
+        jsonBody: [String: Any]? = nil,
+        extraHeaders: [String: String] = [:]
     ) async throws -> (Data, HTTPURLResponse) {
         let tokens: (accessToken: String, refreshToken: String)
         do {
@@ -185,6 +190,9 @@ actor VMClient {
         if let jsonBody {
             req.setValue("application/json", forHTTPHeaderField: "content-type")
             req.httpBody = try JSONSerialization.data(withJSONObject: jsonBody, options: [])
+        }
+        for (key, value) in extraHeaders {
+            req.setValue(value, forHTTPHeaderField: key)
         }
 
         let data: Data
