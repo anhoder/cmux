@@ -38,7 +38,6 @@ export async function POST(
     return jsonResponse(endpoint);
   } catch (err) {
     console.error("/api/vm/[id]/ssh-endpoint failed", err);
-    const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse({ error: err instanceof Error ? err.message : "internal error" }, 500);
   }
 }

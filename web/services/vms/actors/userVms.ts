@@ -33,7 +33,8 @@ export const userVmsActor = actor({
       // Provision the provider VM directly, then spawn a vmActor keyed on the provider id.
       // This avoids the vmActor.onCreate -> driver.create round trip (which used an extra
       // cmux-owned UUID) and means the actor key equals the provider id.
-      const handle = await getProvider(provider).create({ image: opts.image ?? "" });
+      const driver = getProvider(provider);
+      const handle = await driver.create({ image: opts.image ?? "" });
       const entry: UserVmEntry = {
         providerVmId: handle.providerVmId,
         provider,
@@ -41,14 +42,31 @@ export const userVmsActor = actor({
         createdAt: handle.createdAt,
       };
       const client = c.client<typeof registry>();
-      await client.vmActor.create([entry.providerVmId], {
-        input: {
-          userId: c.key[0] as string,
-          provider,
-          providerVmId: entry.providerVmId,
-          image: entry.image,
-        },
-      });
+      try {
+        await client.vmActor.create([entry.providerVmId], {
+          input: {
+            userId: c.key[0] as string,
+            provider,
+            providerVmId: entry.providerVmId,
+            image: entry.image,
+          },
+        });
+      } catch (actorCreateError) {
+        // vmActor.create failed *after* the provider already provisioned the VM. Without a
+        // rollback, that VM lives on forever as an orphan (costing the user and cluttering
+        // the Freestyle/E2B dashboard). Best-effort destroy + rethrow so the caller sees a
+        // clean failure rather than a half-provisioned sandbox.
+        try {
+          await driver.destroy(entry.providerVmId);
+        } catch {
+          // The orphan-cleanup failure is less bad than the original; swallow but log.
+          console.error(
+            "userVmsActor.create: failed to roll back provider VM after vmActor.create error",
+            { providerVmId: entry.providerVmId, provider },
+          );
+        }
+        throw actorCreateError;
+      }
       c.state.vms.push(entry);
       return entry;
     },

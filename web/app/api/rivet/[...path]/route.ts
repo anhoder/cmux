@@ -13,11 +13,14 @@ async function handle(request: Request): Promise<Response> {
   if (!assertRivetInternal(request)) return unauthorized();
   const user = await verifyRequest(request);
   if (!user) return unauthorized();
-  // Inject the userId as a request header so actor hooks can double-check if they ever
-  // need to. The internal-gate above already scopes this path to our own REST routes.
-  const patched = new Request(request, {
-    headers: new Headers([...request.headers, ["x-cmux-user-id", user.id]]),
-  });
+  // Strip any client-supplied `x-cmux-user-id` header before asserting our own. Appending
+  // via the array spread left a pre-existing client value readable first by any code that
+  // naively took the first match — letting a forged header smuggle a different identity
+  // through. Use Headers.set to guarantee the value we write is authoritative.
+  const patchedHeaders = new Headers(request.headers);
+  patchedHeaders.delete("x-cmux-user-id");
+  patchedHeaders.set("x-cmux-user-id", user.id);
+  const patched = new Request(request, { headers: patchedHeaders });
   return registry.handler(patched);
 }
 

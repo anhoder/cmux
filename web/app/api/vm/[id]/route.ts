@@ -28,9 +28,8 @@ export async function DELETE(
     return jsonResponse({ ok: true });
   } catch (err) {
     console.error("/api/vm/[id] DELETE failed", err);
-    return jsonResponse(
-      { error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) },
-      500,
-    );
+    // Return a safe summary only — don't echo the provider's error shape, which can
+    // contain internal URLs or tokens.
+    return jsonResponse({ error: err instanceof Error ? err.message : "internal error" }, 500);
   }
 }

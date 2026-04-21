@@ -35,9 +35,10 @@ export async function GET(request: Request): Promise<Response> {
     return jsonResponse({ vms });
   } catch (err) {
     console.error("/api/vm GET failed", err);
-    return errorResponse(
-      err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err),
-    );
+    // Never return stack traces in REST responses — they leak server-internal paths and
+    // sometimes credentials baked into error messages. Log the full error server-side;
+    // send the client a safe summary only.
+    return errorResponse(err instanceof Error ? err.message : "internal error");
   }
 }
 
@@ -90,9 +91,10 @@ export async function POST(request: Request): Promise<Response> {
     });
   } catch (err) {
     console.error("/api/vm POST failed", err);
-    return errorResponse(
-      err instanceof Error ? `${err.name}: ${err.message}\n${err.stack}` : String(err),
-    );
+    // Never return stack traces in REST responses — they leak server-internal paths and
+    // sometimes credentials baked into error messages. Log the full error server-side;
+    // send the client a safe summary only.
+    return errorResponse(err instanceof Error ? err.message : "internal error");
   }
 }
 
