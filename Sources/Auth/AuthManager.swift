@@ -585,7 +585,13 @@ final class AuthManager: ObservableObject {
     /// Both the access and refresh token for the current session, for callers that need to
     /// talk to cmux-owned backend endpoints (e.g. the cloud VM service) with the Stack Auth
     /// Authorization + X-Stack-Refresh-Token header pair.
+    ///
+    /// Awaits on-launch restoration before reading the token store. Without this, VM RPCs
+    /// firing before `restoreStoredSessionIfNeeded()` finishes could observe an empty store
+    /// on a refresh-token-only start and report "Not signed in" even though a valid session
+    /// becomes available moments later (same class of race `auth.status` already guards).
     func currentTokens() async throws -> (accessToken: String, refreshToken: String) {
+        await awaitBootstrapped()
         let access = await tokenStore.currentAccessToken()
         let refresh = await tokenStore.currentRefreshToken()
         guard let access, !access.isEmpty, let refresh, !refresh.isEmpty else {
