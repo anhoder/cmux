@@ -2105,8 +2105,13 @@ class TerminalController {
         case "vm.create":
             let image = params["image"] as? String
             let provider = params["provider"] as? String
+            let idempotencyKey = (params["idempotency_key"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let idempotencyKey, !idempotencyKey.isEmpty else {
+                return v2Error(id: id, code: "invalid_params", message: "vm.create requires `idempotency_key`")
+            }
             return v2VmCall(id: id) {
-                let vm = try await VMClient.shared.create(image: image, provider: provider)
+                let vm = try await VMClient.shared.create(image: image, provider: provider, idempotencyKey: idempotencyKey)
                 return ["id": vm.id, "provider": vm.provider, "image": vm.image, "createdAt": vm.createdAt]
             }
         case "vm.destroy":

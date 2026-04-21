@@ -1567,6 +1567,21 @@ struct CMUXCLI {
     let args: [String]
 
     private static let debugLastSocketHintPath = "/tmp/cmux-last-socket-path"
+    private static let vmCreateIdempotencyTTLSeconds: TimeInterval = 10 * 60
+
+    private struct VMCreateIdempotencyStore: Codable {
+        var records: [String: VMCreateIdempotencyRecord] = [:]
+    }
+
+    private struct VMCreateIdempotencyRecord: Codable {
+        let key: String
+        let createdAt: TimeInterval
+    }
+
+    private struct ActiveVMCreateIdempotency {
+        let signature: String
+        let key: String
+    }
 
     private static func normalizedEnvValue(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1574,6 +1589,66 @@ struct CMUXCLI {
             return nil
         }
         return trimmed
+    }
+
+    private static func vmCreateIdempotencySignature(image: String?, provider: String?) -> String {
+        let normalizedImage = image?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let normalizedProvider = provider?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        return "image=\(normalizedImage)\u{1f}provider=\(normalizedProvider)"
+    }
+
+    private static func vmCreateIdempotencyStoreURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cmuxterm", isDirectory: true)
+            .appendingPathComponent("vm-create-idempotency.json", isDirectory: false)
+    }
+
+    private static func loadVMCreateIdempotencyStore(from url: URL) -> VMCreateIdempotencyStore {
+        guard let data = try? Data(contentsOf: url),
+              let store = try? JSONDecoder().decode(VMCreateIdempotencyStore.self, from: data) else {
+            return VMCreateIdempotencyStore()
+        }
+        return store
+    }
+
+    private static func saveVMCreateIdempotencyStore(_ store: VMCreateIdempotencyStore, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(store)
+        try data.write(to: url, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private static func activeVMCreateIdempotency(image: String?, provider: String?) throws -> ActiveVMCreateIdempotency {
+        let url = vmCreateIdempotencyStoreURL()
+        let signature = vmCreateIdempotencySignature(image: image, provider: provider)
+        let now = Date().timeIntervalSince1970
+        var store = loadVMCreateIdempotencyStore(from: url)
+        store.records = store.records.filter { _, record in
+            !record.key.isEmpty && now - record.createdAt < vmCreateIdempotencyTTLSeconds
+        }
+        if let existing = store.records[signature] {
+            try saveVMCreateIdempotencyStore(store, to: url)
+            return ActiveVMCreateIdempotency(signature: signature, key: existing.key)
+        }
+        let key = UUID().uuidString.lowercased()
+        store.records[signature] = VMCreateIdempotencyRecord(key: key, createdAt: now)
+        try saveVMCreateIdempotencyStore(store, to: url)
+        return ActiveVMCreateIdempotency(signature: signature, key: key)
+    }
+
+    private static func clearVMCreateIdempotency(_ active: ActiveVMCreateIdempotency) {
+        let url = vmCreateIdempotencyStoreURL()
+        var store = loadVMCreateIdempotencyStore(from: url)
+        guard store.records[active.signature]?.key == active.key else { return }
+        store.records.removeValue(forKey: active.signature)
+        try? saveVMCreateIdempotencyStore(store, to: url)
     }
 
     private static func pathIsSocket(_ path: String) -> Bool {
@@ -2060,7 +2135,10 @@ struct CMUXCLI {
                 var params: [String: Any] = [:]
                 if let imageOpt { params["image"] = imageOpt }
                 if let providerOpt { params["provider"] = providerOpt }
+                let idempotency = try Self.activeVMCreateIdempotency(image: imageOpt, provider: providerOpt)
+                params["idempotency_key"] = idempotency.key
                 let response = try client.sendV2(method: "vm.create", params: params)
+                Self.clearVMCreateIdempotency(idempotency)
                 if jsonOutput {
                     print(jsonString(response))
                     break

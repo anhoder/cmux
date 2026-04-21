@@ -101,27 +101,33 @@ export function parseBearer(request: Request): StackBearer | null {
 /**
  * Credentials to forward to the Rivet catch-all. Bearer is the mac app's path (Stack
  * access + refresh tokens); cookie is the browser path (Stack session cookies the Next
- * middleware already set). Either satisfies `verifyRequest` inside /api/rivet/* because
- * it accepts both.
+ * middleware already set). Forward both when both are present so `/api/rivet/*` preserves
+ * `verifyRequest`'s bearer-then-cookie fallback behavior.
  */
-export type ForwardedCreds = StackBearer | { cookie: string };
+export type ForwardedCreds = {
+  bearer?: StackBearer;
+  cookie?: string;
+};
 
 export function parseForwardedCreds(request: Request): ForwardedCreds | null {
   const bearer = parseBearer(request);
-  if (bearer) return bearer;
   const cookie = request.headers.get("cookie");
-  if (cookie && cookie.trim().length > 0) return { cookie };
-  return null;
+  const trimmedCookie = cookie?.trim();
+  const creds: ForwardedCreds = {};
+  if (bearer) creds.bearer = bearer;
+  if (trimmedCookie) creds.cookie = trimmedCookie;
+  return creds.bearer || creds.cookie ? creds : null;
 }
 
 export function rivetClient(creds: ForwardedCreds): Client<Registry> {
   const headers: Record<string, string> = {
     [RIVET_INTERNAL_HEADER]: rivetInternalSecret(),
   };
-  if ("accessToken" in creds) {
-    headers.authorization = `Bearer ${creds.accessToken}`;
-    headers["x-stack-refresh-token"] = creds.refreshToken;
-  } else {
+  if (creds.bearer) {
+    headers.authorization = `Bearer ${creds.bearer.accessToken}`;
+    headers["x-stack-refresh-token"] = creds.bearer.refreshToken;
+  }
+  if (creds.cookie) {
     headers.cookie = creds.cookie;
   }
   return createClient<Registry>({

@@ -84,14 +84,13 @@ actor VMClient {
         }
     }
 
-    func create(image: String? = nil, provider: String? = nil) async throws -> VMSummary {
+    func create(image: String? = nil, provider: String? = nil, idempotencyKey: String) async throws -> VMSummary {
         var body: [String: Any] = [:]
         if let image { body["image"] = image }
         if let provider { body["provider"] = provider }
-        // Send an Idempotency-Key so a retry after a timeout / bad Wi-Fi doesn't provision
-        // a second paid provider VM. The backend stores this against the existing entry and
-        // short-circuits duplicate calls (web/services/vms/actors/userVms.ts).
-        let headers = ["Idempotency-Key": UUID().uuidString.lowercased()]
+        // The CLI owns key stability across command retries. VMClient only forwards the
+        // key so the backend can short-circuit duplicate paid provider creates.
+        let headers = ["Idempotency-Key": idempotencyKey]
         let (data, http) = try await request("POST", path: "/api/vm", jsonBody: body, extraHeaders: headers)
         try ensureOK(http, data: data)
         let obj = try decodeJSONObject(data)
