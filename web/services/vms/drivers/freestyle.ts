@@ -167,13 +167,17 @@ export class FreestyleProvider implements VMProvider {
    * `<vmId>+<linuxUser>`, password is the access token we just minted.
    */
   async openSSH(vmId: string): Promise<SSHEndpoint> {
+    const fs = client();
+    // A fresh identity per attach session. `vmActor` persists the identityId so it can
+    // call `revokeSSHIdentity` on VM destroy / before minting a replacement, otherwise
+    // every `cmux vm shell` invocation would leak a live credential under the Freestyle
+    // account indefinitely.
+    let identity: Awaited<ReturnType<typeof fs.identities.create>>["identity"] | undefined;
+    let identityId = "";
     try {
-      const fs = client();
-      // A fresh identity per attach session. `vmActor` persists the identityId so it can
-      // call `revokeSSHIdentity` on VM destroy / before minting a replacement, otherwise
-      // every `cmux vm shell` invocation would leak a live credential under the Freestyle
-      // account indefinitely.
-      const { identity, identityId } = await fs.identities.create({});
+      const created = await fs.identities.create({});
+      identity = created.identity;
+      identityId = created.identityId;
       await identity.permissions.vms.grant({
         vmId,
         allowedUsers: [CMUX_LINUX_USER],
@@ -188,6 +192,16 @@ export class FreestyleProvider implements VMProvider {
         identityHandle: identityId,
       };
     } catch (err) {
+      // Without this, an identity created above but failed-on afterwards (grant or token
+      // mint threw) leaks — the caller never sees the identityId, so vmActor's later
+      // cleanup paths can't find it. Best-effort delete before rethrowing.
+      if (identityId) {
+        try {
+          await fs.identities.delete({ identityId });
+        } catch {
+          // swallow cleanup errors; the underlying openSSH failure is what matters.
+        }
+      }
       throw new ProviderError("freestyle", `openSSH(${vmId})`, err);
     }
   }

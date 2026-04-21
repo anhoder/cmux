@@ -12078,6 +12078,9 @@ extension Workspace: BonsplitDelegate {
         // prune the source workspace/window after the tab is attached elsewhere.
         if panels.isEmpty {
             if isDetaching {
+                // Detach path also doesn't create a replacement panel this turn, so any
+                // pending banner state would survive and leak into a later close. Drop it.
+                pendingReplacementBannerRemoteTarget = nil
                 scheduleTerminalGeometryReconcile()
                 return
             }
@@ -12096,6 +12099,12 @@ extension Workspace: BonsplitDelegate {
             scheduleFocusReconcile()
             return
         }
+
+        // A remote terminal exited but sibling panels are still alive, so we won't spawn a
+        // replacement right now. Drop the banner-target — without this, a later unrelated
+        // close (e.g. a local pane shuts down its shell) would inherit the stale value and
+        // print "remote ssh session ended" for a flow that had nothing to do with the VM.
+        pendingReplacementBannerRemoteTarget = nil
 
         if let selectTabId,
            bonsplitController.allPaneIds.contains(pane),
