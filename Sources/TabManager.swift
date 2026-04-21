@@ -817,7 +817,7 @@ class TabManager: ObservableObject {
     }
 
     private struct WorkspacePullRequestRESTItem: Decodable, Sendable {
-        struct Head: Decodable, Sendable {
+        struct Ref: Decodable, Sendable {
             let ref: String
         }
 
@@ -826,7 +826,8 @@ class TabManager: ObservableObject {
         let htmlURL: String
         let updatedAt: String?
         let mergedAt: String?
-        let head: Head
+        let head: Ref
+        let base: Ref?
 
         enum CodingKeys: String, CodingKey {
             case number
@@ -835,6 +836,7 @@ class TabManager: ObservableObject {
             case updatedAt = "updated_at"
             case mergedAt = "merged_at"
             case head
+            case base
         }
     }
 
@@ -843,20 +845,26 @@ class TabManager: ObservableObject {
         let state: String
         let url: String
         let updatedAt: String?
+        let mergedAt: String?
         let headRefName: String?
+        let baseRefName: String?
 
         init(
             number: Int,
             state: String,
             url: String,
             updatedAt: String?,
-            headRefName: String? = nil
+            mergedAt: String? = nil,
+            headRefName: String? = nil,
+            baseRefName: String? = nil
         ) {
             self.number = number
             self.state = state
             self.url = url
             self.updatedAt = updatedAt
+            self.mergedAt = mergedAt
             self.headRefName = headRefName
+            self.baseRefName = baseRefName
         }
     }
 
@@ -2836,7 +2844,9 @@ class TabManager: ObservableObject {
             state: rawState,
             url: pullRequest.htmlURL,
             updatedAt: pullRequest.updatedAt,
-            headRefName: pullRequest.head.ref
+            mergedAt: pullRequest.mergedAt,
+            headRefName: pullRequest.head.ref,
+            baseRefName: pullRequest.base?.ref
         )
     }
 
@@ -2891,8 +2901,16 @@ class TabManager: ObservableObject {
         return "Bearer \(token)"
     }
 
+    nonisolated static func pullRequestMapByNormalizedBranchForTesting(
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date
+    ) -> [String: GitHubPullRequestProbeItem] {
+        pullRequestMapByNormalizedBranch(from: pullRequests, now: now)
+    }
+
     private nonisolated static func pullRequestMapByNormalizedBranch(
-        from pullRequests: [GitHubPullRequestProbeItem]
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date = Date()
     ) -> [String: GitHubPullRequestProbeItem] {
         var pullRequestsByBranch: [String: GitHubPullRequestProbeItem] = [:]
 
@@ -2904,7 +2922,10 @@ class TabManager: ObservableObject {
             }
 
             if let currentBest = pullRequestsByBranch[branch] {
-                pullRequestsByBranch[branch] = preferredPullRequest(from: [currentBest, pullRequest]) ?? currentBest
+                pullRequestsByBranch[branch] = preferredPullRequest(
+                    from: [currentBest, pullRequest],
+                    now: now
+                ) ?? currentBest
             } else {
                 pullRequestsByBranch[branch] = pullRequest
             }
@@ -2914,7 +2935,8 @@ class TabManager: ObservableObject {
     }
 
     nonisolated static func preferredPullRequest(
-        from pullRequests: [GitHubPullRequestProbeItem]
+        from pullRequests: [GitHubPullRequestProbeItem],
+        now: Date = Date()
     ) -> GitHubPullRequestProbeItem? {
         func statusPriority(_ status: SidebarPullRequestStatus) -> Int {
             switch status {
