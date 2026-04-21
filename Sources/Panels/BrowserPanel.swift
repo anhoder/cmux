@@ -1903,7 +1903,7 @@ final class BrowserPanel: Panel, ObservableObject {
     private var suppressWebViewFocusForAddressBar: Bool = false
     private var webContentFocusRestoreGeneration: UInt64 = 0
     private let blankURLString = "about:blank"
-    private static let addressBarFocusCaptureScript = """
+    private static let webContentFocusCaptureScript = """
     (() => {
       try {
         const syncState = (state) => {
@@ -1952,7 +1952,7 @@ final class BrowserPanel: Panel, ObservableObject {
       }
     })();
     """
-    private static let addressBarFocusTrackingBootstrapScript = """
+    private static let webContentFocusTrackingBootstrapScript = """
     (() => {
       try {
         if (window.__cmuxAddressBarFocusTrackerInstalled) return true;
@@ -2039,7 +2039,7 @@ final class BrowserPanel: Panel, ObservableObject {
       }
     })();
     """
-    private static let addressBarFocusRestoreScript = """
+    private static let webContentFocusRestoreScript = """
     (() => {
       try {
         const readState = () => {
@@ -2662,12 +2662,12 @@ final class BrowserPanel: Panel, ObservableObject {
                 forMainFrameOnly: true
             )
         )
-        // Track the last editable focused element continuously so omnibar exit can
-        // restore page input focus even if capture runs after first-responder handoff.
+        // Track the last editable focused element continuously so browser chrome
+        // exit can restore page input focus after native first-responder handoff.
         // Main frame only — same CAPTCHA interference concern as telemetry hooks.
         configuration.userContentController.addUserScript(
             WKUserScript(
-                source: Self.addressBarFocusTrackingBootstrapScript,
+                source: Self.webContentFocusTrackingBootstrapScript,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
@@ -5056,6 +5056,7 @@ extension BrowserPanel {
     // MARK: - Find in Page
 
     func startFind() {
+        captureWebContentFocusSnapshotIfNeeded(reason: "startFind")
         let created = searchState == nil
         if created {
             searchState = BrowserSearchState()
@@ -5251,7 +5252,7 @@ extension BrowserPanel {
         }
         suppressWebViewFocusForAddressBar = true
         if enteringAddressBar {
-            captureWebContentFocusSnapshotIfNeeded()
+            captureWebContentFocusSnapshotIfNeeded(reason: "addressBarSuppress")
         }
     }
 
@@ -5682,7 +5683,7 @@ extension BrowserPanel {
         let focused = transitionToWebContentFocus(
             reason: pendingRestore.reason,
             yieldFindFieldResponder: pendingRestore.source == .findDismiss,
-            restoreStoredDOMFocus: pendingRestore.source == .tracked,
+            restoreStoredDOMFocus: true,
             completion: { [weak self] restored in
                 guard let self else { return }
                 if case .restoring(let activeRestore) = self.webContentRestorePhase,
@@ -5720,21 +5721,21 @@ extension BrowserPanel {
         return requestId
     }
 
-    private func captureWebContentFocusSnapshotIfNeeded() {
-        webView.evaluateJavaScript(Self.addressBarFocusCaptureScript) { [weak self] result, error in
+    private func captureWebContentFocusSnapshotIfNeeded(reason: String) {
+        webView.evaluateJavaScript(Self.webContentFocusCaptureScript) { [weak self] result, error in
 #if DEBUG
             guard let self else { return }
             if let error {
                 dlog(
                     "browser.focus.webContent.capture panel=\(self.id.uuidString.prefix(5)) " +
-                    "result=error message=\(error.localizedDescription)"
+                    "reason=\(reason) result=error message=\(error.localizedDescription)"
                 )
                 return
             }
             let resultValue = (result as? String) ?? "unknown"
             dlog(
                 "browser.focus.webContent.capture panel=\(self.id.uuidString.prefix(5)) " +
-                "result=\(resultValue)"
+                "reason=\(reason) result=\(resultValue)"
             )
 #else
             _ = self
@@ -5773,7 +5774,7 @@ extension BrowserPanel {
 
     func restoreStoredWebContentFocusIfNeeded(completion: @escaping (Bool) -> Void) {
         restoreStoredTrackedWebContentFocusIfNeeded(
-            script: Self.addressBarFocusRestoreScript,
+            script: Self.webContentFocusRestoreScript,
             logPrefix: "browser.focus.webContent.restore",
             completion: completion
         )
