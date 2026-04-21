@@ -2142,7 +2142,11 @@ struct CMUXCLI {
                 guard !commandArgsForVM.isEmpty else {
                     throw CLIError(message: "Usage: cmux vm exec <id> -- <command...>")
                 }
-                let command = commandArgsForVM.joined(separator: " ")
+                // Shell-quote each argv element before joining. Plain-space join previously
+                // dropped quoting so `cmux vm exec <id> -- printf '%s\n' "a b"` reached the
+                // VM as `printf %s\n a b`, changing semantics for any non-trivial command
+                // (Codex P2).
+                let command = commandArgsForVM.map(shellQuote).joined(separator: " ")
                 let response = try client.sendV2(
                     method: "vm.exec",
                     params: ["id": vmId, "command": command]

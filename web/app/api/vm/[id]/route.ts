@@ -3,7 +3,7 @@ import {
   isActorMissingError,
   jsonResponse,
   notFoundVm,
-  parseBearer,
+  parseForwardedCreds,
   rivetClient,
   userOwnsVm,
 } from "../../../../services/vms/routeHelpers";
@@ -17,10 +17,10 @@ export async function DELETE(
   try {
     const user = await verifyRequest(request);
     if (!user) return unauthorized();
-    const bearer = parseBearer(request);
-    if (!bearer) return unauthorized();
+    const creds = parseForwardedCreds(request);
+    if (!creds) return unauthorized();
     const { id } = await params;
-    const client = rivetClient(bearer);
+    const client = rivetClient(creds);
     // Prevent IDOR: a user may only destroy VMs tracked in their own coordinator actor.
     if (!(await userOwnsVm(client, user.id, id))) return notFoundVm(id);
     // `get` not `getOrCreate`: a coordinator entry without a live actor (partial cleanup

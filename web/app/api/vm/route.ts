@@ -6,7 +6,7 @@ import { unauthorized, verifyRequest } from "../../../services/vms/auth";
 import { defaultProviderId, type ProviderId } from "../../../services/vms/drivers";
 import {
   jsonResponse,
-  parseBearer,
+  parseForwardedCreds,
   rivetClient,
 } from "../../../services/vms/routeHelpers";
 
@@ -20,9 +20,9 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const user = await verifyRequest(request);
     if (!user) return unauthorized();
-    const bearer = parseBearer(request);
-    if (!bearer) return unauthorized();
-    const client = rivetClient(bearer);
+    const creds = parseForwardedCreds(request);
+    if (!creds) return unauthorized();
+    const client = rivetClient(creds);
     const entries = await client.userVmsActor.getOrCreate([user.id]).list();
     // REST adapter: expose `id` at the top level so existing CLI + curl users don't need to
     // learn the new `providerVmId` field name. Swift CLI reads `vm["id"]`.
@@ -46,8 +46,8 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const user = await verifyRequest(request);
     if (!user) return unauthorized();
-    const bearer = parseBearer(request);
-    if (!bearer) return unauthorized();
+    const creds = parseForwardedCreds(request);
+    if (!creds) return unauthorized();
 
     // Runtime-validate the payload before we call a paid provider. An invalid `provider`
     // (client sending `"aws"` or `"docker"`) previously slipped past the type cast and
@@ -104,7 +104,7 @@ export async function POST(request: Request): Promise<Response> {
     ).trim();
     const idempotencyKey = rawKey ? rawKey.slice(0, 128) : undefined;
 
-    const client = rivetClient(bearer);
+    const client = rivetClient(creds);
     const created = await client.userVmsActor.getOrCreate([user.id]).create({ image, provider, idempotencyKey });
     return jsonResponse({
       id: created.providerVmId,

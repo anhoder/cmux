@@ -3,7 +3,7 @@ import {
   isActorMissingError,
   jsonResponse,
   notFoundVm,
-  parseBearer,
+  parseForwardedCreds,
   rivetClient,
   userOwnsVm,
 } from "../../../../../services/vms/routeHelpers";
@@ -29,11 +29,11 @@ export async function POST(
   try {
     const user = await verifyRequest(request);
     if (!user) return unauthorized();
-    const bearer = parseBearer(request);
-    if (!bearer) return unauthorized();
+    const creds = parseForwardedCreds(request);
+    if (!creds) return unauthorized();
 
     const { id } = await params;
-    const client = rivetClient(bearer);
+    const client = rivetClient(creds);
     if (!(await userOwnsVm(client, user.id, id))) return notFoundVm(id);
     // `get` not `getOrCreate` — see the exec route for the rationale.
     try {
