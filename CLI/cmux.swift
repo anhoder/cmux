@@ -22,48 +22,82 @@ private enum CLIBrokenPipeDisposition {
     case ignore
 }
 
-private let cliSIGPIPEDispositionLock = NSLock()
+private let cliChildLaunchLock = NSLock()
 
-private func withCLISIGPIPEDisposition<T>(
-    _ handler: sig_t?,
-    body: () throws -> T
-) rethrows -> T {
-    cliSIGPIPEDispositionLock.lock()
-    defer { cliSIGPIPEDispositionLock.unlock() }
+private func currentCLINoSIGPIPEValue(for fd: Int32) -> Int32? {
+    let value = fcntl(fd, F_GETNOSIGPIPE, 0)
+    guard value >= 0 else { return nil }
+    return value
+}
 
-    var previousAction = sigaction()
-    guard sigaction(SIGPIPE, nil, &previousAction) == 0 else {
-        return try body()
+private func setCLINoSIGPIPE(_ enabled: Bool, for fd: Int32) {
+    _ = fcntl(fd, F_SETNOSIGPIPE, enabled ? 1 : 0)
+}
+
+private func configureCLIWriteFDNoSIGPIPE(_ fd: Int32) {
+    setCLINoSIGPIPE(true, for: fd)
+}
+
+private func inheritedCLIWriteFDs(for childEndpoint: Any?, defaultFD: Int32) -> Set<Int32> {
+    if childEndpoint == nil {
+        return [defaultFD]
+    }
+    guard let handle = childEndpoint as? FileHandle else {
+        return []
     }
 
-    var action = previousAction
-    action.__sigaction_u = __sigaction_u(__sa_handler: handler)
-    action.sa_flags = (previousAction.sa_flags | SA_RESTART) & ~SA_SIGINFO
-    let installed = sigaction(SIGPIPE, &action, nil) == 0
+    switch handle.fileDescriptor {
+    case STDOUT_FILENO, STDERR_FILENO:
+        return [handle.fileDescriptor]
+    default:
+        return []
+    }
+}
 
+private func childInheritedCLINoSIGPIPEFDs(for process: Process) -> [Int32] {
+    let outputFDs = inheritedCLIWriteFDs(for: process.standardOutput, defaultFD: STDOUT_FILENO)
+    let errorFDs = inheritedCLIWriteFDs(for: process.standardError, defaultFD: STDERR_FILENO)
+    return Array(outputFDs.union(errorFDs)).sorted()
+}
+
+// Clears the per-fd F_NOSIGPIPE flag on the specific stdio descriptors a child inherits so the
+// child sees normal SIGPIPE-on-broken-pipe semantics. We keep F_NOSIGPIPE enabled on the CLI's
+// own stdout/stderr for fast safe writes, but that descriptor state survives dup/exec.
+private func withCLIDefaultSIGPIPEForChildLaunch<T>(
+    inheritedNoSIGPIPEFDs: [Int32] = [STDOUT_FILENO, STDERR_FILENO],
+    body: () throws -> T
+) rethrows -> T {
+    cliChildLaunchLock.lock()
+    defer { cliChildLaunchLock.unlock() }
+
+    let previousValues = inheritedNoSIGPIPEFDs.compactMap { fd -> (fd: Int32, value: Int32)? in
+        guard let value = currentCLINoSIGPIPEValue(for: fd) else { return nil }
+        if value != 0 {
+            setCLINoSIGPIPE(false, for: fd)
+        }
+        return (fd, value)
+    }
     defer {
-        if installed {
-            _ = sigaction(SIGPIPE, &previousAction, nil)
+        for entry in previousValues where entry.value != 0 {
+            setCLINoSIGPIPE(true, for: entry.fd)
         }
     }
 
     return try body()
 }
 
-private func withCLIDefaultSIGPIPEForChildLaunch<T>(body: () throws -> T) rethrows -> T {
-    try withCLISIGPIPEDisposition(SIG_DFL, body: body)
-}
-
 // Called once at CLI startup so write(2) on stdout/stderr returns EPIPE instead of raising SIGPIPE.
 // Mirrors the per-FD SO_NOSIGPIPE pattern sockets already use, and keeps every cliPrint off the
 // per-write sigaction + global-lock hot path.
 private func configureCLIStdioNoSIGPIPE() {
-    _ = fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1)
-    _ = fcntl(STDERR_FILENO, F_SETNOSIGPIPE, 1)
+    configureCLIWriteFDNoSIGPIPE(STDOUT_FILENO)
+    configureCLIWriteFDNoSIGPIPE(STDERR_FILENO)
 }
 
 private func cliRunProcess(_ process: Process) throws {
-    try withCLIDefaultSIGPIPEForChildLaunch {
+    try withCLIDefaultSIGPIPEForChildLaunch(
+        inheritedNoSIGPIPEFDs: childInheritedCLINoSIGPIPEFDs(for: process)
+    ) {
         try process.run()
     }
 }
@@ -1669,6 +1703,7 @@ enum CLIProcessRunner {
         if let stdinText, let stdinPipe {
             if let data = stdinText.data(using: .utf8) {
                 // The child may exit before consuming stdin; treat the owned pipe as best-effort.
+                configureCLIWriteFDNoSIGPIPE(stdinPipe.fileHandleForWriting.fileDescriptor)
                 _ = cliWrite(data, to: stdinPipe.fileHandleForWriting, onBrokenPipe: .ignore)
             }
             stdinPipe.fileHandleForWriting.closeFile()
@@ -1759,6 +1794,14 @@ struct CMUXCLI {
         return "custom"
     }
 
+    private static func currentSIGPIPEInspectionPayload() -> [String: Any] {
+        [
+            "signal": currentSIGPIPEDispositionName(),
+            "stdout_nosigpipe": Int(currentCLINoSIGPIPEValue(for: STDOUT_FILENO) ?? -1),
+            "stderr_nosigpipe": Int(currentCLINoSIGPIPEValue(for: STDERR_FILENO) ?? -1),
+        ]
+    }
+
     private func sigpipeProbeExecutablePath() throws -> String {
         let candidate: String? = {
             if let explicit = ProcessInfo.processInfo.environment["CMUX_CLI_PATH"],
@@ -1774,47 +1817,94 @@ struct CMUXCLI {
         return path
     }
 
-    private func runSIGPIPEInspect() {
-        cliWriteStdout(Self.currentSIGPIPEDispositionName() + "\n")
+    private func runSIGPIPEInspect(commandArgs: [String]) throws {
+        let outputPath: String?
+        switch commandArgs {
+        case []:
+            outputPath = nil
+        case ["--out", let path]:
+            outputPath = path
+        default:
+            throw CLIError(message: "Unknown SIGPIPE inspect arguments. Expected no args or --out <path>.")
+        }
+
+        let output = jsonString(Self.currentSIGPIPEInspectionPayload())
+        if let outputPath {
+            try output.write(toFile: outputPath, atomically: true, encoding: .utf8)
+        } else {
+            cliWriteStdout(output + "\n")
+        }
+    }
+
+    private func runSIGPIPEStdinPipeProbe() throws {
+        let payload = String(repeating: "x", count: 1_048_576)
+        let result = CLIProcessRunner.runProcess(
+            executablePath: "/bin/zsh",
+            arguments: ["-lc", "exec </dev/null; sleep 0.05"],
+            stdinText: payload,
+            timeout: 5
+        )
+        guard !result.timedOut else {
+            throw CLIError(message: "SIGPIPE stdin-pipe probe timed out: \(result.stderr)")
+        }
+        guard result.status == 0 else {
+            throw CLIError(message: "SIGPIPE stdin-pipe probe failed (\(result.status)): \(result.stderr)")
+        }
+        cliPrint("ok")
     }
 
     private func runSIGPIPEProbe(commandArgs: [String]) throws {
         let mode = commandArgs.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "spawn"
         let cliPath = try sigpipeProbeExecutablePath()
+        let inspectionURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-sigpipe-\(UUID().uuidString).json")
+        let inspectionPath = inspectionURL.path
+        let inspectArguments = ["__sigpipe-inspect", "--out", inspectionPath]
+        defer {
+            try? FileManager.default.removeItem(at: inspectionURL)
+        }
 
         switch mode {
         case "spawn":
             let process = Process()
-            let stdout = Pipe()
-            let stderr = Pipe()
             process.executableURL = URL(fileURLWithPath: cliPath)
-            process.arguments = ["__sigpipe-inspect"]
+            process.arguments = inspectArguments
             process.standardInput = FileHandle.nullDevice
-            process.standardOutput = stdout
-            process.standardError = stderr
             try cliRunProcess(process)
-
-            // Drain pipes before waiting so a child that writes >PIPE_BUF bytes
-            // can't block on a full kernel buffer while we wait for it to exit.
-            let stdoutText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             process.waitUntilExit()
 
             guard process.terminationStatus == 0 else {
-                throw CLIError(
-                    message: "SIGPIPE spawn probe failed (\(process.terminationStatus)): \(stderrText.trimmingCharacters(in: .whitespacesAndNewlines))"
-                )
+                throw CLIError(message: "SIGPIPE spawn probe failed (\(process.terminationStatus))")
             }
-            cliWriteStdout(stdoutText)
+
+            let output = try String(contentsOf: inspectionURL, encoding: .utf8)
+            cliWriteStdout(output + (output.hasSuffix("\n") ? "" : "\n"))
+
+        case "spawn-stderr":
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: cliPath)
+            process.arguments = inspectArguments
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.standardError
+            process.standardError = FileHandle.standardError
+            try cliRunProcess(process)
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0 else {
+                throw CLIError(message: "SIGPIPE stderr-spawn probe failed (\(process.terminationStatus))")
+            }
+
+            let output = try String(contentsOf: inspectionURL, encoding: .utf8)
+            cliWriteStdout(output + (output.hasSuffix("\n") ? "" : "\n"))
 
         case "exec":
-            let arg0 = strdup(cliPath)
-            let arg1 = strdup("__sigpipe-inspect")
-            var argv: [UnsafeMutablePointer<CChar>?] = [arg0, arg1, nil]
+            var argv = ([cliPath] + inspectArguments).map { strdup($0) }
             defer {
-                free(arg0)
-                free(arg1)
+                for item in argv {
+                    free(item)
+                }
             }
+            argv.append(nil)
 
             let code = cliExecFailureErrno {
                 _ = argv.withUnsafeMutableBufferPointer { buffer in
@@ -1824,7 +1914,7 @@ struct CMUXCLI {
             throw CLIError(message: "SIGPIPE exec probe failed: \(String(cString: strerror(code)))")
 
         default:
-            throw CLIError(message: "Unknown SIGPIPE probe mode '\(mode)'. Expected spawn or exec.")
+            throw CLIError(message: "Unknown SIGPIPE probe mode '\(mode)'. Expected spawn, spawn-stderr, or exec.")
         }
     }
 
@@ -1969,8 +2059,13 @@ struct CMUXCLI {
             return
         }
 
+        if command == "__sigpipe-stdin-pipe-probe" {
+            try runSIGPIPEStdinPipeProbe()
+            return
+        }
+
         if command == "__sigpipe-inspect" {
-            runSIGPIPEInspect()
+            try runSIGPIPEInspect(commandArgs: commandArgs)
             return
         }
 
@@ -12348,6 +12443,7 @@ struct CMUXCLI {
         try cliRunProcess(process)
         if let data = stdinText.data(using: .utf8) {
             // The child may exit before consuming stdin; treat the owned pipe as best-effort.
+            configureCLIWriteFDNoSIGPIPE(stdinPipe.fileHandleForWriting.fileDescriptor)
             _ = cliWrite(data, to: stdinPipe.fileHandleForWriting, onBrokenPipe: .ignore)
         }
         stdinPipe.fileHandleForWriting.closeFile()

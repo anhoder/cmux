@@ -14,6 +14,12 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
         let timedOut: Bool
     }
 
+    private struct SIGPIPEInspectResult: Decodable {
+        let signal: String
+        let stdout_nosigpipe: Int32
+        let stderr_nosigpipe: Int32
+    }
+
     private func runProcess(
         executablePath: String,
         arguments: [String],
@@ -1657,9 +1663,25 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
     }
 
     @MainActor
+    func testCLIProcessRunnerInputPipeIgnoresBrokenPipeWhenChildClosesStdin() throws {
+        let cliPath = try bundledCLIPath()
+        let result = runProcess(
+            executablePath: cliPath,
+            arguments: ["__sigpipe-stdin-pipe-probe"],
+            environment: cliTestEnvironment(),
+            timeout: 5
+        )
+
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stdout, "ok\n", result.stderr)
+        XCTAssertTrue(result.stderr.isEmpty, result.stderr)
+    }
+
+    @MainActor
     func testSIGPIPEProbeChildrenSeeDefaultDisposition() throws {
         let cliPath = try bundledCLIPath()
-        for mode in ["spawn", "exec"] {
+        for mode in ["spawn", "spawn-stderr", "exec"] {
             let result = runProcess(
                 executablePath: cliPath,
                 arguments: ["__sigpipe-probe", mode],
@@ -1669,8 +1691,15 @@ final class CLINotifyProcessIntegrationTests: XCTestCase {
 
             XCTAssertFalse(result.timedOut, "Mode \(mode) timed out: \(result.stderr)")
             XCTAssertEqual(result.status, 0, "Mode \(mode) failed: \(result.stderr)")
-            XCTAssertEqual(result.stdout, "default\n", "Mode \(mode) inherited the wrong SIGPIPE disposition")
             XCTAssertTrue(result.stderr.isEmpty, "Mode \(mode) wrote unexpected stderr: \(result.stderr)")
+
+            let inspection = try JSONDecoder().decode(
+                SIGPIPEInspectResult.self,
+                from: Data(result.stdout.utf8)
+            )
+            XCTAssertEqual(inspection.signal, "default", "Mode \(mode) inherited the wrong SIGPIPE disposition")
+            XCTAssertEqual(inspection.stdout_nosigpipe, 0, "Mode \(mode) leaked F_NOSIGPIPE onto stdout")
+            XCTAssertEqual(inspection.stderr_nosigpipe, 0, "Mode \(mode) leaked F_NOSIGPIPE onto stderr")
         }
     }
 
