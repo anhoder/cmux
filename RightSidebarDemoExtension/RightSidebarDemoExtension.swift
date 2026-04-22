@@ -198,6 +198,7 @@ private struct RightSidebarDemoExtensionView: View {
                     .buttonStyle(.borderless)
                     .controlSize(.small)
                     .help(String(localized: "sampleExtension.reset", defaultValue: "Reset"))
+                    .accessibilityLabel(String(localized: "sampleExtension.reset", defaultValue: "Reset"))
                 }
 
                 Toggle(isOn: $isPinned) {
@@ -223,6 +224,8 @@ private struct RightSidebarDemoExtensionView: View {
                 systemImage: "waveform.path.ecg"
             ) {
                 ProgressView(value: confidence)
+                    .accessibilityLabel(String(localized: "sampleExtension.confidence", defaultValue: "Confidence"))
+                    .accessibilityValue(confidence.formatted(.percent.precision(.fractionLength(0))))
                 Text(lastAction)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -251,6 +254,10 @@ private struct RightSidebarDemoExtensionView: View {
                         .font(.system(size: 11))
                         .frame(minHeight: 76)
                         .scrollContentBackground(.hidden)
+                        .accessibilityLabel(String(
+                            localized: "sampleExtension.notesPlaceholder",
+                            defaultValue: "Write sidebar notes..."
+                        ))
 
                     if notes.isEmpty {
                         Text(String(localized: "sampleExtension.notesPlaceholder", defaultValue: "Write sidebar notes..."))
@@ -307,6 +314,8 @@ private struct RightSidebarDemoExtensionView: View {
                     .font(.system(size: 11))
 
                     Slider(value: $confidence, in: 0...1)
+                        .accessibilityLabel(String(localized: "sampleExtension.confidence", defaultValue: "Confidence"))
+                        .accessibilityValue(confidence.formatted(.percent.precision(.fractionLength(0))))
                 }
 
                 DatePicker(

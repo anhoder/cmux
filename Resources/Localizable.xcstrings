@@ -91234,13 +91234,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Extension scene disconnected."
+            "value": "Extension scene disconnected:"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "拡張シーンが切断されました。"
+            "value": "拡張シーンが切断されました："
           }
         }
       }

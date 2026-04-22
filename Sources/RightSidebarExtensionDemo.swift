@@ -603,7 +603,7 @@ struct ExtensionKitSidebarHostView: NSViewControllerRepresentable {
             if let error {
                 statusMessage.wrappedValue = String(
                     localized: "rightSidebar.extensionDemo.deactivatedWithError",
-                    defaultValue: "Extension scene disconnected."
+                    defaultValue: "Extension scene disconnected:"
                 ) + " \(error.localizedDescription)"
             } else {
                 statusMessage.wrappedValue = String(
