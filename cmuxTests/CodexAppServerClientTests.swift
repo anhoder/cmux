@@ -160,6 +160,23 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
         ])
     }
 
+    func testStopThenReleaseDoesNotCrashWhenLastReferenceDropsOnStateQueue() throws {
+        weak var weakClient: CodexAppServerClient?
+
+        do {
+            var client: CodexAppServerClient? = CodexAppServerClient()
+            weakClient = client
+            client?.stop()
+            client = nil
+        }
+
+        let deadline = Date().addingTimeInterval(2)
+        while weakClient != nil, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertNil(weakClient)
+    }
+
     func testLineBufferFramesLinesAcrossLargeChunks() throws {
         var buffer = CodexAppServerLineBuffer()
 
