@@ -85,44 +85,48 @@ struct CodexAppServerPanelView: View {
     }
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    if panel.transcriptItems.isEmpty && panel.pendingRequests.isEmpty {
-                        emptyState
-                    }
+        VStack(spacing: 0) {
+            ZStack {
+                CodexTrajectoryTranscriptView(items: panel.transcriptItems)
+                    .opacity(panel.transcriptItems.isEmpty ? 0 : 1)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                    ForEach(panel.transcriptItems) { item in
-                        CodexAppServerTranscriptRow(item: item)
-                            .id(item.id)
-                    }
-
-                    ForEach(panel.pendingRequests) { request in
-                        CodexAppServerPendingRequestView(
-                            request: request,
-                            onAccept: {
-                                panel.resolvePendingRequest(request, decision: .accept)
-                            },
-                            onDecline: {
-                                panel.resolvePendingRequest(request, decision: .decline)
-                            },
-                            onCancel: {
-                                panel.resolvePendingRequest(request, decision: .cancel)
-                            }
-                        )
-                        .id("request-\(request.id)")
-                    }
+                if panel.transcriptItems.isEmpty && panel.pendingRequests.isEmpty {
+                    emptyState
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .onChange(of: panel.transcriptItems.count) { _, _ in
-                scrollToLatest(proxy)
-            }
-            .onChange(of: panel.pendingRequests.count) { _, _ in
-                scrollToLatest(proxy)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !panel.pendingRequests.isEmpty {
+                Divider()
+                pendingRequests
             }
         }
+    }
+
+    private var pendingRequests: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(panel.pendingRequests) { request in
+                    CodexAppServerPendingRequestView(
+                        request: request,
+                        onAccept: {
+                            panel.resolvePendingRequest(request, decision: .accept)
+                        },
+                        onDecline: {
+                            panel.resolvePendingRequest(request, decision: .decline)
+                        },
+                        onCancel: {
+                            panel.resolvePendingRequest(request, decision: .cancel)
+                        }
+                    )
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: 240)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     private var emptyState: some View {
@@ -197,99 +201,6 @@ struct CodexAppServerPanelView: View {
         statusForeground.opacity(0.14)
     }
 
-    private func scrollToLatest(_ proxy: ScrollViewProxy) {
-        if let request = panel.pendingRequests.last {
-            proxy.scrollTo("request-\(request.id)", anchor: .bottom)
-        } else if let item = panel.transcriptItems.last {
-            proxy.scrollTo(item.id, anchor: .bottom)
-        }
-    }
-}
-
-private struct CodexAppServerTranscriptRow: View {
-    let item: CodexAppServerTranscriptItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .foregroundStyle(accent)
-                Text(item.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                if item.isStreaming {
-                    ProgressView()
-                        .controlSize(.mini)
-                }
-            }
-
-            Text(item.body)
-                .font(bodyFont)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(10)
-        .background(rowBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(.separator.opacity(0.55), lineWidth: 0.5)
-        )
-    }
-
-    private var icon: String {
-        switch item.role {
-        case .user:
-            return "person.fill"
-        case .assistant:
-            return "sparkles"
-        case .event:
-            return "terminal"
-        case .stderr:
-            return "exclamationmark.triangle"
-        case .error:
-            return "xmark.octagon"
-        }
-    }
-
-    private var accent: Color {
-        switch item.role {
-        case .user:
-            return .accentColor
-        case .assistant:
-            return .purple
-        case .event:
-            return .secondary
-        case .stderr:
-            return .orange
-        case .error:
-            return .red
-        }
-    }
-
-    private var bodyFont: Font {
-        switch item.role {
-        case .event, .stderr:
-            return .system(.body, design: .monospaced)
-        case .user, .assistant, .error:
-            return .body
-        }
-    }
-
-    private var rowBackground: Color {
-        switch item.role {
-        case .user:
-            return Color.accentColor.opacity(0.08)
-        case .assistant:
-            return Color(nsColor: .controlBackgroundColor)
-        case .event:
-            return Color(nsColor: .windowBackgroundColor)
-        case .stderr:
-            return Color.orange.opacity(0.08)
-        case .error:
-            return Color.red.opacity(0.08)
-        }
-    }
 }
 
 private struct CodexAppServerPendingRequestView: View {

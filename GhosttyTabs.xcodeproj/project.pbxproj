@@ -116,6 +116,8 @@
 		C0D3A506A1B2C3D4E5F60718 /* CodexAppServerPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A507A1B2C3D4E5F60718 /* CodexAppServerPanelView.swift */; };
 		C0D3A508A1B2C3D4E5F60718 /* CodexAppServerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A509A1B2C3D4E5F60718 /* CodexAppServerProtocol.swift */; };
 		C0D3A50AA1B2C3D4E5F60718 /* CodexAppServerGeneratedSchemas.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A50BA1B2C3D4E5F60718 /* CodexAppServerGeneratedSchemas.swift */; };
+		C0D3A50CA1B2C3D4E5F60718 /* CodexTrajectoryTranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3A50EA1B2C3D4E5F60718 /* CodexTrajectoryTranscriptView.swift */; };
+		C0D3A50DA1B2C3D4E5F60718 /* CodexTrajectory in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A510A1B2C3D4E5F60718 /* CodexTrajectory */; };
 		C0B4D9B0A1B2C3D4E5F60718 /* UpdatePillUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0B4D9B1A1B2C3D4E5F60718 /* UpdatePillUITests.swift */; };
 		C1A2B3C4D5E6F70800000001 /* CmuxConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A2B3C4D5E6F70800000002 /* CmuxConfigTests.swift */; };
 		C1ADE00002A1B2C3D4E5F719 /* claude in Copy CLI */ = {isa = PBXBuildFile; fileRef = C1ADE00001A1B2C3D4E5F719 /* claude */; };
@@ -338,6 +340,7 @@
 		C0D3A507A1B2C3D4E5F60718 /* CodexAppServerPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexAppServerPanelView.swift; sourceTree = "<group>"; };
 		C0D3A509A1B2C3D4E5F60718 /* CodexAppServerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerProtocol.swift; sourceTree = "<group>"; };
 		C0D3A50BA1B2C3D4E5F60718 /* CodexAppServerGeneratedSchemas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerGeneratedSchemas.swift; sourceTree = "<group>"; };
+		C0D3A50EA1B2C3D4E5F60718 /* CodexTrajectoryTranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/CodexTrajectoryTranscriptView.swift; sourceTree = "<group>"; };
 		C0B4D9B1A1B2C3D4E5F60718 /* UpdatePillUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdatePillUITests.swift; sourceTree = "<group>"; };
 		C1A2B3C4D5E6F70800000002 /* CmuxConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CmuxConfigTests.swift; sourceTree = "<group>"; };
 		C1ADE00001A1B2C3D4E5F719 /* claude */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = Resources/bin/claude; sourceTree = SOURCE_ROOT; };
@@ -390,6 +393,7 @@
 				A5001290 /* MarkdownUI in Frameworks */,
 				5EDB6027B346C46521A93C74 /* CMUXAuthCore in Frameworks */,
 				F20F85FC5900550685FA33AD /* StackAuth in Frameworks */,
+				C0D3A50DA1B2C3D4E5F60718 /* CodexTrajectory in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -539,6 +543,7 @@
 				A5001419 /* MarkdownPanelView.swift */,
 				C0D3A505A1B2C3D4E5F60718 /* CodexAppServerPanel.swift */,
 				C0D3A507A1B2C3D4E5F60718 /* CodexAppServerPanelView.swift */,
+				C0D3A50EA1B2C3D4E5F60718 /* CodexTrajectoryTranscriptView.swift */,
 				A5001510 /* CmuxWebView.swift */,
 				A5001415 /* PanelContentView.swift */,
 				A5001211 /* UpdateController.swift */,
@@ -665,6 +670,7 @@
 				A5001291 /* MarkdownUI */,
 				29813FE5A6CBC1019289A251 /* CMUXAuthCore */,
 				A8BD195031FC4B82B4354297 /* StackAuth */,
+				C0D3A510A1B2C3D4E5F60718 /* CodexTrajectory */,
 			);
 			productName = GhosttyTabs;
 			productReference = A5001000 /* cmux.app */;
@@ -786,6 +792,7 @@
 				A5001260 /* XCLocalSwiftPackageReference "bonsplit" */,
 				40B63BB4A170F0BD2D1DEFD1 /* XCLocalSwiftPackageReference "CMUXAuthCore" */,
 				28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */,
+				C0D3A50FA1B2C3D4E5F60718 /* XCLocalSwiftPackageReference "CodexTrajectory" */,
 			);
 			productRefGroup = A5001042 /* Products */;
 			projectDirPath = "";
@@ -906,6 +913,7 @@
 				A5001421 /* MarkdownPanelView.swift in Sources */,
 				C0D3A504A1B2C3D4E5F60718 /* CodexAppServerPanel.swift in Sources */,
 				C0D3A506A1B2C3D4E5F60718 /* CodexAppServerPanelView.swift in Sources */,
+				C0D3A50CA1B2C3D4E5F60718 /* CodexTrajectoryTranscriptView.swift in Sources */,
 				A5001500 /* CmuxWebView.swift in Sources */,
 				A5001405 /* PanelContentView.swift in Sources */,
 				A5001201 /* UpdateController.swift in Sources */,
@@ -1420,6 +1428,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/CMUXAuthCore;
 		};
+		C0D3A50FA1B2C3D4E5F60718 /* XCLocalSwiftPackageReference "CodexTrajectory" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CodexTrajectory;
+		};
 		A5001260 /* XCLocalSwiftPackageReference "bonsplit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = vendor/bonsplit;
@@ -1496,6 +1508,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */;
 			productName = StackAuth;
+		};
+		C0D3A510A1B2C3D4E5F60718 /* CodexTrajectory */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0D3A50FA1B2C3D4E5F60718 /* XCLocalSwiftPackageReference "CodexTrajectory" */;
+			productName = CodexTrajectory;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
