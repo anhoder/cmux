@@ -7024,7 +7024,7 @@ class TerminalController {
 
     private func v2SessionRestorePrevious() -> V2CallResult {
         var restored = false
-        DispatchQueue.main.sync {
+        v2MainSync {
             restored = AppDelegate.shared?.reopenPreviousSession(shouldActivate: false) ?? false
         }
         guard restored else {
