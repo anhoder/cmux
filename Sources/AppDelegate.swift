@@ -9280,6 +9280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         func attemptSeed(reason: String) {
             guard !resolved else { return }
             guard panel.webView.url?.absoluteString == expectedURLString else { return }
+            guard !panel.webView.isLoading else { return }
             resolved = true
             cleanup()
 #if DEBUG
