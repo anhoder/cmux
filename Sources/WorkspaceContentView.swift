@@ -110,6 +110,7 @@ final class TmuxWorkspacePaneOverlayModel: ObservableObject {
 
     private var lastWorkspaceId: UUID?
     private var lastFlashToken: UInt64?
+    private var flashExpirationTask: Task<Void, Never>?
 
     func apply(
         _ state: TmuxWorkspacePaneOverlayRenderState,
@@ -124,6 +125,8 @@ final class TmuxWorkspacePaneOverlayModel: ObservableObject {
             lastWorkspaceId = state.workspaceId
             lastFlashToken = state.flashToken
             flashStartedAt = nil
+            flashExpirationTask?.cancel()
+            flashExpirationTask = nil
             return
         }
 
@@ -131,6 +134,7 @@ final class TmuxWorkspacePaneOverlayModel: ObservableObject {
            state.flashToken != lastFlashToken,
            state.flashRect != nil {
             flashStartedAt = now()
+            scheduleFlashExpiration()
         }
         self.lastFlashToken = state.flashToken
     }
@@ -142,6 +146,18 @@ final class TmuxWorkspacePaneOverlayModel: ObservableObject {
         flashReason = nil
         lastWorkspaceId = nil
         lastFlashToken = nil
+        flashExpirationTask?.cancel()
+        flashExpirationTask = nil
+    }
+
+    private func scheduleFlashExpiration() {
+        flashExpirationTask?.cancel()
+        let nanoseconds = UInt64(FocusFlashPattern.duration * 1_000_000_000)
+        flashExpirationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.flashStartedAt = nil
+        }
     }
 }
 
@@ -152,23 +168,35 @@ struct TmuxWorkspacePaneOverlayView: View {
     let flashReason: WorkspaceAttentionFlashReason?
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            Canvas { context, _ in
-                for rect in unreadRects {
-                    drawUnreadRing(in: &context, rect: rect)
-                }
+        Group {
+            if flashStartedAt != nil {
+                TimelineView(.animation) { timeline in
+                    Canvas { context, _ in
+                        for rect in unreadRects {
+                            drawUnreadRing(in: &context, rect: rect)
+                        }
 
-                guard let flashRect,
-                      let flashStartedAt else { return }
-                let elapsed = timeline.date.timeIntervalSince(flashStartedAt)
-                let opacity = FocusFlashPattern.opacity(at: elapsed)
-                guard opacity > 0.001 else { return }
-                drawFlashRing(
-                    in: &context,
-                    rect: flashRect,
-                    opacity: opacity,
-                    reason: flashReason ?? .notificationArrival
-                )
+                        guard let flashRect,
+                              let flashStartedAt else { return }
+                        let elapsed = timeline.date.timeIntervalSince(flashStartedAt)
+                        let opacity = FocusFlashPattern.opacity(at: elapsed)
+                        guard opacity > 0.001 else { return }
+                        drawFlashRing(
+                            in: &context,
+                            rect: flashRect,
+                            opacity: opacity,
+                            reason: flashReason ?? .notificationArrival
+                        )
+                    }
+                }
+            } else if !unreadRects.isEmpty {
+                Canvas { context, _ in
+                    for rect in unreadRects {
+                        drawUnreadRing(in: &context, rect: rect)
+                    }
+                }
+            } else {
+                Color.clear
             }
         }
         .allowsHitTesting(false)
