@@ -2220,37 +2220,173 @@ final class BrowserPanel: Panel, ObservableObject {
         case passiveObservation
     }
 
-    private enum PendingWebContentRestoreSource: Equatable {
-        case tracked
-        case findDismiss
-    }
+    private struct BrowserFindFocusCoordinator: Equatable {
+        struct FindTransaction: Equatable {
+            let requestId: UUID
+            let reason: String
+            let webViewInstanceID: UUID
+            var fieldMounted = false
+            var fieldFocused = false
+        }
 
-    private struct PendingWebContentRestore: Equatable {
-        let requestId: UUID
-        let reason: String
-        let source: PendingWebContentRestoreSource
-        let webViewInstanceID: UUID
-    }
+        struct WebContentRestoreTransaction: Equatable {
+            let requestId: UUID
+            let reason: String
+            let webViewInstanceID: UUID
+            let sourceFindRequestId: UUID?
+        }
 
-    private enum BrowserWebContentRestorePhase: Equatable {
-        case idle
-        case waitingForFindOverlayDismiss(reason: String)
-        case waitingForWebViewFocus(PendingWebContentRestore)
-        case restoring(PendingWebContentRestore)
+        enum Phase: Equatable {
+            case idle
+            case focusing(FindTransaction)
+            case focused(FindTransaction)
+            case waitingForFindOverlayDismiss(WebContentRestoreTransaction)
+            case waitingForWebViewFocus(WebContentRestoreTransaction)
+            case restoring(WebContentRestoreTransaction)
+        }
 
-        var requestId: UUID? {
-            switch self {
-            case .waitingForWebViewFocus(let request), .restoring(let request):
-                return request.requestId
-            case .idle, .waitingForFindOverlayDismiss:
+        private(set) var phase: Phase = .idle
+
+        var pendingFindFieldFocusRequestId: UUID? {
+            guard case .focusing(let transaction) = phase else { return nil }
+            return transaction.requestId
+        }
+
+        var pendingWebContentRestoreRequestId: UUID? {
+            switch phase {
+            case .waitingForWebViewFocus(let transaction), .restoring(let transaction):
+                return transaction.requestId
+            case .idle, .focusing, .focused, .waitingForFindOverlayDismiss:
                 return nil
+            }
+        }
+
+        var pendingWebContentRestore: WebContentRestoreTransaction? {
+            guard case .waitingForWebViewFocus(let transaction) = phase else { return nil }
+            return transaction
+        }
+
+        @discardableResult
+        mutating func beginFindFocus(reason: String, webViewInstanceID: UUID) -> UUID {
+            let transaction = FindTransaction(
+                requestId: UUID(),
+                reason: reason,
+                webViewInstanceID: webViewInstanceID
+            )
+            phase = .focusing(transaction)
+            return transaction.requestId
+        }
+
+        mutating func noteFindFieldMounted(requestId: UUID) -> Bool {
+            switch phase {
+            case .focusing(var transaction) where transaction.requestId == requestId:
+                transaction.fieldMounted = true
+                phase = .focusing(transaction)
+                return true
+            case .focused(let transaction) where transaction.requestId == requestId:
+                return true
+            default:
+                return false
+            }
+        }
+
+        mutating func noteFindFieldFocused(requestId: UUID?) -> Bool {
+            switch phase {
+            case .focusing(var transaction):
+                if let requestId, transaction.requestId != requestId {
+                    return false
+                }
+                transaction.fieldMounted = true
+                transaction.fieldFocused = true
+                phase = .focused(transaction)
+                return true
+            case .focused(let transaction):
+                guard let requestId else { return true }
+                return transaction.requestId == requestId
+            case .idle:
+                return requestId == nil
+            case .waitingForFindOverlayDismiss, .waitingForWebViewFocus, .restoring:
+                return false
+            }
+        }
+
+        func canApplyFindFieldFocusRequest(_ requestId: UUID) -> Bool {
+            pendingFindFieldFocusRequestId == requestId
+        }
+
+        mutating func beginFindDismiss(
+            reason: String,
+            shouldRestoreWebContent: Bool,
+            webViewInstanceID: UUID
+        ) -> WebContentRestoreTransaction? {
+            guard shouldRestoreWebContent else {
+                phase = .idle
+                return nil
+            }
+            let sourceFindRequestId: UUID?
+            switch phase {
+            case .focusing(let transaction), .focused(let transaction):
+                sourceFindRequestId = transaction.requestId
+            case .idle, .waitingForFindOverlayDismiss, .waitingForWebViewFocus, .restoring:
+                sourceFindRequestId = nil
+            }
+            let transaction = WebContentRestoreTransaction(
+                requestId: UUID(),
+                reason: reason,
+                webViewInstanceID: webViewInstanceID,
+                sourceFindRequestId: sourceFindRequestId
+            )
+            phase = .waitingForFindOverlayDismiss(transaction)
+            return transaction
+        }
+
+        mutating func noteFindOverlayDisappeared() -> WebContentRestoreTransaction? {
+            guard case .waitingForFindOverlayDismiss(let transaction) = phase else {
+                return nil
+            }
+            phase = .waitingForWebViewFocus(transaction)
+            return transaction
+        }
+
+        mutating func markWebContentRestoreApplying(_ transaction: WebContentRestoreTransaction) -> Bool {
+            guard case .waitingForWebViewFocus(let pending) = phase,
+                  pending.requestId == transaction.requestId else {
+                return false
+            }
+            phase = .restoring(transaction)
+            return true
+        }
+
+        mutating func completeWebContentRestore(_ transaction: WebContentRestoreTransaction) {
+            guard case .restoring(let active) = phase,
+                  active.requestId == transaction.requestId else {
+                return
+            }
+            phase = .idle
+        }
+
+        mutating func cancelFindFocus() {
+            switch phase {
+            case .focusing, .focused:
+                phase = .idle
+            case .idle, .waitingForFindOverlayDismiss, .waitingForWebViewFocus, .restoring:
+                break
+            }
+        }
+
+        mutating func cancelWebContentRestore() {
+            switch phase {
+            case .waitingForFindOverlayDismiss, .waitingForWebViewFocus, .restoring:
+                phase = .idle
+            case .idle, .focusing, .focused:
+                break
             }
         }
     }
 
     /// Semantic in-panel focus target owned by BrowserPanel, not by overlay-local state.
     @Published private var subfocusState: BrowserSubfocusState = .webView
-    private var webContentRestorePhase: BrowserWebContentRestorePhase = .idle
+    private var findFocusCoordinator = BrowserFindFocusCoordinator()
     private var isPaneFocusedForBrowserRestore = false
 
     var pendingAddressBarFocusRequestId: UUID? {
@@ -2258,7 +2394,7 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     var pendingFindFieldFocusRequestId: UUID? {
-        subfocusState.pendingFindFieldFocusRequestId
+        findFocusCoordinator.pendingFindFieldFocusRequestId
     }
 
     var preferredFocusIntent: BrowserPanelFocusIntent {
@@ -2266,7 +2402,7 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     var pendingWebContentRestoreRequestId: UUID? {
-        webContentRestorePhase.requestId
+        findFocusCoordinator.pendingWebContentRestoreRequestId
     }
 
     /// Find-in-page state. Non-nil when the find bar is visible.
@@ -5096,28 +5232,33 @@ extension BrowserPanel {
 #endif
         guard shouldRestorePageFocus else {
             clearPendingWebContentRestore()
+            findFocusCoordinator.cancelFindFocus()
             searchState = nil
             return
         }
-        webContentRestorePhase = .waitingForFindOverlayDismiss(reason: "findDismiss.\(reason)")
+        _ = findFocusCoordinator.beginFindDismiss(
+            reason: "findDismiss.\(reason)",
+            shouldRestoreWebContent: true,
+            webViewInstanceID: webViewInstanceID
+        )
         updateSubfocusState(.webView)
         searchState = nil
     }
 
-    func completePendingFindDismissIfNeeded(source: String) {
-        guard case .waitingForFindOverlayDismiss(let pendingFindDismissRestoreReason) = webContentRestorePhase else {
+    func noteFindOverlayDisappeared(source: String) {
+        guard let pendingRestore = findFocusCoordinator.noteFindOverlayDisappeared() else {
+            if searchState != nil, preferredFocusIntent == .findField {
+                _ = requestFindFieldFocus(reason: "findOverlayRemount.\(source)")
+            }
             return
         }
 #if DEBUG
         dlog(
             "browser.focus.findDismiss.overlay panel=\(id.uuidString.prefix(5)) " +
-            "source=\(source) reason=\(pendingFindDismissRestoreReason)"
+            "source=\(source) request=\(pendingRestore.requestId.uuidString.prefix(8)) " +
+            "reason=\(pendingRestore.reason)"
         )
 #endif
-        _ = beginPendingWebContentRestore(
-            reason: pendingFindDismissRestoreReason,
-            source: .findDismiss
-        )
         drivePendingWebContentRestoreIfPossible(trigger: "findOverlayDisappear")
     }
 
@@ -5300,6 +5441,7 @@ extension BrowserPanel {
             }
         }
         updateSubfocusState(.webView)
+        findFocusCoordinator.cancelFindFocus()
         applyPendingWebContentRestoreIfNeeded(source: source)
     }
 
@@ -5307,22 +5449,55 @@ extension BrowserPanel {
         isPaneFocusedForBrowserRestore = focused
         guard focused else { return }
         drivePendingWebContentRestoreIfPossible(trigger: "paneFocused")
+        requestFindFieldFocusForFocusedPaneIfNeeded(reason: "paneFocused")
     }
 
     func noteAddressBarFocused() {
         updateSubfocusState(.addressBar(.active))
     }
 
+    func noteFindFieldMounted(requestId: UUID? = nil) {
+        guard let requestId else { return }
+        guard findFocusCoordinator.noteFindFieldMounted(requestId: requestId) else {
+#if DEBUG
+            dlog(
+                "browser.focus.find.requestMount panel=\(id.uuidString.prefix(5)) " +
+                "request=\(requestId.uuidString.prefix(8)) result=ignored " +
+                "pending=\(pendingFindFieldFocusRequestId?.uuidString.prefix(8) ?? "nil")"
+            )
+#endif
+            return
+        }
+#if DEBUG
+        dlog(
+            "browser.focus.find.requestMount panel=\(id.uuidString.prefix(5)) " +
+            "request=\(requestId.uuidString.prefix(8)) result=accepted"
+        )
+#endif
+    }
+
     func noteFindFieldFocused(requestId: UUID? = nil) {
-        if let requestId,
-           pendingFindFieldFocusRequestId != requestId {
+        guard findFocusCoordinator.noteFindFieldFocused(requestId: requestId) else {
+#if DEBUG
+            dlog(
+                "browser.focus.find.requestAck panel=\(id.uuidString.prefix(5)) " +
+                "request=\(requestId?.uuidString.prefix(8) ?? "nil") result=ignored " +
+                "pending=\(pendingFindFieldFocusRequestId?.uuidString.prefix(8) ?? "nil")"
+            )
+#endif
             return
         }
         updateSubfocusState(.findField(.active))
+#if DEBUG
+        dlog(
+            "browser.focus.find.requestAck panel=\(id.uuidString.prefix(5)) " +
+            "request=\(requestId?.uuidString.prefix(8) ?? "nil") result=accepted"
+        )
+#endif
     }
 
     func canApplyFindFieldFocusRequest(_ requestId: UUID) -> Bool {
-        pendingFindFieldFocusRequestId == requestId &&
+        findFocusCoordinator.canApplyFindFieldFocusRequest(requestId) &&
             searchState != nil &&
             preferredFocusIntent == .findField
     }
@@ -5371,6 +5546,8 @@ extension BrowserPanel {
         case .findField:
             if let requestId = pendingFindFieldFocusRequestId {
                 updateSubfocusState(.findField(.pending(requestId)))
+            } else if searchState != nil {
+                _ = requestFindFieldFocus(reason: "activation")
             } else {
                 updateSubfocusState(.findField(.active))
             }
@@ -5503,6 +5680,7 @@ extension BrowserPanel {
         if case .findField = subfocusState {
             updateSubfocusState(.webView)
         }
+        findFocusCoordinator.cancelFindFocus()
     }
 
     @discardableResult
@@ -5596,48 +5774,19 @@ extension BrowserPanel {
         return focusedWebView
     }
 
-    @discardableResult
-    private func beginPendingWebContentRestore(
-        reason: String,
-        source: PendingWebContentRestoreSource
-    ) -> PendingWebContentRestore {
-        let request = PendingWebContentRestore(
-            requestId: UUID(),
-            reason: reason,
-            source: source,
-            webViewInstanceID: webViewInstanceID
-        )
-        webContentRestorePhase = .waitingForWebViewFocus(request)
-        updateSubfocusState(.webView)
-#if DEBUG
-        dlog(
-            "browser.focus.webContent.pending panel=\(id.uuidString.prefix(5)) " +
-            "request=\(request.requestId.uuidString.prefix(8)) " +
-            "reason=\(reason) source=\(String(describing: source))"
-        )
-#endif
-        return request
-    }
-
     private func clearPendingWebContentRestore() {
-        webContentRestorePhase = .idle
+        findFocusCoordinator.cancelWebContentRestore()
     }
 
     private func drivePendingWebContentRestoreIfPossible(trigger: String) {
-        let pendingRestore: PendingWebContentRestore
-        switch webContentRestorePhase {
-        case .waitingForWebViewFocus(let request):
-            pendingRestore = request
-        case .idle, .waitingForFindOverlayDismiss, .restoring:
-            return
-        }
+        guard let pendingRestore = findFocusCoordinator.pendingWebContentRestore else { return }
 
         guard isPaneFocusedForBrowserRestore else {
 #if DEBUG
             dlog(
                 "browser.focus.webContent.pending.skip panel=\(id.uuidString.prefix(5)) " +
                 "request=\(pendingRestore.requestId.uuidString.prefix(8)) " +
-                "reason=\(pendingRestore.reason) source=\(String(describing: pendingRestore.source)) " +
+                "reason=\(pendingRestore.reason) source=findDismiss " +
                 "trigger=\(trigger) cause=pane_unfocused"
             )
 #endif
@@ -5648,7 +5797,7 @@ extension BrowserPanel {
             dlog(
                 "browser.focus.webContent.pending.drop panel=\(id.uuidString.prefix(5)) " +
                 "request=\(pendingRestore.requestId.uuidString.prefix(8)) " +
-                "reason=\(pendingRestore.reason) source=\(String(describing: pendingRestore.source)) " +
+                "reason=\(pendingRestore.reason) source=findDismiss " +
                 "trigger=\(trigger) cause=webview_replaced"
             )
 #endif
@@ -5660,7 +5809,7 @@ extension BrowserPanel {
             dlog(
                 "browser.focus.webContent.pending.skip panel=\(id.uuidString.prefix(5)) " +
                 "request=\(pendingRestore.requestId.uuidString.prefix(8)) " +
-                "reason=\(pendingRestore.reason) source=\(String(describing: pendingRestore.source)) " +
+                "reason=\(pendingRestore.reason) source=findDismiss " +
                 "trigger=\(trigger) cause=webview_unavailable " +
                 "hasWindow=\(webView.window == nil ? 0 : 1) hidden=\(webView.isHiddenOrHasHiddenAncestor ? 1 : 0)"
             )
@@ -5668,28 +5817,25 @@ extension BrowserPanel {
             return
         }
 
-        webContentRestorePhase = .restoring(pendingRestore)
+        guard findFocusCoordinator.markWebContentRestoreApplying(pendingRestore) else { return }
 #if DEBUG
         let hasWebViewResponder = Self.responderChainContains(window.firstResponder, target: webView)
         let firstResponderDescription = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         dlog(
             "browser.focus.webContent.pending.apply panel=\(id.uuidString.prefix(5)) " +
             "request=\(pendingRestore.requestId.uuidString.prefix(8)) " +
-            "reason=\(pendingRestore.reason) source=\(String(describing: pendingRestore.source)) " +
+            "reason=\(pendingRestore.reason) source=findDismiss " +
             "trigger=\(trigger) webViewResponder=\(hasWebViewResponder ? 1 : 0) " +
             "fr=\(firstResponderDescription)"
         )
 #endif
         let focused = transitionToWebContentFocus(
             reason: pendingRestore.reason,
-            yieldFindFieldResponder: pendingRestore.source == .findDismiss,
+            yieldFindFieldResponder: true,
             restoreStoredDOMFocus: true,
             completion: { [weak self] restored in
                 guard let self else { return }
-                if case .restoring(let activeRestore) = self.webContentRestorePhase,
-                   activeRestore.requestId == pendingRestore.requestId {
-                    self.webContentRestorePhase = .idle
-                }
+                self.findFocusCoordinator.completeWebContentRestore(pendingRestore)
 #if DEBUG
                 dlog(
                     "browser.focus.webContent.pending.result panel=\(self.id.uuidString.prefix(5)) " +
@@ -5716,9 +5862,34 @@ extension BrowserPanel {
 
     @discardableResult
     private func requestFindFieldFocus(reason: String) -> UUID {
-        let requestId = UUID()
+        let requestId = findFocusCoordinator.beginFindFocus(
+            reason: reason,
+            webViewInstanceID: webViewInstanceID
+        )
         updateSubfocusState(.findField(.pending(requestId)))
+#if DEBUG
+        dlog(
+            "browser.focus.find.request panel=\(id.uuidString.prefix(5)) " +
+            "request=\(requestId.uuidString.prefix(8)) reason=\(reason)"
+        )
+#endif
         return requestId
+    }
+
+    private func requestFindFieldFocusForFocusedPaneIfNeeded(reason: String) {
+        guard searchState != nil, preferredFocusIntent == .findField else { return }
+        guard let window = webView.window else { return }
+        guard !windowFirstResponderOwnsFindField(window) else {
+            noteFindFieldFocused(requestId: nil)
+            return
+        }
+        _ = requestFindFieldFocus(reason: reason)
+    }
+
+    private func windowFirstResponderOwnsFindField(_ window: NSWindow) -> Bool {
+        guard let firstResponder = window.firstResponder else { return false }
+        return browserSearchOverlayPanelId(for: firstResponder) == id ||
+            BrowserWindowPortalRegistry.searchOverlayPanelId(for: firstResponder, in: window) == id
     }
 
     private func captureWebContentFocusSnapshotIfNeeded(reason: String) {

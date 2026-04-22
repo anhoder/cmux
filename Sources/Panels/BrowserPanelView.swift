@@ -692,11 +692,14 @@ struct BrowserPanelView: View {
                 onNext: { panel.findNext() },
                 onPrevious: { panel.findPrevious() },
                 onClose: { panel.hideFind(reason: "overlay") },
+                onFieldMounted: { requestId in
+                    panel.noteFindFieldMounted(requestId: requestId)
+                },
                 onFieldDidFocus: { requestId in
                     panel.noteFindFieldFocused(requestId: requestId)
                 },
                 onDisappear: {
-                    panel.completePendingFindDismissIfNeeded(source: "overlayDisappear")
+                    panel.noteFindOverlayDisappeared(source: "overlayDisappear")
                 }
             )
         }
@@ -760,6 +763,7 @@ struct BrowserPanelView: View {
                     onNext: configuration.onNext,
                     onPrevious: configuration.onPrevious,
                     onClose: configuration.onClose,
+                    onFieldMounted: configuration.onFieldMounted,
                     onFieldDidFocus: configuration.onFieldDidFocus,
                     onDisappear: configuration.onDisappear
                 )

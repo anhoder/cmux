@@ -1239,6 +1239,7 @@ struct BrowserPortalSearchOverlayConfiguration {
     let onNext: () -> Void
     let onPrevious: () -> Void
     let onClose: () -> Void
+    let onFieldMounted: (UUID?) -> Void
     let onFieldDidFocus: (UUID?) -> Void
     let onDisappear: () -> Void
 }
@@ -1767,6 +1768,7 @@ final class WindowBrowserSlotView: NSView {
             onNext: configuration.onNext,
             onPrevious: configuration.onPrevious,
             onClose: configuration.onClose,
+            onFieldMounted: configuration.onFieldMounted,
             onFieldDidFocus: configuration.onFieldDidFocus,
             onDisappear: configuration.onDisappear
         )

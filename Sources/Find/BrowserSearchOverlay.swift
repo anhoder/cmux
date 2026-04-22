@@ -41,6 +41,7 @@ struct BrowserSearchOverlay: View {
     let onNext: () -> Void
     let onPrevious: () -> Void
     let onClose: () -> Void
+    let onFieldMounted: (UUID?) -> Void
     let onFieldDidFocus: (UUID?) -> Void
     let onDisappear: () -> Void
     @State private var corner: Corner = .topRight
@@ -57,6 +58,7 @@ struct BrowserSearchOverlay: View {
                     panelId: panelId,
                     focusRequestId: focusRequestId,
                     canApplyFocusRequest: canApplyFocusRequest,
+                    onFieldMounted: onFieldMounted,
                     onFieldDidFocus: onFieldDidFocus,
                     onEscape: onClose,
                     onReturn: { isShift in
@@ -224,6 +226,7 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
     let panelId: UUID
     let focusRequestId: UUID?
     let canApplyFocusRequest: (UUID) -> Bool
+    let onFieldMounted: (UUID?) -> Void
     let onFieldDidFocus: (UUID?) -> Void
     let onEscape: () -> Void
     let onReturn: (_ isShift: Bool) -> Void
@@ -322,7 +325,9 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         field.isEnabled = true
         field.stringValue = text
         field.onWindowAttachment = { [weak coordinator = context.coordinator] attachedField in
-            coordinator?.requestFocusIfNeeded(for: attachedField)
+            guard let coordinator else { return }
+            coordinator.parent.onFieldMounted(coordinator.parent.focusRequestId)
+            coordinator.requestFocusIfNeeded(for: attachedField)
         }
         setBrowserSearchOverlayPanelId(panelId, on: field)
         context.coordinator.parentField = field
