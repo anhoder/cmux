@@ -251,14 +251,10 @@ private final class BrowserSearchNativeTextField: NSTextField {
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.numericPad, .function, .capsLock])
         if flags.contains(.command) {
-            if let window,
-               let panelId = browserSearchOverlayPanelId(for: self) ??
-                   AppDelegate.shared?.activeBrowserSearchOverlayPanelId(in: window),
-               AppDelegate.shared?.handleBrowserSearchOverlayKeyDown(
-                   event,
-                   panelId: panelId,
-                   in: window
-               ) == true {
+            if AppDelegate.shared?.handleBrowserSearchOverlayCommandEvent(
+                event,
+                preferredWindow: window
+            ) == true {
                 return true
             }
             if AppDelegate.shared?.handleBrowserSurfaceKeyEquivalent(event) == true {
@@ -361,12 +357,10 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
             if let event = NSApp.currentEvent,
                event.type == .keyDown,
                event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) {
-                if let window = textView.window,
-                   AppDelegate.shared?.handleBrowserSearchOverlayKeyDown(
-                       event,
-                       panelId: parent.panelId,
-                       in: window
-                   ) == true {
+                if AppDelegate.shared?.handleBrowserSearchOverlayCommandEvent(
+                    event,
+                    preferredWindow: textView.window
+                ) == true {
                     return true
                 }
                 if AppDelegate.shared?.handleBrowserSurfaceKeyEquivalent(event) == true {

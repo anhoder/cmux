@@ -374,6 +374,9 @@ final class CmuxWebView: WKWebView {
     }
     var debugPointerFocusAllowanceDepth: Int { pointerFocusAllowanceDepth }
     var debugProgrammaticFocusAllowanceDepth: Int { programmaticFocusAllowanceDepth }
+    var debugRestoredWebContentTextInputRepairArmed: Bool {
+        restoredWebContentTextInputRepairArmed
+    }
 
     override init(frame: NSRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame, configuration: configuration)
@@ -770,6 +773,21 @@ final class CmuxWebView: WKWebView {
         return text
     }
 
+    private static func restoredTextInputRepairText(from insertString: Any) -> String? {
+        let text: String
+        if let string = insertString as? String {
+            text = string
+        } else if let attributed = insertString as? NSAttributedString {
+            text = attributed.string
+        } else {
+            return nil
+        }
+
+        guard !text.isEmpty else { return nil }
+        guard text.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        return text
+    }
+
     private func restoredTextInputSnapshot() -> RestoredTextInputSnapshot? {
         let evaluation = evaluateJavaScriptSynchronously(Self.restoredTextInputSnapshotScript)
         guard evaluation.completed, evaluation.error == nil else { return nil }
@@ -845,6 +863,12 @@ final class CmuxWebView: WKWebView {
             disarmRestoredWebContentTextInputRepair(reason: "bridgeInsertFailed")
         }
         return inserted ? "focusRepairBridgeInserted" : "focusRepairBridgeInsertFailed"
+    }
+
+    private func bridgeRestoredTextInputRepairIfWrapperIsFirstResponder(text: String) -> String? {
+        guard restoredWebContentTextInputRepairArmed else { return nil }
+        guard window?.firstResponder === self else { return nil }
+        return bridgeRestoredTextInputRepairToActiveElement(text: text)
     }
 
     @discardableResult
@@ -1080,6 +1104,33 @@ final class CmuxWebView: WKWebView {
         }
 
         super.keyDown(with: event)
+    }
+
+    override func insertText(_ insertString: Any) {
+#if DEBUG
+        let typingTimingStart = CmuxTypingTiming.start()
+        var route = "super"
+        defer {
+            let event = NSApp.currentEvent
+            if let event {
+                CmuxTypingTiming.logDuration(
+                    path: "browser.web.insertText",
+                    startedAt: typingTimingStart,
+                    event: event,
+                    extra: "route=\(route)"
+                )
+            }
+        }
+#endif
+        if let repairText = Self.restoredTextInputRepairText(from: insertString),
+           let repairRoute = bridgeRestoredTextInputRepairIfWrapperIsFirstResponder(text: repairText) {
+#if DEBUG
+            route = repairRoute
+#endif
+            return
+        }
+
+        super.insertText(insertString)
     }
 
     // MARK: - Focus on click

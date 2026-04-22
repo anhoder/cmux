@@ -9038,6 +9038,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         updates["browserPageTitle"] = browserPanel.webView.title?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         updates["browserPageURL"] = browserPanel.preferredURLStringForOmnibar() ?? ""
+        if let cmuxWebView = browserPanel.webView as? CmuxWebView {
+            updates["webViewRestoredTextRepairArmed"] =
+                cmuxWebView.debugRestoredWebContentTextInputRepairArmed ? "true" : "false"
+        } else {
+            updates["webViewRestoredTextRepairArmed"] = "false"
+        }
         if let firstResponder = browserPanel.webView.window?.firstResponder {
             updates["webViewFirstResponderType"] = String(describing: type(of: firstResponder))
             if let firstResponderView = firstResponder as? NSView {
@@ -12310,6 +12316,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return handleCustomShortcut(event: event)
     }
 
+    @discardableResult
+    func handleBrowserSearchOverlayCommandEvent(
+        _ event: NSEvent,
+        preferredWindow: NSWindow?
+    ) -> Bool {
+        guard event.type == .keyDown else { return false }
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else {
+            return false
+        }
+
+        let candidateWindows = [
+            preferredWindow,
+            event.window,
+            NSApp.keyWindow,
+            NSApp.mainWindow,
+        ].compactMap { $0 }
+        var seenWindows = Set<ObjectIdentifier>()
+
+        for window in candidateWindows where seenWindows.insert(ObjectIdentifier(window)).inserted {
+            let searchOverlayPanelId = window.firstResponder.flatMap {
+                browserSearchOverlayPanelId(for: $0) ??
+                    BrowserWindowPortalRegistry.searchOverlayPanelId(for: $0, in: window)
+            } ?? activeBrowserSearchOverlayPanelId(in: window)
+            guard let searchOverlayPanelId else { continue }
+            if handleBrowserSearchOverlayKeyDown(event, panelId: searchOverlayPanelId, in: window) {
+                return true
+            }
+        }
+
+        return false
+    }
+
     func activeBrowserSearchOverlayPanelId(in window: NSWindow) -> UUID? {
         guard let firstResponder = window.firstResponder else { return nil }
         let responderLooksLikeSearchOverlay = responderLooksLikeBrowserSearchOverlay(firstResponder, in: window)
@@ -14348,6 +14386,12 @@ private extension NSApplication {
             }
         }
 #endif
+        if AppDelegate.shared?.handleBrowserSearchOverlayCommandEvent(
+            event,
+            preferredWindow: event.window ?? keyWindow ?? mainWindow
+        ) == true {
+            return
+        }
         cmux_applicationSendEvent(event)
     }
 }
@@ -14604,26 +14648,13 @@ private extension NSWindow {
     }
 
     private func cmux_routeBrowserSearchOverlayCommandKeyDown(_ event: NSEvent) -> Bool {
-        guard event.type == .keyDown else { return false }
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else {
-            return false
-        }
-        let searchOverlayPanelId = firstResponder.flatMap {
-            browserSearchOverlayPanelId(for: $0) ??
-                BrowserWindowPortalRegistry.searchOverlayPanelId(for: $0, in: self)
-        } ?? AppDelegate.shared?.activeBrowserSearchOverlayPanelId(in: self)
-        guard let searchOverlayPanelId else { return false }
-        guard AppDelegate.shared?.handleBrowserSearchOverlayKeyDown(
+        guard AppDelegate.shared?.handleBrowserSearchOverlayCommandEvent(
             event,
-            panelId: searchOverlayPanelId,
-            in: self
-        ) == true else {
-            return false
-        }
+            preferredWindow: self
+        ) == true else { return false }
 #if DEBUG
         dlog(
             "window.sendEvent.browserSearchOverlay.command " +
-            "panel=\(searchOverlayPanelId.uuidString.prefix(5)) " +
             "keyCode=\(event.keyCode)"
         )
 #endif
@@ -14673,21 +14704,13 @@ private extension NSWindow {
             Self.cmuxOwningWebView(for: $0, in: self, event: event)
         }
         let firstResponderHasMarkedText = browserResponderHasMarkedText(self.firstResponder)
-        let firstResponderSearchOverlayPanelId = self.firstResponder.flatMap {
-            browserSearchOverlayPanelId(for: $0) ??
-                BrowserWindowPortalRegistry.searchOverlayPanelId(for: $0, in: self)
-        } ?? AppDelegate.shared?.activeBrowserSearchOverlayPanelId(in: self)
-        if let firstResponderSearchOverlayPanelId,
-           event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
-           AppDelegate.shared?.handleBrowserSearchOverlayKeyDown(
-               event,
-               panelId: firstResponderSearchOverlayPanelId,
-               in: self
-           ) == true {
+        if AppDelegate.shared?.handleBrowserSearchOverlayCommandEvent(
+            event,
+            preferredWindow: self
+        ) == true {
 #if DEBUG
             dlog(
-                "  → browser search overlay command routed to app " +
-                "panel=\(firstResponderSearchOverlayPanelId.uuidString.prefix(5))"
+                "  → browser search overlay command routed to app"
             )
 #endif
             return true
