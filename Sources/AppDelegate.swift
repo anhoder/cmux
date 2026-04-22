@@ -14421,6 +14421,10 @@ private extension NSWindow {
             cmuxFirstResponderGuardContextWindowNumber = previousContextWindowNumber
         }
 
+        if cmux_routeBrowserSearchOverlayCommandKeyDown(event) {
+            return
+        }
+
         guard shouldSuppressWindowMoveForFolderDrag(window: self, event: event),
               let contentView = self.contentView else {
 #if DEBUG
@@ -14468,6 +14472,29 @@ private extension NSWindow {
         #if DEBUG
         dlog("window.sendEvent.folderDown restore nowMovable=\(isMovable)")
         #endif
+    }
+
+    private func cmux_routeBrowserSearchOverlayCommandKeyDown(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return false }
+        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else {
+            return false
+        }
+        let searchOverlayPanelId = firstResponder.flatMap {
+            browserSearchOverlayPanelId(for: $0) ??
+                BrowserWindowPortalRegistry.searchOverlayPanelId(for: $0, in: self)
+        }
+        guard searchOverlayPanelId != nil else { return false }
+        guard AppDelegate.shared?.handleBrowserSurfaceKeyEquivalent(event) == true else {
+            return false
+        }
+#if DEBUG
+        dlog(
+            "window.sendEvent.browserSearchOverlay.command " +
+            "panel=\(searchOverlayPanelId?.uuidString.prefix(5) ?? "nil") " +
+            "keyCode=\(event.keyCode)"
+        )
+#endif
+        return true
     }
 
     @objc func cmux_performKeyEquivalent(with event: NSEvent) -> Bool {

@@ -20,6 +20,18 @@ private func drainBrowserPanelMainQueue() {
     XCTWaiter().wait(for: [expectation], timeout: 1.0)
 }
 
+private final class BrowserPanelTestNavigationDelegate: NSObject, WKNavigationDelegate {
+    let onFinish: () -> Void
+
+    init(onFinish: @escaping () -> Void) {
+        self.onFinish = onFinish
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        onFinish()
+    }
+}
+
 @MainActor
 private func waitForBrowserPanelCondition(
     timeout: TimeInterval = 1.0,
@@ -227,6 +239,58 @@ private final class BrowserPanelFakeWebContentResponderView: NSView {
 
 @MainActor
 final class BrowserPanelFindFocusRequestTests: XCTestCase {
+    @MainActor
+    func testWebContentFocusRestoreReactivatesAlreadyFocusedEditable() async throws {
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        let navigation = expectation(description: "test page loaded")
+        let delegate = BrowserPanelTestNavigationDelegate {
+            navigation.fulfill()
+        }
+        webView.navigationDelegate = delegate
+
+        webView.loadHTMLString(
+            """
+            <!doctype html>
+            <input id="target" value="abc" data-cmux-addressbar-focus-id="target-id">
+            <script>
+            const input = document.getElementById("target");
+            input.focus();
+            input.setSelectionRange(3, 3);
+            window.__cmuxAddressBarFocusState = {
+              id: "target-id",
+              selectionStart: 3,
+              selectionEnd: 3
+            };
+            window.__cmuxFocusEvents = [];
+            input.addEventListener("blur", () => window.__cmuxFocusEvents.push("blur"), true);
+            input.addEventListener("focus", () => window.__cmuxFocusEvents.push("focus"), true);
+            </script>
+            """,
+            baseURL: nil
+        )
+        await fulfillment(of: [navigation], timeout: 2.0)
+
+        let status = try await webView.evaluateJavaScript(BrowserPanel.webContentFocusRestoreScriptForTesting) as? String
+        XCTAssertEqual(status, "restored")
+
+        let snapshot = try await webView.evaluateJavaScript(
+            """
+            JSON.stringify({
+              activeId: document.activeElement ? document.activeElement.id : "",
+              events: window.__cmuxFocusEvents || [],
+              selectionStart: document.getElementById("target").selectionStart,
+              selectionEnd: document.getElementById("target").selectionEnd
+            })
+            """
+        ) as? String
+
+        XCTAssertEqual(
+            snapshot,
+            #"{"activeId":"target","events":["blur","focus"],"selectionStart":3,"selectionEnd":3}"#
+        )
+        _ = delegate
+    }
+
     func testStartFindIssuesDurableRequestUntilAcknowledged() throws {
         let panel = BrowserPanel(workspaceId: UUID())
 

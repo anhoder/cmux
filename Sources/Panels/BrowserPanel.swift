@@ -2093,6 +2093,11 @@ final class BrowserPanel: Panel, ObservableObject {
           return "missing_target";
         }
 
+        const active = target.ownerDocument ? target.ownerDocument.activeElement : document.activeElement;
+        if (active === target) {
+          try { target.blur(); } catch (_) {}
+        }
+
         try {
           target.focus({ preventScroll: true });
         } catch (_) {
@@ -2125,6 +2130,11 @@ final class BrowserPanel: Panel, ObservableObject {
       }
     })();
     """
+#if DEBUG
+    static var webContentFocusRestoreScriptForTesting: String {
+        webContentFocusRestoreScript
+    }
+#endif
     /// Published URL being displayed
     @Published private(set) var currentURL: URL?
 
