@@ -12,6 +12,9 @@ enum KeyboardShortcutSettings {
             notifySettingsFileDidChange()
         }
     }
+#if DEBUG
+    private static var testingShortcutOverrides: [Action: StoredShortcut] = [:]
+#endif
 
     enum Action: String, CaseIterable, Identifiable {
         // App / window
@@ -387,6 +390,11 @@ enum KeyboardShortcutSettings {
     ]
 
     static func shortcut(for action: Action) -> StoredShortcut {
+#if DEBUG
+        if let testingShortcut = testingShortcutOverrides[action] {
+            return testingShortcut
+        }
+#endif
         if let managedShortcut = settingsFileStore.override(for: action) {
             return managedShortcut
         }
@@ -423,6 +431,27 @@ enum KeyboardShortcutSettings {
         }
         postDidChangeNotification(action: action)
     }
+
+#if DEBUG
+    static func setShortcutOverrideForTesting(_ shortcut: StoredShortcut, for action: Action) {
+        let storedShortcut: StoredShortcut
+        if let normalizedShortcut = action.normalizedRecordedShortcut(shortcut) {
+            storedShortcut = normalizedShortcut
+        } else if action.usesNumberedDigitMatching || action == .showHideAllWindows {
+            return
+        } else {
+            storedShortcut = shortcut
+        }
+
+        testingShortcutOverrides[action] = storedShortcut
+        postDidChangeNotification(action: action)
+    }
+
+    static func clearShortcutOverrideForTesting(for action: Action) {
+        guard testingShortcutOverrides.removeValue(forKey: action) != nil else { return }
+        postDidChangeNotification(action: action)
+    }
+#endif
 
     static func notifySettingsFileDidChange() {
         postDidChangeNotification()

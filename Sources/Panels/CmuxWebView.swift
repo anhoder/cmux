@@ -605,7 +605,7 @@ final class CmuxWebView: WKWebView {
     }
 
     // Key-equivalent handling is synchronous, so this bounded preflight pumps the main run loop.
-    // Keep callers limited to fast, side-effect-free reads from page-owned state.
+    // Keep callers limited to fast page-owned focus/input scripts.
     private func evaluateJavaScriptSynchronously(
         _ script: String,
         timeout: TimeInterval = 0.25
@@ -633,6 +633,12 @@ final class CmuxWebView: WKWebView {
         }
 
         return (completed, result, error)
+    }
+
+    func captureWebContentFocusSnapshotSynchronously(
+        script: String
+    ) -> (completed: Bool, result: Any?, error: Error?) {
+        evaluateJavaScriptSynchronously(script)
     }
 
     private struct RestoredTextInputSnapshot: Equatable {
@@ -732,10 +738,19 @@ final class CmuxWebView: WKWebView {
           const state = readState();
           if (!doc || !state || typeof state.id !== "string" || !state.id) return null;
           const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
+          const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
           const findTarget = (rootDoc) => {
             if (!rootDoc) return null;
             const direct = rootDoc.querySelector(selector);
             if (direct && direct.isConnected && isEditable(direct)) return direct;
+            if (stateElementId) {
+              const byElementId = rootDoc.getElementById(stateElementId);
+              if (byElementId && byElementId.isConnected && isEditable(byElementId)) return byElementId;
+            }
+            const legacyByStateId = rootDoc.getElementById(state.id);
+            if (legacyByStateId && legacyByStateId.isConnected && isEditable(legacyByStateId)) {
+              return legacyByStateId;
+            }
             const frames = rootDoc.querySelectorAll("iframe,frame");
             for (let i = 0; i < frames.length; i += 1) {
               try {
@@ -769,6 +784,12 @@ final class CmuxWebView: WKWebView {
         (() => {
           const text = \(arrayLiteral)[0];
           try {
+            const isTextInput = (el) => {
+              if (!el) return false;
+              const tag = (el.tagName || "").toLowerCase();
+              const type = (el.type || "").toLowerCase();
+              return tag === "textarea" || (tag === "input" && type !== "hidden");
+            };
             const activeEditable = (doc) => {
               if (!doc) return null;
               const active = doc.activeElement;
@@ -780,7 +801,7 @@ final class CmuxWebView: WKWebView {
                   if (nested) return nested;
                 } catch (_) {}
               }
-              if (tag === "input" || tag === "textarea") return active;
+              if (isTextInput(active)) return active;
               return null;
             };
             const readState = () => {
@@ -797,10 +818,19 @@ final class CmuxWebView: WKWebView {
               const state = readState();
               if (!doc || !state || typeof state.id !== "string" || !state.id) return null;
               const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
+              const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
               const findTarget = (rootDoc) => {
                 if (!rootDoc) return null;
                 const direct = rootDoc.querySelector(selector);
-                if (direct && direct.isConnected) return direct;
+                if (direct && direct.isConnected && isTextInput(direct)) return direct;
+                if (stateElementId) {
+                  const byElementId = rootDoc.getElementById(stateElementId);
+                  if (byElementId && byElementId.isConnected && isTextInput(byElementId)) return byElementId;
+                }
+                const legacyByStateId = rootDoc.getElementById(state.id);
+                if (legacyByStateId && legacyByStateId.isConnected && isTextInput(legacyByStateId)) {
+                  return legacyByStateId;
+                }
                 const frames = rootDoc.querySelectorAll("iframe,frame");
                 for (let i = 0; i < frames.length; i += 1) {
                   try {
@@ -1002,13 +1032,6 @@ final class CmuxWebView: WKWebView {
         if inserted {
             restoredWebContentTextInputRepairLastReason = "bridgeInserted"
             return "focusRepairBridgeInserted"
-        }
-
-        if insert.completed,
-           insert.error == nil,
-           !hasRestorableWebContentTextInputFocus() {
-            disarmRestoredWebContentTextInputRepair(reason: "bridgeInsertFailed.\(reason)")
-            return nil
         }
 
         if !insert.completed || insert.error != nil || !inserted {

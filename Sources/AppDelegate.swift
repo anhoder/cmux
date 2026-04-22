@@ -8621,9 +8621,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             UserDefaults.standard.removeObject(forKey: KeyboardShortcutSettings.focusRightKey)
             UserDefaults.standard.removeObject(forKey: KeyboardShortcutSettings.focusUpKey)
             UserDefaults.standard.removeObject(forKey: KeyboardShortcutSettings.focusDownKey)
+#if DEBUG
+            KeyboardShortcutSettings.clearShortcutOverrideForTesting(for: .focusLeft)
+            KeyboardShortcutSettings.clearShortcutOverrideForTesting(for: .focusRight)
+            KeyboardShortcutSettings.clearShortcutOverrideForTesting(for: .focusUp)
+            KeyboardShortcutSettings.clearShortcutOverrideForTesting(for: .focusDown)
+#endif
         } else {
             // For this UI test we want a letter-based shortcut (Cmd+Ctrl+H) to drive pane navigation,
             // since arrow keys can't be recorded by the shortcut recorder.
+#if DEBUG
+            KeyboardShortcutSettings.setShortcutOverrideForTesting(
+                StoredShortcut(key: "h", command: true, shift: false, option: false, control: true),
+                for: .focusLeft
+            )
+            KeyboardShortcutSettings.setShortcutOverrideForTesting(
+                StoredShortcut(key: "l", command: true, shift: false, option: false, control: true),
+                for: .focusRight
+            )
+            KeyboardShortcutSettings.setShortcutOverrideForTesting(
+                StoredShortcut(key: "k", command: true, shift: false, option: false, control: true),
+                for: .focusUp
+            )
+            KeyboardShortcutSettings.setShortcutOverrideForTesting(
+                StoredShortcut(key: "j", command: true, shift: false, option: false, control: true),
+                for: .focusDown
+            )
+#else
             KeyboardShortcutSettings.setShortcut(
                 StoredShortcut(key: "h", command: true, shift: false, option: false, control: true),
                 for: .focusLeft
@@ -8640,6 +8664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 StoredShortcut(key: "j", command: true, shift: false, option: false, control: true),
                 for: .focusDown
             )
+#endif
         }
 
         installGotoSplitUITestFocusObserversIfNeeded()
@@ -8983,6 +9008,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "ghosttyGotoSplitRightShortcut": ghosttyGotoSplitRightShortcut?.displayString ?? "",
                 "ghosttyGotoSplitUpShortcut": ghosttyGotoSplitUpShortcut?.displayString ?? "",
                 "ghosttyGotoSplitDownShortcut": ghosttyGotoSplitDownShortcut?.displayString ?? "",
+                "configuredFocusLeftShortcut": KeyboardShortcutSettings.focusLeftShortcut().displayString,
+                "configuredFocusRightShortcut": KeyboardShortcutSettings.focusRightShortcut().displayString,
+                "configuredFocusUpShortcut": KeyboardShortcutSettings.focusUpShortcut().displayString,
+                "configuredFocusDownShortcut": KeyboardShortcutSettings.focusDownShortcut().displayString,
                 "webViewFocused": "true"
             ])
             if ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_INPUT_SETUP"] == "1" {
@@ -9318,7 +9347,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
               typeof window.__cmuxAddressBarFocusState.id !== "string" ||
               window.__cmuxAddressBarFocusState.id !== trackedFocusId
             ) {
-              window.__cmuxAddressBarFocusState = { id: trackedFocusId, selectionStart, selectionEnd };
+              window.__cmuxAddressBarFocusState = {
+                id: trackedFocusId,
+                elementId: input.id || null,
+                selectionStart,
+                selectionEnd
+              };
             }
 
             const secondaryRect = secondaryInput.getBoundingClientRect();

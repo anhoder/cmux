@@ -1917,19 +1917,62 @@ final class BrowserPanel: Panel, ObservableObject {
           } catch (_) {}
         };
 
+        const isEditable = (el) => {
+          if (!el) return false;
+          const tag = (el.tagName || "").toLowerCase();
+          const type = (el.type || "").toLowerCase();
+          return !!el.isContentEditable || tag === "textarea" || (tag === "input" && type !== "hidden");
+        };
+
+        const readState = () => {
+          let state = window.__cmuxAddressBarFocusState;
+          try {
+            if ((!state || typeof state.id !== "string" || !state.id) &&
+                window.top && window.top.__cmuxAddressBarFocusState) {
+              state = window.top.__cmuxAddressBarFocusState;
+            }
+          } catch (_) {}
+          return state;
+        };
+
+        const storedTargetExists = () => {
+          const state = readState();
+          if (!state || typeof state.id !== "string" || !state.id) return false;
+          const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
+          const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
+          const findTarget = (doc) => {
+            if (!doc) return null;
+            const direct = doc.querySelector(selector);
+            if (direct && direct.isConnected && isEditable(direct)) return direct;
+            if (stateElementId) {
+              const byElementId = doc.getElementById(stateElementId);
+              if (byElementId && byElementId.isConnected && isEditable(byElementId)) return byElementId;
+            }
+            const legacyByStateId = doc.getElementById(state.id);
+            if (legacyByStateId && legacyByStateId.isConnected && isEditable(legacyByStateId)) {
+              return legacyByStateId;
+            }
+            const frames = doc.querySelectorAll("iframe,frame");
+            for (let i = 0; i < frames.length; i += 1) {
+              try {
+                const nested = findTarget(frames[i].contentDocument);
+                if (nested) return nested;
+              } catch (_) {}
+            }
+            return null;
+          };
+          return !!findTarget(document);
+        };
+
         const active = document.activeElement;
         if (!active) {
+          if (storedTargetExists()) return "retained:none";
           syncState(null);
           return "cleared:none";
         }
 
-        const tag = (active.tagName || "").toLowerCase();
-        const type = (active.type || "").toLowerCase();
-        const isEditable =
-          !!active.isContentEditable ||
-          tag === "textarea" ||
-          (tag === "input" && type !== "hidden");
-        if (!isEditable) {
+        if (!isEditable(active)) {
+          if (storedTargetExists()) return "retained:noneditable";
           syncState(null);
           return "cleared:noneditable";
         }
@@ -1940,7 +1983,8 @@ final class BrowserPanel: Panel, ObservableObject {
           active.setAttribute("data-cmux-addressbar-focus-id", id);
         }
 
-        const state = { id, selectionStart: null, selectionEnd: null };
+        const elementId = typeof active.id === "string" && active.id ? active.id : null;
+        const state = { id, elementId, selectionStart: null, selectionEnd: null };
         if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number") {
           state.selectionStart = active.selectionStart;
           state.selectionEnd = active.selectionEnd;
@@ -2003,6 +2047,7 @@ final class BrowserPanel: Panel, ObservableObject {
           }
           const state = {
             id: ensureFocusId(el),
+            elementId: typeof el.id === "string" && el.id ? el.id : null,
             selectionStart: null,
             selectionEnd: null
           };
@@ -2070,10 +2115,25 @@ final class BrowserPanel: Panel, ObservableObject {
         }
 
         const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
+        const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
+        const isEditable = (el) => {
+          if (!el) return false;
+          const tag = (el.tagName || "").toLowerCase();
+          const type = (el.type || "").toLowerCase();
+          return !!el.isContentEditable || tag === "textarea" || (tag === "input" && type !== "hidden");
+        };
         const findTarget = (doc) => {
           if (!doc) return null;
           const direct = doc.querySelector(selector);
-          if (direct && direct.isConnected) return direct;
+          if (direct && direct.isConnected && isEditable(direct)) return direct;
+          if (stateElementId) {
+            const byElementId = doc.getElementById(stateElementId);
+            if (byElementId && byElementId.isConnected && isEditable(byElementId)) return byElementId;
+          }
+          const legacyByStateId = doc.getElementById(state.id);
+          if (legacyByStateId && legacyByStateId.isConnected && isEditable(legacyByStateId)) {
+            return legacyByStateId;
+          }
           const frames = doc.querySelectorAll("iframe,frame");
           for (let i = 0; i < frames.length; i += 1) {
             const frame = frames[i];
@@ -5969,6 +6029,33 @@ extension BrowserPanel {
     }
 
     private func captureWebContentFocusSnapshotIfNeeded(reason: String) {
+        if let cmuxWebView = webView as? CmuxWebView {
+            let evaluation = cmuxWebView.captureWebContentFocusSnapshotSynchronously(
+                script: Self.webContentFocusCaptureScript
+            )
+#if DEBUG
+            let resultValue = (evaluation.result as? String) ?? "unknown"
+            if let error = evaluation.error {
+                dlog(
+                    "browser.focus.webContent.capture panel=\(id.uuidString.prefix(5)) " +
+                    "reason=\(reason) route=sync result=error message=\(error.localizedDescription)"
+                )
+            } else if evaluation.completed {
+                dlog(
+                    "browser.focus.webContent.capture panel=\(id.uuidString.prefix(5)) " +
+                    "reason=\(reason) route=sync result=\(resultValue)"
+                )
+            } else {
+                dlog(
+                    "browser.focus.webContent.capture panel=\(id.uuidString.prefix(5)) " +
+                    "reason=\(reason) route=sync result=timeout"
+                )
+            }
+#endif
+            if evaluation.completed {
+                return
+            }
+        }
         webView.evaluateJavaScript(Self.webContentFocusCaptureScript) { [weak self] result, error in
 #if DEBUG
             guard let self else { return }
