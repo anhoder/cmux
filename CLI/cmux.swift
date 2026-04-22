@@ -1728,7 +1728,6 @@ struct CMUXCLI {
         // so help text is available even when cmux is not running.
         if command != "__tmux-compat",
            command != "claude-teams",
-           command != "codex",
            (commandArgs.contains("--help") || commandArgs.contains("-h")) {
             if dispatchSubcommandHelp(command: command, commandArgs: commandArgs) {
                 return
@@ -1809,7 +1808,11 @@ struct CMUXCLI {
         // Codex hooks management (no socket needed)
         if command == "codex" {
             let sub = commandArgs.first?.lowercased() ?? "help"
-            if sub == "install-hooks" {
+            if sub == "help" || sub == "--help" || sub == "-h" {
+                if dispatchSubcommandHelp(command: command, commandArgs: commandArgs) {
+                    return
+                }
+            } else if sub == "install-hooks" {
                 try installAgentHooks(Self.agentDef(named: "codex")!)
                 return
             } else if sub == "uninstall-hooks" {
@@ -2788,6 +2791,15 @@ struct CMUXCLI {
                 throw error
             }
 
+        case "codex":
+            try runCodexCommand(
+                commandArgs: commandArgs,
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
+                windowOverride: windowId
+            )
+
         case "codex-hook":
             cliTelemetry.breadcrumb("codex-hook.dispatch")
             do {
@@ -3125,6 +3137,98 @@ struct CMUXCLI {
 
         // Bring the app to front
         try activateApp()
+    }
+
+    private func runCodexCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        guard let subcommand = commandArgs.first?.lowercased() else {
+            throw CLIError(message: codexCommandUsage())
+        }
+
+        switch subcommand {
+        case "resume":
+            try runCodexResumeCommand(
+                commandArgs: Array(commandArgs.dropFirst()),
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat,
+                windowOverride: windowOverride
+            )
+        case "install-hooks", "uninstall-hooks":
+            throw CLIError(message: "cmux codex \(subcommand) does not require a running cmux socket.")
+        default:
+            throw CLIError(message: "Unknown codex subcommand '\(subcommand)'.\n\n\(codexCommandUsage())")
+        }
+    }
+
+    private func runCodexResumeCommand(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat,
+        windowOverride: String?
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (paneOpt, rem1) = parseOption(rem0, name: "--pane")
+        let (cwdOpt, rem2) = parseOption(rem1, name: "--cwd")
+        let remaining = rem2.filter { $0 != "--" }
+
+        if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
+            throw CLIError(message: "codex resume: unknown flag '\(unknown)'. Known flags: --workspace <id|ref>, --pane <id|ref>, --cwd <path>")
+        }
+        guard let sessionId = remaining.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            throw CLIError(message: "codex resume requires a session id.\n\nUsage: cmux codex resume <session-id> [--workspace <id|ref>] [--pane <id|ref>] [--cwd <path>]")
+        }
+        if remaining.count > 1 {
+            throw CLIError(message: "codex resume: unexpected argument '\(remaining[1])'")
+        }
+
+        let workspaceArg = workspaceOpt ?? (windowOverride == nil ? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] : nil)
+        var params: [String: Any] = [
+            "type": "codex-app-server",
+            "thread_id": sessionId,
+        ]
+        if let windowOverride {
+            if let windowId = try normalizeWindowHandle(windowOverride, client: client) {
+                params["window_id"] = windowId
+            }
+        }
+        let wsId = try normalizeWorkspaceHandle(workspaceArg, client: client)
+        if let wsId {
+            params["workspace_id"] = wsId
+        }
+        let paneId = try normalizePaneHandle(paneOpt, client: client, workspaceHandle: wsId)
+        if let paneId {
+            params["pane_id"] = paneId
+        }
+        if let cwdOpt {
+            params["cwd"] = resolvePath(cwdOpt)
+        }
+
+        let payload = try client.sendV2(method: "surface.create", params: params)
+        printV2Payload(
+            payload,
+            jsonOutput: jsonOutput,
+            idFormat: idFormat,
+            fallbackText: v2OKSummary(payload, idFormat: idFormat, kinds: ["surface", "pane", "workspace"])
+        )
+    }
+
+    private func codexCommandUsage() -> String {
+        """
+        Usage: cmux codex <install-hooks|uninstall-hooks|resume>
+
+        Subcommands:
+          install-hooks     Install cmux hooks into ~/.codex/hooks.json
+          uninstall-hooks   Remove cmux hooks from ~/.codex/hooks.json
+          resume <id>       Open a native Codex app-server tab for an existing session
+        """
     }
 
     private func runFeedback(
@@ -8062,13 +8166,22 @@ struct CMUXCLI {
             """
         case "codex":
             return """
-            Usage: cmux codex <install-hooks|uninstall-hooks>
+            Usage: cmux codex <install-hooks|uninstall-hooks|resume>
 
-            Manage Codex CLI hooks integration.
+            Manage Codex integration.
 
             Subcommands:
               install-hooks     Install cmux hooks into ~/.codex/hooks.json
               uninstall-hooks   Remove cmux hooks from ~/.codex/hooks.json
+              resume <id>       Open a native Codex app-server tab for an existing session
+
+            Resume flags:
+              --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID/current)
+              --pane <id|ref>        Target pane (default: focused pane)
+              --cwd <path>           Override working directory for the resumed thread
+
+            Example:
+              cmux codex resume 00000000-0000-0000-0000-000000000000
             """
         case "codex-hook":
             return """
@@ -14443,7 +14556,7 @@ struct CMUXCLI {
           omo [opencode-args...]
           omx [omx-args...]
           omc [omc-args...]
-          codex <install-hooks|uninstall-hooks>
+          codex <install-hooks|uninstall-hooks|resume>
           ping
           version
           capabilities
@@ -14468,7 +14581,7 @@ struct CMUXCLI {
           tree [--all] [--workspace <id|ref|index>]
           focus-pane --pane <id|ref> [--workspace <id|ref>]
           new-pane [--type <terminal|browser>] [--direction <left|right|up|down>] [--workspace <id|ref>] [--url <url>]
-          new-surface [--type <terminal|browser>] [--pane <id|ref>] [--workspace <id|ref>] [--url <url>]
+          new-surface [--type <terminal|browser|codex-app-server>] [--pane <id|ref>] [--workspace <id|ref>] [--url <url>]
           close-surface [--surface <id|ref>] [--workspace <id|ref>]
           move-surface --surface <id|ref|index> [--pane <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--before <id|ref|index>] [--after <id|ref|index>] [--index <n>] [--focus <true|false>]
           reorder-surface --surface <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>)
