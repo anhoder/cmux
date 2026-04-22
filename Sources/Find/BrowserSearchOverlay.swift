@@ -397,6 +397,7 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         let field = BrowserSearchNativeTextField(frame: .zero)
         field.font = .systemFont(ofSize: NSFont.systemFontSize)
         field.placeholderString = String(localized: "search.placeholder", defaultValue: "Search")
+        field.identifier = NSUserInterfaceItemIdentifier("BrowserFindSearchTextField")
         field.setAccessibilityIdentifier("BrowserFindSearchTextField")
         field.delegate = context.coordinator
         field.target = nil

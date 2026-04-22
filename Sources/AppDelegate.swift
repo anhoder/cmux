@@ -12312,16 +12312,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func activeBrowserSearchOverlayPanelId(in window: NSWindow) -> UUID? {
         guard let firstResponder = window.firstResponder else { return nil }
-        let responderIsFieldEditor = (firstResponder as? NSTextView)?.isFieldEditor == true
-        guard responderIsFieldEditor else { return nil }
+        guard responderLooksLikeBrowserSearchOverlay(firstResponder, in: window) else { return nil }
 
         let routedManager = synchronizeActiveMainWindowContext(preferredWindow: window) ?? tabManager
         guard let workspace = routedManager?.selectedWorkspace else { return nil }
+        if let focusedPanelId = workspace.focusedPanelId,
+           let browserPanel = workspace.panels[focusedPanelId] as? BrowserPanel,
+           browserPanel.searchState != nil {
+            return browserPanel.id
+        }
         return workspace.panels.values
             .compactMap { $0 as? BrowserPanel }
             .first { panel in
                 panel.searchState != nil && panel.preferredFocusIntent == .findField
             }?.id
+            ?? workspace.panels.values
+                .compactMap { $0 as? BrowserPanel }
+                .first { $0.searchState != nil }?.id
+    }
+
+    private func responderLooksLikeBrowserSearchOverlay(
+        _ responder: NSResponder,
+        in window: NSWindow
+    ) -> Bool {
+        if browserSearchOverlayPanelId(for: responder) != nil ||
+            BrowserWindowPortalRegistry.searchOverlayPanelId(for: responder, in: window) != nil {
+            return true
+        }
+
+        if let textField = responder as? NSTextField {
+            return textField.identifier?.rawValue == "BrowserFindSearchTextField"
+        }
+
+        guard let editor = responder as? NSTextView,
+              editor.isFieldEditor else {
+            return false
+        }
+        let field = editor.delegate as? NSTextField
+        return field?.identifier?.rawValue == "BrowserFindSearchTextField"
     }
 
     @discardableResult

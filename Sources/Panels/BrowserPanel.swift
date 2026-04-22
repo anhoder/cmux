@@ -5800,7 +5800,9 @@ extension BrowserPanel {
             if hasWebViewResponder {
                 self.noteWebViewFocused()
             }
-            if restored, hasWebViewResponder {
+            let shouldBridgeRestoredTextInput = hasWebViewResponder &&
+                (restored || reason.hasPrefix("findDismiss."))
+            if shouldBridgeRestoredTextInput {
                 (self.webView as? CmuxWebView)?.armRestoredWebContentTextInputRepair(reason: reason)
             } else {
                 (self.webView as? CmuxWebView)?.disarmRestoredWebContentTextInputRepair(reason: "restoreNotReady.\(reason)")
