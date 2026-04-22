@@ -50,12 +50,16 @@ private func withCLISIGPIPEDisposition<T>(
     return try body()
 }
 
-private func withCLISIGPIPEIgnored<T>(body: () throws -> T) rethrows -> T {
-    try withCLISIGPIPEDisposition(SIG_IGN, body: body)
-}
-
 private func withCLIDefaultSIGPIPEForChildLaunch<T>(body: () throws -> T) rethrows -> T {
     try withCLISIGPIPEDisposition(SIG_DFL, body: body)
+}
+
+// Called once at CLI startup so write(2) on stdout/stderr returns EPIPE instead of raising SIGPIPE.
+// Mirrors the per-FD SO_NOSIGPIPE pattern sockets already use, and keeps every cliPrint off the
+// per-write sigaction + global-lock hot path.
+private func configureCLIStdioNoSIGPIPE() {
+    _ = fcntl(STDOUT_FILENO, F_SETNOSIGPIPE, 1)
+    _ = fcntl(STDERR_FILENO, F_SETNOSIGPIPE, 1)
 }
 
 private func cliRunProcess(_ process: Process) throws {
@@ -89,51 +93,50 @@ private func cliWaitForWritableFD(_ fd: Int32) -> Bool {
 }
 
 // Route CLI stdio through write(2) so broken pipes never surface as NSFileHandle exceptions.
+// Stdout/stderr are opted into F_NOSIGPIPE at startup (configureCLIStdioNoSIGPIPE), so Darwin.write
+// returns EPIPE instead of raising SIGPIPE and no per-write signal-handler dance is needed.
 @discardableResult
 private func cliWrite(_ data: Data, to handle: FileHandle, onBrokenPipe: CLIBrokenPipeDisposition) -> Bool {
     guard !data.isEmpty else { return true }
-    return withCLISIGPIPEIgnored {
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
-                return true
-            }
-
-            var offset = 0
-            while offset < rawBuffer.count {
-                let written = Darwin.write(handle.fileDescriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
-                if written > 0 {
-                    offset += written
-                    continue
-                }
-                if written == 0 {
-                    return false
-                }
-
-                let errorCode = errno
-                switch errorCode {
-                case EINTR:
-                    continue
-                case EAGAIN, EWOULDBLOCK:
-                    guard cliWaitForWritableFD(handle.fileDescriptor) else {
-                        return false
-                    }
-                    continue
-                case EPIPE:
-                    switch onBrokenPipe {
-                    case .exit(let code):
-                        // _exit skips atexit/stdio flush so we can't re-enter cliWrite under the held lock,
-                        // and matches the default SIGPIPE termination this replaces.
-                        Darwin._exit(code)
-                    case .ignore:
-                        return false
-                    }
-                default:
-                    return false
-                }
-            }
-
+    return data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
             return true
         }
+
+        var offset = 0
+        while offset < rawBuffer.count {
+            let written = Darwin.write(handle.fileDescriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+            if written > 0 {
+                offset += written
+                continue
+            }
+            if written == 0 {
+                return false
+            }
+
+            let errorCode = errno
+            switch errorCode {
+            case EINTR:
+                continue
+            case EAGAIN, EWOULDBLOCK:
+                guard cliWaitForWritableFD(handle.fileDescriptor) else {
+                    return false
+                }
+                continue
+            case EPIPE:
+                switch onBrokenPipe {
+                case .exit(let code):
+                    // _exit skips atexit/stdio flush to match the default SIGPIPE termination this replaces.
+                    Darwin._exit(code)
+                case .ignore:
+                    return false
+                }
+            default:
+                return false
+            }
+        }
+
+        return true
     }
 }
 
@@ -14842,6 +14845,7 @@ struct CMUXCLI {
 @main
 struct CMUXTermMain {
     static func main() {
+        configureCLIStdioNoSIGPIPE()
         let cli = CMUXCLI(args: CommandLine.arguments)
         do {
             try cli.run()
