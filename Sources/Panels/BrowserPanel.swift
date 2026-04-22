@@ -2099,13 +2099,32 @@ final class BrowserPanel: Panel, ObservableObject {
       }
     })();
     """
-    private static func webContentFocusRestoreScript(fallbackStateJSON: String?) -> String {
+    private static func webContentFocusRestoreScript(
+        fallbackStateJSON: String?,
+        returnPayload: Bool = false
+    ) -> String {
         let fallbackStateLiteral = fallbackStateJSON ?? "null"
+        let returnPayloadLiteral = returnPayload ? "true" : "false"
         return """
     (() => {
       try {
         const nativeFallbackState = \(fallbackStateLiteral);
+        const shouldReturnPayload = \(returnPayloadLiteral);
         const stateIsValid = (state) => !!state && typeof state.id === "string" && !!state.id;
+        const response = (status, target = null) => {
+          if (!shouldReturnPayload) {
+            return status;
+          }
+          let selectionStart = -1;
+          let selectionEnd = -1;
+          if (target) {
+            try {
+              if (typeof target.selectionStart === "number") selectionStart = target.selectionStart;
+              if (typeof target.selectionEnd === "number") selectionEnd = target.selectionEnd;
+            } catch (_) {}
+          }
+          return { status, selectionStart, selectionEnd };
+        };
         const syncState = (state) => {
           window.__cmuxAddressBarFocusState = state;
           try {
@@ -2118,17 +2137,20 @@ final class BrowserPanel: Panel, ObservableObject {
         };
 
         const readState = () => {
+          if (stateIsValid(nativeFallbackState)) {
+            syncState(nativeFallbackState);
+            return nativeFallbackState;
+          }
           let state = window.__cmuxAddressBarFocusState;
           try {
-            if (!stateIsValid(state) && window.top && window.top.__cmuxAddressBarFocusState) {
-              state = window.top.__cmuxAddressBarFocusState;
+            if (stateIsValid(state)) {
+              return state;
+            }
+            if (window.top && stateIsValid(window.top.__cmuxAddressBarFocusState)) {
+              return window.top.__cmuxAddressBarFocusState;
             }
           } catch (_) {}
-          if (!stateIsValid(state) && stateIsValid(nativeFallbackState)) {
-            state = nativeFallbackState;
-            syncState(state);
-          }
-          return state;
+          return stateIsValid(state) ? state : null;
         };
 
         const clearState = () => {
@@ -2144,7 +2166,7 @@ final class BrowserPanel: Panel, ObservableObject {
 
         const state = readState();
         if (!state || typeof state.id !== "string" || !state.id) {
-          return "no_state";
+          return response("no_state");
         }
 
         const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
@@ -2183,7 +2205,7 @@ final class BrowserPanel: Panel, ObservableObject {
         const target = findTarget(document);
         if (!target) {
           clearState();
-          return "missing_target";
+          return response("missing_target");
         }
 
         try {
@@ -2199,7 +2221,7 @@ final class BrowserPanel: Panel, ObservableObject {
             (typeof target.matches === "function" && target.matches(":focus"));
         } catch (_) {}
         if (!focused) {
-          return "not_focused";
+          return response("not_focused", target);
         }
 
         if (
@@ -2211,9 +2233,9 @@ final class BrowserPanel: Panel, ObservableObject {
             target.setSelectionRange(state.selectionStart, state.selectionEnd);
           } catch (_) {}
         }
-        return "restored";
+        return response("restored", target);
       } catch (_) {
-        return "error";
+        return response("error");
       }
     })();
     """
@@ -2965,6 +2987,16 @@ final class BrowserPanel: Panel, ObservableObject {
                   self.isCurrentWebView(webView) else { return }
             self.captureWebContentFocusSnapshotIfNeeded(reason: "browserFindPreflight")
         }
+        webView.onRestoredWebContentNativeKeyPreflight = { [weak self, weak webView] in
+            guard let self,
+                  let webView,
+                  self.isCurrentWebView(webView),
+                  webView.window != nil,
+                  !webView.isHiddenOrHasHiddenAncestor else {
+                return false
+            }
+            return self.restoreStoredWebContentFocusSynchronouslyIfNeeded(in: webView)
+        }
         configureNavigationDelegateCallbacks()
         webView.navigationDelegate = navigationDelegate
         webView.uiDelegate = uiDelegate
@@ -2985,7 +3017,7 @@ final class BrowserPanel: Panel, ObservableObject {
                 guard let self, self.isCurrentWebView(webView, instanceID: boundWebViewInstanceID) else { return }
                 self.lastCapturedWebContentFocusStateJSON = nil
                 self.pendingBrowserFindPreflightFocusStateJSON = nil
-                (webView as? CmuxWebView)?.setRestoredWebContentTextInputFocusFallbackJSON(nil)
+                (webView as? CmuxWebView)?.disarmRestoredWebContentNativeKeyPreflight(reason: "navigationStart")
             }
         }
         navigationDelegate.didFinish = { [weak self] webView in
@@ -5343,7 +5375,7 @@ extension BrowserPanel {
     }
 
     func startFind() {
-        (webView as? CmuxWebView)?.disarmRestoredWebContentTextInputRepair(reason: "startFind")
+        (webView as? CmuxWebView)?.disarmRestoredWebContentNativeKeyPreflight(reason: "startFind")
         if searchState == nil || preferredFocusIntent != .findField {
             invalidateWebContentFocusRestoreAttempts()
             captureWebContentFocusSnapshotIfNeeded(reason: "startFind")
@@ -5396,14 +5428,6 @@ extension BrowserPanel {
             shouldRestoreWebContent: true,
             webViewInstanceID: webViewInstanceID
         )
-        if let cmuxWebView = webView as? CmuxWebView {
-            cmuxWebView.setRestoredWebContentTextInputFocusFallbackJSON(
-                Self.validatedWebContentFocusStateJSON(lastCapturedWebContentFocusStateJSON)
-            )
-            if cmuxWebView.hasRestorableWebContentTextInputFocus() {
-                cmuxWebView.armRestoredWebContentTextInputRepair(reason: "findDismiss.\(reason).pending")
-            }
-        }
         updateSubfocusState(.webView)
         searchState = nil
         drivePendingWebContentRestoreIfPossible(trigger: "findDismiss.\(reason)")
@@ -5580,7 +5604,7 @@ extension BrowserPanel {
 
     @discardableResult
     func requestAddressBarFocus() -> UUID {
-        (webView as? CmuxWebView)?.disarmRestoredWebContentTextInputRepair(reason: "addressBarFocus")
+        (webView as? CmuxWebView)?.disarmRestoredWebContentNativeKeyPreflight(reason: "addressBarFocus")
         clearPendingWebContentRestore()
         clearFindFieldSubfocus()
         beginSuppressWebViewFocusForAddressBar()
@@ -5930,16 +5954,16 @@ extension BrowserPanel {
                 self.noteWebViewFocused()
             }
             let cmuxWebView = self.webView as? CmuxWebView
-            cmuxWebView?.setRestoredWebContentTextInputFocusFallbackJSON(
-                Self.validatedWebContentFocusStateJSON(self.lastCapturedWebContentFocusStateJSON)
-            )
-            let hasRestorableTextInput = cmuxWebView?.hasRestorableWebContentTextInputFocus() ?? false
-            let shouldBridgeRestoredTextInput = hasWebViewResponder &&
-                (restored || reason.hasPrefix("findDismiss.") || hasRestorableTextInput)
-            if shouldBridgeRestoredTextInput {
-                cmuxWebView?.armRestoredWebContentTextInputRepair(reason: reason)
+            let hasTrackedWebContentFocusState =
+                Self.validatedWebContentFocusStateJSON(self.lastCapturedWebContentFocusStateJSON) != nil
+            let shouldArmNativeKeyPreflight =
+                hasWebViewResponder &&
+                restoreStoredDOMFocus &&
+                hasTrackedWebContentFocusState
+            if shouldArmNativeKeyPreflight {
+                cmuxWebView?.armRestoredWebContentNativeKeyPreflight(reason: reason)
             } else {
-                cmuxWebView?.disarmRestoredWebContentTextInputRepair(reason: "restoreNotReady.\(reason)")
+                cmuxWebView?.disarmRestoredWebContentNativeKeyPreflight(reason: "restoreNotReady.\(reason)")
             }
 #if DEBUG
             dlog(
@@ -5947,11 +5971,11 @@ extension BrowserPanel {
                 "reason=\(reason) restored=\(restored ? 1 : 0) " +
                 "webViewResponder=\(hasWebViewResponder ? 1 : 0) " +
                 "reacquired=\(reacquiredWebContentResponder ? 1 : 0) " +
-                "restorableTextInput=\(hasRestorableTextInput ? 1 : 0)"
+                "trackedFocusState=\(hasTrackedWebContentFocusState ? 1 : 0)"
             )
             self.debugLogWebContentFocusSnapshot(
                 event: "webContent.return.end",
-                detail: "reason=\(reason) restored=\(restored ? 1 : 0) webViewResponder=\(hasWebViewResponder ? 1 : 0) reacquired=\(reacquiredWebContentResponder ? 1 : 0) restorableTextInput=\(hasRestorableTextInput ? 1 : 0)"
+                detail: "reason=\(reason) restored=\(restored ? 1 : 0) webViewResponder=\(hasWebViewResponder ? 1 : 0) reacquired=\(reacquiredWebContentResponder ? 1 : 0) trackedFocusState=\(hasTrackedWebContentFocusState ? 1 : 0)"
             )
 #endif
             complete(restored)
@@ -6115,6 +6139,10 @@ extension BrowserPanel {
         return stateJSON
     }
 
+    private func validatedLastCapturedWebContentFocusStateJSON() -> String? {
+        Self.validatedWebContentFocusStateJSON(lastCapturedWebContentFocusStateJSON)
+    }
+
     private static func isBrowserFindPreflightCaptureReason(_ reason: String) -> Bool {
         reason == "browserFindPreflight" || reason == "appFindPreflight"
     }
@@ -6216,8 +6244,18 @@ extension BrowserPanel {
         error: Error?
     ) -> WebContentFocusRestoreStatus {
         if error != nil { return .error }
-        guard let raw = result as? String else { return .error }
-        return WebContentFocusRestoreStatus(rawValue: raw) ?? .error
+        if let raw = result as? String {
+            return WebContentFocusRestoreStatus(rawValue: raw) ?? .error
+        }
+        if let payload = result as? [String: Any],
+           let raw = payload["status"] as? String {
+            return WebContentFocusRestoreStatus(rawValue: raw) ?? .error
+        }
+        if let payload = result as? [String: AnyObject],
+           let raw = payload["status"] as? String {
+            return WebContentFocusRestoreStatus(rawValue: raw) ?? .error
+        }
+        return .error
     }
 
     func invalidateWebContentFocusRestoreAttempts() {
@@ -6233,11 +6271,39 @@ extension BrowserPanel {
     func restoreStoredWebContentFocusIfNeeded(completion: @escaping (Bool) -> Void) {
         restoreStoredTrackedWebContentFocusIfNeeded(
             script: Self.webContentFocusRestoreScript(
-                fallbackStateJSON: Self.validatedWebContentFocusStateJSON(lastCapturedWebContentFocusStateJSON)
+                fallbackStateJSON: validatedLastCapturedWebContentFocusStateJSON()
             ),
             logPrefix: "browser.focus.webContent.restore",
             completion: completion
         )
+    }
+
+    @discardableResult
+    private func restoreStoredWebContentFocusSynchronouslyIfNeeded(in webView: CmuxWebView) -> Bool {
+        let evaluation = webView.runBrowserFocusJavaScriptSynchronously(
+            script: Self.webContentFocusRestoreScript(
+                fallbackStateJSON: validatedLastCapturedWebContentFocusStateJSON(),
+                returnPayload: true
+            )
+        )
+        let status = Self.webContentFocusRestoreStatus(from: evaluation.result, error: evaluation.error)
+#if DEBUG
+        let payload = evaluation.result as? [String: Any]
+        let selectionStart = (payload?["selectionStart"] as? NSNumber)?.intValue ?? -1
+        let selectionEnd = (payload?["selectionEnd"] as? NSNumber)?.intValue ?? -1
+        if let error = evaluation.error {
+            dlog(
+                "browser.focus.webContent.restore.sync panel=\(id.uuidString.prefix(5)) " +
+                "status=\(status.rawValue) message=\(error.localizedDescription)"
+            )
+        } else {
+            dlog(
+                "browser.focus.webContent.restore.sync panel=\(id.uuidString.prefix(5)) " +
+                "status=\(status.rawValue) selection=\(selectionStart):\(selectionEnd)"
+            )
+        }
+#endif
+        return status == .restored
     }
 
     private func restoreStoredTrackedWebContentFocusIfNeeded(

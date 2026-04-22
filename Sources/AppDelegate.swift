@@ -2120,6 +2120,22 @@ private func cmuxOwningGhosttyView(for view: NSView) -> GhosttyNSView? {
     return nil
 }
 
+private func cmuxOwningBrowserWebView(for view: NSView) -> CmuxWebView? {
+    if let webView = view as? CmuxWebView {
+        return webView
+    }
+
+    var current: NSView? = view.superview
+    while let candidate = current {
+        if let webView = candidate as? CmuxWebView {
+            return webView
+        }
+        current = candidate.superview
+    }
+
+    return nil
+}
+
 #if DEBUG
 func browserZoomShortcutTraceCandidate(
     flags: NSEvent.ModifierFlags,
@@ -9094,9 +9110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         updates["browserPageURL"] = browserPanel.preferredURLStringForOmnibar() ?? ""
         if let cmuxWebView = browserPanel.webView as? CmuxWebView {
             updates["webViewRestoredTextRepairArmed"] =
-                cmuxWebView.debugRestoredWebContentTextInputRepairArmed ? "true" : "false"
+                cmuxWebView.debugRestoredWebContentNativeKeyPreflightArmed ? "true" : "false"
             updates["webViewRestoredTextRepairLastReason"] =
-                cmuxWebView.debugRestoredWebContentTextInputRepairLastReason
+                cmuxWebView.debugRestoredWebContentNativeKeyPreflightLastReason
         } else {
             updates["webViewRestoredTextRepairArmed"] = "false"
             updates["webViewRestoredTextRepairLastReason"] = ""
@@ -14852,9 +14868,13 @@ private extension NSWindow {
             cmuxFirstResponderGuardContextWindowNumber = previousContextWindowNumber
         }
 
+        let focusedBrowserWebView =
+            (self.firstResponder as? CmuxWebView) ??
+            (self.firstResponder as? NSView).flatMap(cmuxOwningBrowserWebView(for:))
+
         if event.type == .keyDown,
-           let webView = self.firstResponder as? CmuxWebView,
-           webView.handleRestoredWebContentTextInputBeforeWindowDispatch(event) {
+           let webView = focusedBrowserWebView,
+           webView.handleRestoredWebContentNativeKeyPreflightBeforeWindowDispatch(event) {
             return
         }
 

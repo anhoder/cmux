@@ -358,6 +358,7 @@ final class CmuxWebView: WKWebView {
     /// Bypasses createWebViewWith so the link opens as a tab, not a popup.
     var onContextMenuOpenLinkInNewTab: ((URL) -> Void)?
     var onBrowserFindCommandPreflight: (() -> Void)?
+    var onRestoredWebContentNativeKeyPreflight: (() -> Bool)?
     var contextMenuLinkURLProvider: ((CmuxWebView, NSPoint, @escaping (URL?) -> Void) -> Void)?
     var contextMenuDefaultBrowserOpener: ((URL) -> Bool)?
     /// Guard against background panes stealing first responder (e.g. page autofocus).
@@ -365,9 +366,8 @@ final class CmuxWebView: WKWebView {
     var allowsFirstResponderAcquisition: Bool = true
     private var pointerFocusAllowanceDepth: Int = 0
     private var programmaticFocusAllowanceDepth: Int = 0
-    private var restoredWebContentTextInputRepairArmed = false
-    private var restoredWebContentTextInputRepairLastReason = ""
-    private var restoredWebContentTextInputFocusFallbackJSON: String?
+    private var restoredWebContentNativeKeyPreflightArmed = false
+    private var restoredWebContentNativeKeyPreflightLastReason = ""
     private var pasteAsPlainTextTargetAvailable = false
     private var lastPasteAsPlainTextPerformKeyEventTimestamp: TimeInterval?
     var allowsFirstResponderAcquisitionEffective: Bool {
@@ -377,11 +377,11 @@ final class CmuxWebView: WKWebView {
     }
     var debugPointerFocusAllowanceDepth: Int { pointerFocusAllowanceDepth }
     var debugProgrammaticFocusAllowanceDepth: Int { programmaticFocusAllowanceDepth }
-    var debugRestoredWebContentTextInputRepairArmed: Bool {
-        restoredWebContentTextInputRepairArmed
+    var debugRestoredWebContentNativeKeyPreflightArmed: Bool {
+        restoredWebContentNativeKeyPreflightArmed
     }
-    var debugRestoredWebContentTextInputRepairLastReason: String {
-        restoredWebContentTextInputRepairLastReason
+    var debugRestoredWebContentNativeKeyPreflightLastReason: String {
+        restoredWebContentNativeKeyPreflightLastReason
     }
 
     override init(frame: NSRect, configuration: WKWebViewConfiguration) {
@@ -532,29 +532,24 @@ final class CmuxWebView: WKWebView {
         }
     }
 
-    func armRestoredWebContentTextInputRepair(reason: String) {
-        restoredWebContentTextInputRepairArmed = true
-        restoredWebContentTextInputRepairLastReason = "arm.\(reason)"
+    func armRestoredWebContentNativeKeyPreflight(reason: String) {
+        restoredWebContentNativeKeyPreflightArmed = true
+        restoredWebContentNativeKeyPreflightLastReason = "arm.\(reason)"
 #if DEBUG
         dlog(
-            "browser.focus.textRepair.arm web=\(ObjectIdentifier(self)) " +
+            "browser.focus.nativeKeyPreflight.arm web=\(ObjectIdentifier(self)) " +
             "reason=\(reason)"
         )
 #endif
     }
 
-    func setRestoredWebContentTextInputFocusFallbackJSON(_ stateJSON: String?) {
-        restoredWebContentTextInputFocusFallbackJSON = stateJSON
-    }
-
-    func disarmRestoredWebContentTextInputRepair(reason: String) {
-        restoredWebContentTextInputRepairLastReason = "disarm.\(reason)"
-        restoredWebContentTextInputFocusFallbackJSON = nil
-        guard restoredWebContentTextInputRepairArmed else { return }
-        restoredWebContentTextInputRepairArmed = false
+    func disarmRestoredWebContentNativeKeyPreflight(reason: String) {
+        restoredWebContentNativeKeyPreflightLastReason = "disarm.\(reason)"
+        guard restoredWebContentNativeKeyPreflightArmed else { return }
+        restoredWebContentNativeKeyPreflightArmed = false
 #if DEBUG
         dlog(
-            "browser.focus.textRepair.disarm web=\(ObjectIdentifier(self)) " +
+            "browser.focus.nativeKeyPreflight.disarm web=\(ObjectIdentifier(self)) " +
             "reason=\(reason)"
         )
 #endif
@@ -645,251 +640,16 @@ final class CmuxWebView: WKWebView {
     func captureWebContentFocusSnapshotSynchronously(
         script: String
     ) -> (completed: Bool, result: Any?, error: Error?) {
+        runBrowserFocusJavaScriptSynchronously(script: script)
+    }
+
+    func runBrowserFocusJavaScriptSynchronously(
+        script: String
+    ) -> (completed: Bool, result: Any?, error: Error?) {
         evaluateJavaScriptSynchronously(script)
     }
 
-    private static func restorableTextInputFocusScript(fallbackStateJSON: String?) -> String {
-        let fallbackStateLiteral = fallbackStateJSON ?? "null"
-        return """
-    (() => {
-      try {
-        const nativeFallbackState = \(fallbackStateLiteral);
-        const stateIsValid = (state) => !!state && typeof state.id === "string" && !!state.id;
-        const syncState = (state) => {
-          window.__cmuxAddressBarFocusState = state;
-          try {
-            if (window.top && window.top !== window) {
-              window.top.postMessage({ cmuxAddressBarFocusState: state }, "*");
-            } else if (window.top) {
-              window.top.__cmuxAddressBarFocusState = state;
-            }
-          } catch (_) {}
-        };
-        const isEditable = (el) => {
-          if (!el) return false;
-          const tag = (el.tagName || "").toLowerCase();
-          const type = (el.type || "").toLowerCase();
-          return tag === "textarea" || (tag === "input" && type !== "hidden");
-        };
-        const activeEditable = (doc) => {
-          if (!doc) return null;
-          const active = doc.activeElement;
-          if (!active || !active.isConnected) return null;
-          const tag = (active.tagName || "").toLowerCase();
-          if (tag === "iframe" || tag === "frame") {
-            try {
-              const nested = activeEditable(active.contentDocument);
-              if (nested) return nested;
-            } catch (_) {}
-          }
-          return isEditable(active) ? active : null;
-        };
-        const readState = () => {
-          let state = window.__cmuxAddressBarFocusState;
-          try {
-            if (!stateIsValid(state) && window.top && window.top.__cmuxAddressBarFocusState) {
-              state = window.top.__cmuxAddressBarFocusState;
-            }
-          } catch (_) {}
-          if (!stateIsValid(state) && stateIsValid(nativeFallbackState)) {
-            state = nativeFallbackState;
-            syncState(state);
-          }
-          return state;
-        };
-        const targetFromStoredState = (doc) => {
-          const state = readState();
-          if (!doc || !state || typeof state.id !== "string" || !state.id) return null;
-          const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
-          const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
-          const findTarget = (rootDoc) => {
-            if (!rootDoc) return null;
-            const direct = rootDoc.querySelector(selector);
-            if (direct && direct.isConnected && isEditable(direct)) return direct;
-            if (stateElementId) {
-              const byElementId = rootDoc.getElementById(stateElementId);
-              if (byElementId && byElementId.isConnected && isEditable(byElementId)) return byElementId;
-            }
-            const legacyByStateId = rootDoc.getElementById(state.id);
-            if (legacyByStateId && legacyByStateId.isConnected && isEditable(legacyByStateId)) {
-              return legacyByStateId;
-            }
-            const frames = rootDoc.querySelectorAll("iframe,frame");
-            for (let i = 0; i < frames.length; i += 1) {
-              try {
-                const nested = findTarget(frames[i].contentDocument);
-                if (nested) return nested;
-              } catch (_) {}
-            }
-            return null;
-          };
-          return findTarget(doc);
-        };
-        if (activeEditable(document)) {
-          return { ok: true, source: "active" };
-        }
-        if (targetFromStoredState(document)) {
-          return { ok: true, source: "stored" };
-        }
-        return { ok: false, reason: "missing_editable" };
-      } catch (_) {
-        return { ok: false, reason: "error" };
-      }
-    })();
-    """
-    }
-
-    private static func restoredTextInputInsertScript(text: String, fallbackStateJSON: String?) -> String? {
-        guard let data = try? JSONSerialization.data(withJSONObject: [text], options: []),
-              let arrayLiteral = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-        let fallbackStateLiteral = fallbackStateJSON ?? "null"
-        return """
-        (() => {
-          const text = \(arrayLiteral)[0];
-          try {
-            const nativeFallbackState = \(fallbackStateLiteral);
-            const stateIsValid = (state) => !!state && typeof state.id === "string" && !!state.id;
-            const syncState = (state) => {
-              window.__cmuxAddressBarFocusState = state;
-              try {
-                if (window.top && window.top !== window) {
-                  window.top.postMessage({ cmuxAddressBarFocusState: state }, "*");
-                } else if (window.top) {
-                  window.top.__cmuxAddressBarFocusState = state;
-                }
-              } catch (_) {}
-            };
-            const isTextInput = (el) => {
-              if (!el) return false;
-              const tag = (el.tagName || "").toLowerCase();
-              const type = (el.type || "").toLowerCase();
-              return tag === "textarea" || (tag === "input" && type !== "hidden");
-            };
-            const activeEditable = (doc) => {
-              if (!doc) return null;
-              const active = doc.activeElement;
-              if (!active || !active.isConnected) return null;
-              const tag = (active.tagName || "").toLowerCase();
-              if (tag === "iframe" || tag === "frame") {
-                try {
-                  const nested = activeEditable(active.contentDocument);
-                  if (nested) return nested;
-                } catch (_) {}
-              }
-              if (isTextInput(active)) return active;
-              return null;
-            };
-            const readState = () => {
-              let state = window.__cmuxAddressBarFocusState;
-              try {
-                if (!stateIsValid(state) && window.top && window.top.__cmuxAddressBarFocusState) {
-                  state = window.top.__cmuxAddressBarFocusState;
-                }
-              } catch (_) {}
-              if (!stateIsValid(state) && stateIsValid(nativeFallbackState)) {
-                state = nativeFallbackState;
-                syncState(state);
-              }
-              return state;
-            };
-            const targetFromStoredState = (doc) => {
-              const state = readState();
-              if (!doc || !state || typeof state.id !== "string" || !state.id) return null;
-              const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
-              const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
-              const findTarget = (rootDoc) => {
-                if (!rootDoc) return null;
-                const direct = rootDoc.querySelector(selector);
-                if (direct && direct.isConnected && isTextInput(direct)) return direct;
-                if (stateElementId) {
-                  const byElementId = rootDoc.getElementById(stateElementId);
-                  if (byElementId && byElementId.isConnected && isTextInput(byElementId)) return byElementId;
-                }
-                const legacyByStateId = rootDoc.getElementById(state.id);
-                if (legacyByStateId && legacyByStateId.isConnected && isTextInput(legacyByStateId)) {
-                  return legacyByStateId;
-                }
-                const frames = rootDoc.querySelectorAll("iframe,frame");
-                for (let i = 0; i < frames.length; i += 1) {
-                  try {
-                    const nested = findTarget(frames[i].contentDocument);
-                    if (nested) return nested;
-                  } catch (_) {}
-                }
-                return null;
-              };
-              const target = findTarget(doc);
-              if (!target) return null;
-              if (
-                typeof state.selectionStart === "number" &&
-                typeof state.selectionEnd === "number" &&
-                typeof target.setSelectionRange === "function"
-              ) {
-                try {
-                  target.setSelectionRange(state.selectionStart, state.selectionEnd);
-                } catch (_) {}
-              }
-              return target;
-            };
-            const target = activeEditable(document) || targetFromStoredState(document);
-            if (!target) return { inserted: false, reason: "missing_active_editable" };
-            if (target.ownerDocument.activeElement !== target) {
-              try {
-                target.focus({ preventScroll: true });
-              } catch (_) {
-                try { target.focus(); } catch (_) {}
-              }
-            }
-            if (target.ownerDocument.activeElement !== target) {
-              return { inserted: false, reason: "not_focused" };
-            }
-            const start = typeof target.selectionStart === "number" ? target.selectionStart : String(target.value || "").length;
-            const end = typeof target.selectionEnd === "number" ? target.selectionEnd : start;
-            const makeInputEvent = (name, cancelable) => {
-              try {
-                return new InputEvent(name, {
-                  bubbles: true,
-                  cancelable,
-                  composed: true,
-                  inputType: "insertText",
-                  data: text
-                });
-              } catch (_) {
-                const event = document.createEvent("Event");
-                event.initEvent(name, true, cancelable);
-                return event;
-              }
-            };
-            if (!target.dispatchEvent(makeInputEvent("beforeinput", true))) {
-              return { inserted: false, reason: "beforeinput_prevented" };
-            }
-            if (typeof target.setRangeText === "function") {
-              target.setRangeText(text, start, end, "end");
-            } else {
-              const value = String(target.value || "");
-              target.value = value.slice(0, start) + text + value.slice(end);
-              const caret = start + text.length;
-              if (typeof target.setSelectionRange === "function") {
-                target.setSelectionRange(caret, caret);
-              }
-            }
-            target.dispatchEvent(makeInputEvent("input", false));
-            return {
-              inserted: true,
-              value: String(target.value || ""),
-              selectionStart: typeof target.selectionStart === "number" ? target.selectionStart : -1,
-              selectionEnd: typeof target.selectionEnd === "number" ? target.selectionEnd : -1
-            };
-          } catch (_) {
-            return { inserted: false, reason: "error" };
-          }
-        })();
-        """
-    }
-
-    private static func restoredTextInputRepairText(for event: NSEvent) -> String? {
+    private static func plainTextCharacterForNativeKeyPreflight(_ event: NSEvent) -> String? {
         let flags = event.modifierFlags
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.numericPad, .function, .capsLock])
@@ -900,111 +660,30 @@ final class CmuxWebView: WKWebView {
         return text
     }
 
-    private static func restoredTextInputRepairText(from insertString: Any) -> String? {
-        let text: String
-        if let string = insertString as? String {
-            text = string
-        } else if let attributed = insertString as? NSAttributedString {
-            text = attributed.string
-        } else {
-            return nil
-        }
-
-        guard !text.isEmpty else { return nil }
-        guard text.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
-        return text
-    }
-
-    func hasRestorableWebContentTextInputFocus() -> Bool {
-        let evaluation = evaluateJavaScriptSynchronously(
-            Self.restorableTextInputFocusScript(
-                fallbackStateJSON: restoredWebContentTextInputFocusFallbackJSON
-            )
-        )
-        let payload = evaluation.result as? [String: Any]
-        let payloadOK = (payload?["ok"] as? Bool) ??
-            (payload?["ok"] as? NSNumber)?.boolValue ??
-            false
-        let ok = evaluation.completed &&
-            evaluation.error == nil &&
-            payloadOK
+    private func performRestoredWebContentNativeKeyPreflightIfNeeded(event: NSEvent) -> String? {
+        guard restoredWebContentNativeKeyPreflightArmed else { return nil }
+        guard Self.plainTextCharacterForNativeKeyPreflight(event) != nil else { return nil }
+        let restored = onRestoredWebContentNativeKeyPreflight?() ?? false
 #if DEBUG
-        let source = (payload?["source"] as? String) ?? "nil"
-        let reason = (payload?["reason"] as? String) ?? "nil"
-        let errorDescription = evaluation.completed
-            ? (evaluation.error?.localizedDescription ?? "nil")
-            : "timeout"
         dlog(
-            "browser.focus.textRepair.restorable web=\(ObjectIdentifier(self)) " +
-            "ok=\(ok ? 1 : 0) source=\(source) reason=\(reason) error=\(errorDescription)"
+            "browser.focus.nativeKeyPreflight.run web=\(ObjectIdentifier(self)) " +
+            "restored=\(restored ? 1 : 0)"
         )
 #endif
-        return ok
-    }
-
-    private func performRestoredTextInputRepairIfNeeded(event: NSEvent) -> String? {
-        guard restoredWebContentTextInputRepairArmed else { return nil }
-        // WebKit may apply the native edit after keyDown returns. Do not synthesize
-        // the same printable key from this path, or the page can receive it twice.
-        disarmRestoredWebContentTextInputRepair(reason: "nativeKeyForwarded")
+        // After the DOM focus/caret preflight runs, let WebKit handle the native key exactly once.
+        disarmRestoredWebContentNativeKeyPreflight(reason: "nativeKeyForwarded")
         super.keyDown(with: event)
-        return "focusRepairNativeForwarded"
-    }
-
-    private func bridgeRestoredTextInputRepairToActiveElement(text: String) -> String? {
-        guard let script = Self.restoredTextInputInsertScript(
-            text: text,
-            fallbackStateJSON: restoredWebContentTextInputFocusFallbackJSON
-        ) else {
-            disarmRestoredWebContentTextInputRepair(reason: "bridgeScriptBuildFailed")
-            return nil
-        }
-
-        let insert = evaluateJavaScriptSynchronously(script)
-        let inserted = insert.completed &&
-            insert.error == nil &&
-            ((insert.result as? [String: Any])?["inserted"] as? Bool == true)
-        let reason = ((insert.result as? [String: Any])?["reason"] as? String) ?? "nil"
-#if DEBUG
-        let errorDescription = insert.completed
-            ? (insert.error?.localizedDescription ?? "nil")
-            : "timeout"
-        dlog(
-            "browser.focus.textRepair.bridge web=\(ObjectIdentifier(self)) " +
-            "inserted=\(inserted ? 1 : 0) reason=\(reason) error=\(errorDescription)"
-        )
-#endif
-        if inserted {
-            disarmRestoredWebContentTextInputRepair(reason: "bridgeInserted")
-            return "focusRepairBridgeInserted"
-        }
-
-        if !insert.completed || insert.error != nil || !inserted {
-            if hasRestorableWebContentTextInputFocus() {
-                restoredWebContentTextInputRepairLastReason = "bridgeRetained.\(reason)"
-            } else {
-                disarmRestoredWebContentTextInputRepair(reason: "bridgeInsertFailed.\(reason)")
-            }
-            return nil
-        }
-        return nil
-    }
-
-    private func bridgeRestoredTextInputRepairIfWrapperIsFirstResponder(text: String) -> String? {
-        guard restoredWebContentTextInputRepairArmed else { return nil }
-        guard window?.firstResponder === self else { return nil }
-        return bridgeRestoredTextInputRepairToActiveElement(text: text)
+        return restored ? "nativeKeyForwarded.restored" : "nativeKeyForwarded.noRestore"
     }
 
     @discardableResult
-    func handleRestoredWebContentTextInputBeforeWindowDispatch(_ event: NSEvent) -> Bool {
-        guard Self.restoredTextInputRepairText(for: event) != nil,
-              let repairRoute = performRestoredTextInputRepairIfNeeded(event: event) else {
+    func handleRestoredWebContentNativeKeyPreflightBeforeWindowDispatch(_ event: NSEvent) -> Bool {
+        guard let repairRoute = performRestoredWebContentNativeKeyPreflightIfNeeded(event: event) else {
             return false
         }
 #if DEBUG
         dlog(
-            "browser.focus.textRepair.windowDispatch web=\(ObjectIdentifier(self)) " +
+            "browser.focus.nativeKeyPreflight.windowDispatch web=\(ObjectIdentifier(self)) " +
             "route=\(repairRoute)"
         )
 #endif
@@ -1223,8 +902,7 @@ final class CmuxWebView: WKWebView {
             return
         }
 
-        if Self.restoredTextInputRepairText(for: event) != nil,
-           let repairRoute = performRestoredTextInputRepairIfNeeded(event: event) {
+        if let repairRoute = performRestoredWebContentNativeKeyPreflightIfNeeded(event: event) {
 #if DEBUG
             route = repairRoute
 #endif
@@ -1237,7 +915,6 @@ final class CmuxWebView: WKWebView {
     override func insertText(_ insertString: Any) {
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
-        var route = "super"
         defer {
             let event = NSApp.currentEvent
             if let event {
@@ -1245,19 +922,11 @@ final class CmuxWebView: WKWebView {
                     path: "browser.web.insertText",
                     startedAt: typingTimingStart,
                     event: event,
-                    extra: "route=\(route)"
+                    extra: "route=super"
                 )
             }
         }
 #endif
-        if let repairText = Self.restoredTextInputRepairText(from: insertString),
-           let repairRoute = bridgeRestoredTextInputRepairIfWrapperIsFirstResponder(text: repairText) {
-#if DEBUG
-            route = repairRoute
-#endif
-            return
-        }
-
         super.insertText(insertString)
     }
 
@@ -1277,7 +946,7 @@ final class CmuxWebView: WKWebView {
             "pointerDepth=\(pointerFocusAllowanceDepth) win=\(windowNumber) fr=\(firstResponderType)"
         )
 #endif
-        disarmRestoredWebContentTextInputRepair(reason: "mouseDown")
+        disarmRestoredWebContentNativeKeyPreflight(reason: "mouseDown")
         NotificationCenter.default.post(name: .webViewDidReceiveClick, object: self)
         withPointerFocusAllowance {
             super.mouseDown(with: event)
