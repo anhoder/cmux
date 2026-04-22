@@ -2796,10 +2796,9 @@ struct ContentView: View {
         titlebarPadding: CGFloat,
         hostingSafeAreaTop: CGFloat
     ) -> CGFloat {
-        if isMinimalMode {
-            return isFullScreen ? 0 : -titlebarPadding
-        }
-        return titlebarPadding
+        guard isMinimalMode else { return titlebarPadding }
+        guard !isFullScreen else { return 0 }
+        return -max(0, min(titlebarPadding, hostingSafeAreaTop))
     }
 
     private var terminalContent: some View {
@@ -3802,9 +3801,15 @@ struct ContentView: View {
             // get interpreted as window drags.
             let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
             let nextPadding = max(28, min(72, computedTitlebarHeight))
+            let nextSafeAreaTop = max(0, window.contentView?.safeAreaInsets.top ?? 0)
             if abs(titlebarPadding - nextPadding) > 0.5 {
                 DispatchQueue.main.async {
                     titlebarPadding = nextPadding
+                }
+            }
+            if abs(hostingSafeAreaTop - nextSafeAreaTop) > 0.5 {
+                DispatchQueue.main.async {
+                    hostingSafeAreaTop = nextSafeAreaTop
                 }
             }
 #if DEBUG
