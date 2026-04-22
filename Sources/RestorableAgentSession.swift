@@ -54,16 +54,22 @@ fileprivate func shellSingleQuoted(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
-fileprivate func isOpenCodeInternalWorkerArgument(_ value: String) -> Bool {
-    let normalized = value.replacingOccurrences(of: "\\", with: "/")
-    return normalized.contains("/$bunfs/") &&
-        normalized.contains("/src/cli/cmd/tui/worker.js")
+private enum OpenCodeResumeArgumentFilter {
+    static func stripInternalWorkerArguments(from args: [String]) -> [String] {
+        args.filter { !isInternalWorkerArgument($0) }
+    }
+
+    private static func isInternalWorkerArgument(_ value: String) -> Bool {
+        let normalized = value.replacingOccurrences(of: "\\", with: "/")
+        return normalized.contains("/$bunfs/") &&
+            normalized.contains("/src/cli/cmd/tui/worker.js")
+    }
 }
 
 private struct AgentResumeOptionPolicy {
     let valueOptions: Set<String>
     let optionalValueOptions: Set<String>
-    let variadicOptions: Set<String>
+    let greedyValueOptions: Set<String>
     let nonRestorableCommands: Set<String>
     let droppedOptions: Set<String>
     let droppedOptionPrefixes: [String]
@@ -76,7 +82,7 @@ private struct AgentResumeOptionPolicy {
     init(
         valueOptions: Set<String>,
         optionalValueOptions: Set<String> = [],
-        variadicOptions: Set<String> = [],
+        greedyValueOptions: Set<String> = [],
         nonRestorableCommands: Set<String>,
         droppedOptions: Set<String> = [],
         droppedOptionPrefixes: [String] = [],
@@ -88,7 +94,7 @@ private struct AgentResumeOptionPolicy {
     ) {
         self.valueOptions = valueOptions
         self.optionalValueOptions = optionalValueOptions
-        self.variadicOptions = variadicOptions
+        self.greedyValueOptions = greedyValueOptions
         self.nonRestorableCommands = nonRestorableCommands
         self.droppedOptions = droppedOptions
         self.droppedOptionPrefixes = droppedOptionPrefixes
@@ -101,8 +107,10 @@ private struct AgentResumeOptionPolicy {
 }
 
 private enum AgentResumeSessionPlacement {
-    case afterPrefix([String])
-    case afterPreserved([String])
+    /// Emit fixed prefix tokens before the session id, then append preserved launch options.
+    case afterPrefix(prefixBeforeSessionId: [String])
+    /// Emit fixed prefix tokens before preserved launch options, then append the session id.
+    case afterPreserved(prefixBeforePreserved: [String])
 
     func build(executable: String, leadingSubcommand: String?, sessionId: String, preserved: [String]) -> [String] {
         var result = [executable]
@@ -111,12 +119,12 @@ private enum AgentResumeSessionPlacement {
         }
 
         switch self {
-        case .afterPrefix(let prefix):
-            result.append(contentsOf: prefix)
+        case .afterPrefix(let prefixBeforeSessionId):
+            result.append(contentsOf: prefixBeforeSessionId)
             result.append(sessionId)
             result.append(contentsOf: preserved)
-        case .afterPreserved(let prefix):
-            result.append(contentsOf: prefix)
+        case .afterPreserved(let prefixBeforePreserved):
+            result.append(contentsOf: prefixBeforePreserved)
             result.append(contentsOf: preserved)
             result.append(sessionId)
         }
@@ -188,7 +196,7 @@ private extension RestorableAgentKind {
                         "-w"
                     ],
                     optionalValueOptions: ["--debug"],
-                    variadicOptions: [
+                    greedyValueOptions: [
                         "--add-dir",
                         "--allowedTools",
                         "--allowed-tools",
@@ -246,14 +254,14 @@ private extension RestorableAgentKind {
                 defaultInvocation: AgentResumeInvocationSpec(
                     fallbackExecutable: "claude",
                     leadingSubcommand: nil,
-                    sessionPlacement: .afterPrefix(["--resume"])
+                    sessionPlacement: .afterPrefix(prefixBeforeSessionId: ["--resume"])
                 ),
                 launcherOverrides: [
                     "claudeTeams": .use(
                         AgentResumeInvocationSpec(
                             fallbackExecutable: "cmux",
                             leadingSubcommand: "claude-teams",
-                            sessionPlacement: .afterPrefix(["--resume"])
+                            sessionPlacement: .afterPrefix(prefixBeforeSessionId: ["--resume"])
                         )
                     ),
                     "omx": .unsupported,
@@ -291,7 +299,7 @@ private extension RestorableAgentKind {
                         "--enable",
                         "--disable"
                     ],
-                    variadicOptions: ["--image", "-i", "--add-dir"],
+                    greedyValueOptions: ["--image", "-i"],
                     nonRestorableCommands: [
                         "exec",
                         "e",
@@ -322,7 +330,7 @@ private extension RestorableAgentKind {
                 defaultInvocation: AgentResumeInvocationSpec(
                     fallbackExecutable: "codex",
                     leadingSubcommand: nil,
-                    sessionPlacement: .afterPreserved(["resume"])
+                    sessionPlacement: .afterPreserved(prefixBeforePreserved: ["resume"])
                 ),
                 launcherOverrides: [
                     "omx": .unsupported,
@@ -346,7 +354,7 @@ private extension RestorableAgentKind {
                         "--prompt",
                         "--agent"
                     ],
-                    variadicOptions: ["--cors"],
+                    greedyValueOptions: ["--cors"],
                     nonRestorableCommands: [
                         "completion",
                         "acp",
@@ -385,21 +393,19 @@ private extension RestorableAgentKind {
                         "--prompt="
                     ],
                     preserveFirstPositional: true,
-                    sanitizeArguments: { args in
-                        args.filter { !isOpenCodeInternalWorkerArgument($0) }
-                    }
+                    sanitizeArguments: OpenCodeResumeArgumentFilter.stripInternalWorkerArguments(from:)
                 ),
                 defaultInvocation: AgentResumeInvocationSpec(
                     fallbackExecutable: "opencode",
                     leadingSubcommand: nil,
-                    sessionPlacement: .afterPrefix(["--session"])
+                    sessionPlacement: .afterPrefix(prefixBeforeSessionId: ["--session"])
                 ),
                 launcherOverrides: [
                     "omo": .use(
                         AgentResumeInvocationSpec(
                             fallbackExecutable: "cmux",
                             leadingSubcommand: "omo",
-                            sessionPlacement: .afterPrefix(["--session"])
+                            sessionPlacement: .afterPrefix(prefixBeforeSessionId: ["--session"])
                         )
                     ),
                     "omx": .unsupported,
@@ -454,6 +460,8 @@ private enum AgentResumeCommandBuilder {
         launchCommand: AgentLaunchCommandSnapshot?
     ) -> [String]? {
         let spec = kind.resumeProviderSpec
+        // Unknown launchers intentionally inherit the provider default until a new launcher
+        // is modeled explicitly as an override or marked unsupported.
         let launcherBehavior = launchCommand?.launcher.flatMap { spec.launcherOverrides[$0] } ?? .use(spec.defaultInvocation)
         guard case .use(let invocation) = launcherBehavior else {
             return nil
@@ -538,7 +546,7 @@ private enum AgentResumeCommandBuilder {
                     index: index,
                     valueOptions: policy.valueOptions,
                     optionalValueOptions: policy.optionalValueOptions,
-                    variadicOptions: policy.variadicOptions
+                    greedyValueOptions: policy.greedyValueOptions
                 )
                 continue
             }
@@ -549,7 +557,7 @@ private enum AgentResumeCommandBuilder {
                     index: index,
                     valueOptions: policy.valueOptions,
                     optionalValueOptions: policy.optionalValueOptions,
-                    variadicOptions: policy.variadicOptions
+                    greedyValueOptions: policy.greedyValueOptions
                 )
                 continue
             }
@@ -559,7 +567,7 @@ private enum AgentResumeCommandBuilder {
                 index: index,
                 valueOptions: policy.valueOptions,
                 optionalValueOptions: policy.optionalValueOptions,
-                variadicOptions: policy.variadicOptions
+                greedyValueOptions: policy.greedyValueOptions
             )
             result.append(contentsOf: args[index..<min(args.count, index + width)])
             index += width
@@ -579,7 +587,7 @@ private enum AgentResumeCommandBuilder {
         index: Int,
         valueOptions: Set<String>,
         optionalValueOptions: Set<String>,
-        variadicOptions: Set<String>
+        greedyValueOptions: Set<String>
     ) -> Int {
         let arg = args[index]
         if arg.contains("=") {
@@ -598,7 +606,7 @@ private enum AgentResumeCommandBuilder {
         guard valueOptions.contains(arg), index + 1 < args.count else {
             return 1
         }
-        if variadicOptions.contains(arg) {
+        if greedyValueOptions.contains(arg) {
             var end = index + 1
             while end < args.count, !args[end].hasPrefix("-") {
                 end += 1
