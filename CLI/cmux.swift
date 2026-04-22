@@ -71,6 +71,23 @@ private func cliExecFailureErrno(_ body: () -> Void) -> Int32 {
     }
 }
 
+private func cliWaitForWritableFD(_ fd: Int32) -> Bool {
+    var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+    while true {
+        let result = poll(&descriptor, 1, -1)
+        if result > 0 {
+            return (descriptor.revents & Int16(POLLNVAL)) == 0
+        }
+        if result == 0 {
+            return false
+        }
+        if errno == EINTR {
+            continue
+        }
+        return false
+    }
+}
+
 // Route CLI stdio through write(2) so broken pipes never surface as NSFileHandle exceptions.
 @discardableResult
 private func cliWrite(_ data: Data, to handle: FileHandle, onBrokenPipe: CLIBrokenPipeDisposition) -> Bool {
@@ -94,7 +111,12 @@ private func cliWrite(_ data: Data, to handle: FileHandle, onBrokenPipe: CLIBrok
 
                 let errorCode = errno
                 switch errorCode {
-                case EINTR, EAGAIN, EWOULDBLOCK:
+                case EINTR:
+                    continue
+                case EAGAIN, EWOULDBLOCK:
+                    guard cliWaitForWritableFD(handle.fileDescriptor) else {
+                        return false
+                    }
                     continue
                 case EPIPE:
                     switch onBrokenPipe {
