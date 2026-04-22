@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 from cmux import cmux, cmuxError
@@ -99,19 +99,26 @@ def _find_app_bundle(cli: str) -> tuple[str, str]:
     raise cmuxError(f"Could not locate a cmux app bundle next to CLI: {cli}")
 
 
-def _run_cli(cli: str, args: list[str]) -> str:
+def _run_cli(cli: str, args: list[str], *, timeout_s: float = 10.0) -> str:
     env = dict(os.environ)
     env.pop("CMUX_WORKSPACE_ID", None)
     env.pop("CMUX_SURFACE_ID", None)
     env.pop("CMUX_TAB_ID", None)
 
-    proc = subprocess.run(
-        [cli, "--socket", SOCKET_PATH] + args,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            [cli, "--socket", SOCKET_PATH, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = f"stdout={exc.stdout or ''} stderr={exc.stderr or ''}".strip()
+        raise cmuxError(
+            f"CLI timed out after {timeout_s}s ({' '.join(args)}): {partial}"
+        ) from exc
     merged = f"{proc.stdout}\n{proc.stderr}".strip()
     if proc.returncode != 0:
         raise cmuxError(f"CLI failed ({' '.join(args)}): {merged}")
@@ -212,6 +219,7 @@ def main() -> int:
     notify_title = f"{token}_TITLE"
     render_marker = f"{token}_RENDER"
 
+    background_window: Optional[str] = None
     with cmux(SOCKET_PATH) as c:
         try:
             c.activate_app()
@@ -259,20 +267,36 @@ def main() -> int:
             before_reopen = c.window_snapshot()
             expected_window_count = _window_count(before_reopen)
 
-            reopen = subprocess.run(
-                ["open", "-b", bundle_id],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            try:
+                reopen = subprocess.run(
+                    ["/usr/bin/open", "-b", bundle_id],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10.0,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise cmuxError(
+                    f"Timed out reopening app bundle {bundle_id}: {exc}"
+                ) from exc
             if reopen.returncode != 0:
                 raise cmuxError(
                     "Failed to reopen app for notification regression.\n"
                     f"bundle_id={bundle_id}\nstdout={reopen.stdout}\nstderr={reopen.stderr}"
                 )
 
-            time.sleep(0.8)
-            after_reopen = c.window_snapshot()
+            # The reopen path is async; poll for at least the minimum grace
+            # window so a spurious window would have time to appear. If the
+            # count ever exceeds expected, fail immediately — the regression
+            # we're guarding against is an extra window, not a missing one.
+            poll_deadline = time.time() + 2.5
+            last_snapshot: dict = before_reopen
+            while time.time() < poll_deadline:
+                last_snapshot = c.window_snapshot()
+                if _window_count(last_snapshot) > expected_window_count:
+                    break
+                time.sleep(0.1)
+            after_reopen = last_snapshot
             actual_window_count = _window_count(after_reopen)
             _must(
                 actual_window_count == expected_window_count,
@@ -286,10 +310,21 @@ def main() -> int:
             _assert_terminal_mounted(c, target_surface, context="after reopen focus")
             _assert_renders_after_reopen(c, target_surface, render_marker)
         finally:
+            if background_window:
+                try:
+                    c.close_window(background_window)
+                except Exception as exc:
+                    print(
+                        f"WARN: failed to close test background window {background_window}: {exc}",
+                        file=sys.stderr,
+                    )
             try:
                 c.set_app_focus(None)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"WARN: failed to reset app focus override: {exc}",
+                    file=sys.stderr,
+                )
 
     print("PASS: notify + app reopen does not create a blank extra window or blank the target terminal")
     return 0

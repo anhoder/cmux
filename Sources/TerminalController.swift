@@ -11265,12 +11265,14 @@ class TerminalController {
     }
 
     private func v2DebugWindowSnapshot() -> V2CallResult {
-        let payload: [String: Any] = v2MainSync {
-            AppDelegate.shared?.debugWindowSnapshot() ?? [
-                "ns_window_count": NSApp.windows.count,
-                "main_window_context_count": 0,
-                "windows": [],
-            ]
+        // NSApp.windows, AppDelegate.mainWindowContexts, and per-window AppKit
+        // properties are main-actor state; the exact-snapshot contract for this
+        // debug RPC requires synchronous main-thread execution.
+        let payload: [String: Any]? = v2MainSync {
+            AppDelegate.shared?.debugWindowSnapshot()
+        }
+        guard let payload else {
+            return .err(code: "unavailable", message: "AppDelegate.debugWindowSnapshot unavailable", data: nil)
         }
         return .ok(payload)
     }
