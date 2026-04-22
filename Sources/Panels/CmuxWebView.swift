@@ -827,22 +827,24 @@ final class CmuxWebView: WKWebView {
             return "focusRepairBridgeScriptBuildFailed"
         }
 
-        evaluateJavaScript(script) { [weak self] result, error in
-            guard let self else { return }
-            let inserted = error == nil &&
-                ((result as? [String: Any])?["inserted"] as? Bool == true)
+        let insert = evaluateJavaScriptSynchronously(script)
+        let inserted = insert.completed &&
+            insert.error == nil &&
+            ((insert.result as? [String: Any])?["inserted"] as? Bool == true)
 #if DEBUG
-            let reason = ((result as? [String: Any])?["reason"] as? String) ?? "nil"
-            dlog(
-                "browser.focus.textRepair.bridge web=\(ObjectIdentifier(self)) " +
-                "inserted=\(inserted ? 1 : 0) reason=\(reason)"
-            )
+        let reason = ((insert.result as? [String: Any])?["reason"] as? String) ?? "nil"
+        let errorDescription = insert.completed
+            ? (insert.error?.localizedDescription ?? "nil")
+            : "timeout"
+        dlog(
+            "browser.focus.textRepair.bridge web=\(ObjectIdentifier(self)) " +
+            "inserted=\(inserted ? 1 : 0) reason=\(reason) error=\(errorDescription)"
+        )
 #endif
-            if !inserted {
-                self.disarmRestoredWebContentTextInputRepair(reason: "bridgeInsertFailed")
-            }
+        if !inserted {
+            disarmRestoredWebContentTextInputRepair(reason: "bridgeInsertFailed")
         }
-        return "focusRepairBridge"
+        return inserted ? "focusRepairBridgeInserted" : "focusRepairBridgeInsertFailed"
     }
 
     private func pageCanAcceptPlainTextPaste() -> Bool {

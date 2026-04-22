@@ -12312,23 +12312,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func activeBrowserSearchOverlayPanelId(in window: NSWindow) -> UUID? {
         guard let firstResponder = window.firstResponder else { return nil }
-        guard responderLooksLikeBrowserSearchOverlay(firstResponder, in: window) else { return nil }
+        let responderLooksLikeSearchOverlay = responderLooksLikeBrowserSearchOverlay(firstResponder, in: window)
+        let responderIsFieldEditor = (firstResponder as? NSTextView)?.isFieldEditor == true
+        guard responderLooksLikeSearchOverlay || responderIsFieldEditor else { return nil }
 
         let routedManager = synchronizeActiveMainWindowContext(preferredWindow: window) ?? tabManager
         guard let workspace = routedManager?.selectedWorkspace else { return nil }
+        let browserSearchPanels = workspace.panels.values
+            .compactMap { $0 as? BrowserPanel }
+            .filter { $0.searchState != nil }
+
         if let focusedPanelId = workspace.focusedPanelId,
            let browserPanel = workspace.panels[focusedPanelId] as? BrowserPanel,
            browserPanel.searchState != nil {
             return browserPanel.id
         }
-        return workspace.panels.values
-            .compactMap { $0 as? BrowserPanel }
-            .first { panel in
-                panel.searchState != nil && panel.preferredFocusIntent == .findField
-            }?.id
-            ?? workspace.panels.values
-                .compactMap { $0 as? BrowserPanel }
-                .first { $0.searchState != nil }?.id
+        guard responderLooksLikeSearchOverlay else {
+            if workspace.focusedPanelId == nil, browserSearchPanels.count == 1 {
+                return browserSearchPanels[0].id
+            }
+            return nil
+        }
+        if let focusedFindPanel = browserSearchPanels.first(where: { $0.preferredFocusIntent == .findField }) {
+            return focusedFindPanel.id
+        }
+        return browserSearchPanels.first?.id
     }
 
     private func responderLooksLikeBrowserSearchOverlay(
