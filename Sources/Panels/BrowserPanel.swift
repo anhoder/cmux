@@ -2222,6 +2222,14 @@ final class BrowserPanel: Panel, ObservableObject {
     static var webContentFocusRestoreScriptForTesting: String {
         webContentFocusRestoreScript(fallbackStateJSON: nil)
     }
+
+    var debugLastCapturedWebContentFocusStateJSON: String? {
+        lastCapturedWebContentFocusStateJSON
+    }
+
+    var debugPendingBrowserFindPreflightFocusStateJSON: String? {
+        pendingBrowserFindPreflightFocusStateJSON
+    }
 #endif
     /// Published URL being displayed
     @Published private(set) var currentURL: URL?
@@ -5329,6 +5337,11 @@ extension BrowserPanel {
 
     // MARK: - Find in Page
 
+    @MainActor
+    func prepareForFindShortcutFromAppCommand() {
+        captureWebContentFocusSnapshotIfNeeded(reason: "appFindPreflight")
+    }
+
     func startFind() {
         (webView as? CmuxWebView)?.disarmRestoredWebContentTextInputRepair(reason: "startFind")
         if searchState == nil || preferredFocusIntent != .findField {
@@ -6102,12 +6115,16 @@ extension BrowserPanel {
         return stateJSON
     }
 
+    private static func isBrowserFindPreflightCaptureReason(_ reason: String) -> Bool {
+        reason == "browserFindPreflight" || reason == "appFindPreflight"
+    }
+
     private func updateLastCapturedWebContentFocusState(reason: String, result: Any?, error: Error?) -> String {
         guard error == nil else { return "error" }
         let parsed = Self.webContentFocusCaptureStatusAndStateJSON(from: result)
         if let stateJSON = Self.validatedWebContentFocusStateJSON(parsed.stateJSON) {
             lastCapturedWebContentFocusStateJSON = stateJSON
-            if reason == "browserFindPreflight" {
+            if Self.isBrowserFindPreflightCaptureReason(reason) {
                 pendingBrowserFindPreflightFocusStateJSON = stateJSON
             }
         } else if parsed.status.hasPrefix("cleared") {
@@ -6117,7 +6134,7 @@ extension BrowserPanel {
             } else {
                 lastCapturedWebContentFocusStateJSON = nil
             }
-            if reason == "browserFindPreflight" {
+            if Self.isBrowserFindPreflightCaptureReason(reason) {
                 pendingBrowserFindPreflightFocusStateJSON = nil
             }
         }

@@ -8721,7 +8721,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return
             }
 
-            self.focusWebViewForGotoSplitUITest(tab: tab, browserPanelId: browserPanelId)
+            self.focusWebViewForGotoSplitUITest(
+                tab: tab,
+                browserPanelId: browserPanelId,
+                expectedBrowserURL: url
+            )
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -8958,7 +8962,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return updates
     }
 
-    private func focusWebViewForGotoSplitUITest(tab: Workspace, browserPanelId: UUID) {
+    private func focusWebViewForGotoSplitUITest(
+        tab: Workspace,
+        browserPanelId: UUID,
+        expectedBrowserURL: URL? = nil
+    ) {
         guard let browserPanel = tab.browserPanel(for: browserPanelId) else {
             writeGotoSplitTestData([
                 "webViewFocused": "false",
@@ -9019,7 +9027,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 "webViewFocused": "true"
             ])
             if ProcessInfo.processInfo.environment["CMUX_UI_TEST_GOTO_SPLIT_INPUT_SETUP"] == "1" {
-                setupFocusedInputForGotoSplitUITest(panel: panel)
+                setupFocusedInputForGotoSplitUITestWhenNavigationReady(
+                    panel: panel,
+                    expectedBrowserURL: expectedBrowserURL
+                )
             }
         }
 
@@ -9243,6 +9254,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
         Task { @MainActor in evaluate() }
+    }
+
+    private func setupFocusedInputForGotoSplitUITestWhenNavigationReady(
+        panel: BrowserPanel,
+        expectedBrowserURL: URL?
+    ) {
+        guard let expectedBrowserURL else {
+            setupFocusedInputForGotoSplitUITest(panel: panel)
+            return
+        }
+
+        let expectedURLString = expectedBrowserURL.absoluteString
+        var resolved = false
+        var urlObservation: NSKeyValueObservation?
+        var loadingObservation: NSKeyValueObservation?
+
+        func cleanup() {
+            urlObservation?.invalidate()
+            urlObservation = nil
+            loadingObservation?.invalidate()
+            loadingObservation = nil
+        }
+
+        func attemptSeed(reason: String) {
+            guard !resolved else { return }
+            guard panel.webView.url?.absoluteString == expectedURLString else { return }
+            resolved = true
+            cleanup()
+#if DEBUG
+            dlog(
+                "gotoSplit.inputSetup.seed panel=\(panel.id.uuidString.prefix(5)) " +
+                "reason=\(reason)"
+            )
+#endif
+            setupFocusedInputForGotoSplitUITest(panel: panel)
+        }
+
+        urlObservation = panel.webView.observe(\.url, options: [.initial, .new]) { _, _ in
+            DispatchQueue.main.async {
+                attemptSeed(reason: "url")
+            }
+        }
+        loadingObservation = panel.webView.observe(\.isLoading, options: [.new]) { _, _ in
+            DispatchQueue.main.async {
+                attemptSeed(reason: "loading")
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self, weak panel] in
+            guard !resolved else { return }
+            cleanup()
+            self?.writeGotoSplitTestData([
+                "webInputFocusSeeded": "false",
+                "setupError": "Timed out waiting for browser navigation before seeding focused input",
+                "webInputFocusExpectedURL": expectedURLString,
+                "webInputFocusActualURL": panel?.webView.url?.absoluteString ?? ""
+            ])
+        }
     }
 
     private func setupFocusedInputForGotoSplitUITest(panel: BrowserPanel) {
@@ -13359,13 +13428,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private func shouldLetFocusedBrowserOwnFindShortcut(_ event: NSEvent) -> Bool {
         let shortcutWindow = resolvedShortcutEventWindow(event) ?? NSApp.keyWindow ?? NSApp.mainWindow
         let shortcutResponder = shortcutWindow?.firstResponder
-        let owningWebView = tabManager?.focusedBrowserPanel?.webView as? CmuxWebView
-        guard let owningWebView else { return false }
-        return shouldRouteBrowserFindCommandEquivalentThroughWebContentFirst(
+        guard let focusedBrowserPanel = tabManager?.focusedBrowserPanel,
+              let owningWebView = focusedBrowserPanel.webView as? CmuxWebView else {
+            return false
+        }
+        let shouldRoute = shouldRouteBrowserFindCommandEquivalentThroughWebContentFirst(
             event,
             responder: shortcutResponder,
             owningWebView: owningWebView
         )
+        if shouldRoute, shouldCaptureBrowserWebContentFocusBeforeFindCommand(event) {
+            focusedBrowserPanel.prepareForFindShortcutFromAppCommand()
+        }
+        return shouldRoute
     }
 
     private func browserPanelOwning(_ webView: CmuxWebView) -> BrowserPanel? {

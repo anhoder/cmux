@@ -240,6 +240,55 @@ private final class BrowserPanelFakeWebContentResponderView: NSView {
 @MainActor
 final class BrowserPanelFindFocusRequestTests: XCTestCase {
     @MainActor
+    func testAppFindPreflightCapturesPageInputBeforeFindStealsFocus() async throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let navigation = expectation(description: "test page loaded")
+        let delegate = BrowserPanelTestNavigationDelegate {
+            navigation.fulfill()
+        }
+        panel.webView.navigationDelegate = delegate
+
+        panel.webView.loadHTMLString(
+            """
+            <!doctype html>
+            <body tabindex="-1">
+            <input id="target" value="abc">
+            <script>
+            const input = document.getElementById("target");
+            input.focus();
+            input.setSelectionRange(3, 3);
+            </script>
+            </body>
+            """,
+            baseURL: nil
+        )
+        await fulfillment(of: [navigation], timeout: 2.0)
+
+        let activeId = try await panel.webView.evaluateJavaScript(
+            "document.activeElement ? document.activeElement.id : ''"
+        ) as? String
+        XCTAssertEqual(activeId, "target")
+
+        panel.prepareForFindShortcutFromAppCommand()
+        let preflightState = try XCTUnwrap(panel.debugPendingBrowserFindPreflightFocusStateJSON)
+
+        let bodyActiveId = try await panel.webView.evaluateJavaScript(
+            """
+            document.body.focus();
+            document.activeElement ? document.activeElement.id : '';
+            """
+        ) as? String
+        XCTAssertEqual(bodyActiveId, "")
+
+        panel.startFind()
+
+        let retainedState = try XCTUnwrap(panel.debugLastCapturedWebContentFocusStateJSON)
+        XCTAssertEqual(stateID(fromWebContentFocusStateJSON: retainedState), stateID(fromWebContentFocusStateJSON: preflightState))
+        XCTAssertNil(panel.debugPendingBrowserFindPreflightFocusStateJSON)
+        _ = delegate
+    }
+
+    @MainActor
     func testWebContentFocusRestorePreservesAlreadyFocusedEditable() async throws {
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
         let navigation = expectation(description: "test page loaded")
@@ -289,6 +338,14 @@ final class BrowserPanelFindFocusRequestTests: XCTestCase {
             #"{"activeId":"target","events":[],"selectionStart":3,"selectionEnd":3}"#
         )
         _ = delegate
+    }
+
+    private func stateID(fromWebContentFocusStateJSON stateJSON: String) -> String? {
+        guard let data = stateJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object["id"] as? String
     }
 
     func testStartFindIssuesDurableRequestUntilAcknowledged() throws {
