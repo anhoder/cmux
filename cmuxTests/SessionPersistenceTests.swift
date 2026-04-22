@@ -1047,6 +1047,90 @@ final class SessionPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testPruneSurfaceMetadataRemovesRestoredAgentBookkeeping() throws {
+        let source = Workspace()
+        let sourcePanelId = try XCTUnwrap(source.focusedPanelId)
+        let sourceIndex = try makeRestorableAgentIndex(
+            workspaceId: source.id,
+            panelId: sourcePanelId,
+            sessionId: "codex-prune-pending-session",
+            arguments: [
+                "/usr/local/bin/codex",
+                "--model",
+                "gpt-5.4",
+            ]
+        )
+        let snapshot = source.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: sourceIndex
+        )
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        restored.pruneSurfaceMetadata(validSurfaceIds: [])
+
+        let postPruneIndex = try makeRestorableAgentIndex(
+            workspaceId: restored.id,
+            panelId: restoredPanelId,
+            sessionId: "codex-post-prune-session",
+            arguments: [
+                "/usr/local/bin/codex",
+                "--model",
+                "gpt-5.4-mini",
+            ]
+        )
+        let postPruneSnapshot = restored.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: postPruneIndex
+        )
+        XCTAssertEqual(
+            postPruneSnapshot.panels.first?.terminal?.agent?.sessionId,
+            "codex-post-prune-session"
+        )
+
+        restored.updatePanelShellActivityState(panelId: restoredPanelId, state: .promptIdle)
+        restored.updatePanelShellActivityState(panelId: restoredPanelId, state: .commandRunning)
+        let userCommandSnapshot = restored.sessionSnapshot(includeScrollback: false)
+        XCTAssertNil(userCommandSnapshot.panels.first?.terminal?.agent)
+
+        let staleWorkspace = Workspace()
+        let stalePanelId = try XCTUnwrap(staleWorkspace.focusedPanelId)
+        let staleIndex = try makeRestorableAgentIndex(
+            workspaceId: staleWorkspace.id,
+            panelId: stalePanelId,
+            sessionId: "codex-prune-invalidated-session",
+            arguments: [
+                "/usr/local/bin/codex",
+                "--model",
+                "gpt-5.4",
+            ]
+        )
+        _ = staleWorkspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: staleIndex
+        )
+
+        staleWorkspace.updatePanelShellActivityState(panelId: stalePanelId, state: .promptIdle)
+        staleWorkspace.updatePanelShellActivityState(panelId: stalePanelId, state: .commandRunning)
+        let staleSnapshot = staleWorkspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: staleIndex
+        )
+        XCTAssertNil(staleSnapshot.panels.first?.terminal?.agent)
+
+        staleWorkspace.pruneSurfaceMetadata(validSurfaceIds: [])
+        let acceptedSnapshot = staleWorkspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: staleIndex
+        )
+        XCTAssertEqual(
+            acceptedSnapshot.panels.first?.terminal?.agent?.sessionId,
+            "codex-prune-invalidated-session"
+        )
+    }
+
+    @MainActor
     func testUserCommandInvalidatesStaleRestoredAgentForAllProviders() throws {
         let scenarios: [(kind: RestorableAgentKind, arguments: [String])] = [
             (
