@@ -2249,11 +2249,11 @@ private func cmuxRightSidebarExtensionHostAncestor(for view: NSView) -> NSView? 
 private func cmuxRightSidebarExtensionHost(atWindowPoint windowPoint: NSPoint, in view: NSView) -> NSView? {
     guard !view.isHidden else { return nil }
 
+    let localPoint = view.convert(windowPoint, from: nil)
+    guard view.bounds.contains(localPoint) else { return nil }
+
     if view.identifier == cmuxRightSidebarExtensionHostContainerIdentifier {
-        let localPoint = view.convert(windowPoint, from: nil)
-        if view.bounds.contains(localPoint) {
-            return view
-        }
+        return view
     }
 
     for subview in view.subviews.reversed() {
