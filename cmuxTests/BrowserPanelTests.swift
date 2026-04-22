@@ -3109,15 +3109,13 @@ final class BrowserWindowPortalLifecycleTests: XCTestCase {
         portal.synchronizeWebViewForAnchor(oldAnchor)
         advanceAnimations()
         XCTAssertTrue(slot.isHidden, "Workspace handoff should hide the retiring browser before unmount")
+        XCTAssertNil(webView.superview, "Hidden workspace browsers should leave the window hierarchy during handoff")
 
         oldAnchor.removeFromSuperview()
         portal.synchronizeWebViewForAnchor(oldAnchor)
         advanceAnimations()
 
-        XCTAssertTrue(
-            webView.superview === slot,
-            "Hidden workspace browsers should stay attached while their SwiftUI anchor is temporarily unmounted"
-        )
+        XCTAssertNil(webView.superview, "Hidden workspace browsers should stay detached while their anchor is unmounted")
         XCTAssertTrue(slot.isHidden, "Unmounted hidden workspace browser should remain hidden until rebound")
         XCTAssertEqual(portal.debugEntryCount(), 1, "Workspace handoff should keep the hidden browser portal entry alive")
 
