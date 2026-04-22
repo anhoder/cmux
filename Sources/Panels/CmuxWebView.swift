@@ -648,126 +648,6 @@ final class CmuxWebView: WKWebView {
         evaluateJavaScriptSynchronously(script)
     }
 
-    private struct RestoredTextInputSnapshot: Equatable {
-        let tag: String
-        let value: String
-        let selectionStart: Int
-        let selectionEnd: Int
-
-        init?(_ result: Any?) {
-            guard let payload = result as? [String: Any],
-                  (payload["ok"] as? Bool) == true,
-                  let tag = payload["tag"] as? String,
-                  let value = payload["value"] as? String,
-                  let selectionStart = (payload["selectionStart"] as? NSNumber)?.intValue,
-                  let selectionEnd = (payload["selectionEnd"] as? NSNumber)?.intValue else {
-                return nil
-            }
-            self.tag = tag
-            self.value = value
-            self.selectionStart = selectionStart
-            self.selectionEnd = selectionEnd
-        }
-    }
-
-    private static func restoredTextInputSnapshotScript(fallbackStateJSON: String?) -> String {
-        let fallbackStateLiteral = fallbackStateJSON ?? "null"
-        return """
-    (() => {
-      try {
-        const nativeFallbackState = \(fallbackStateLiteral);
-        const stateIsValid = (state) => !!state && typeof state.id === "string" && !!state.id;
-        const syncState = (state) => {
-          window.__cmuxAddressBarFocusState = state;
-          try {
-            if (window.top && window.top !== window) {
-              window.top.postMessage({ cmuxAddressBarFocusState: state }, "*");
-            } else if (window.top) {
-              window.top.__cmuxAddressBarFocusState = state;
-            }
-          } catch (_) {}
-        };
-        const activeEditable = (doc) => {
-          if (!doc) return null;
-          const active = doc.activeElement;
-          if (!active || !active.isConnected) return null;
-          const tag = (active.tagName || "").toLowerCase();
-          if (tag === "iframe" || tag === "frame") {
-            try {
-              const nested = activeEditable(active.contentDocument);
-              if (nested) return nested;
-            } catch (_) {}
-          }
-          if (tag === "input" || tag === "textarea") return active;
-          return null;
-        };
-        const readState = () => {
-          let state = window.__cmuxAddressBarFocusState;
-          try {
-            if (!stateIsValid(state) && window.top && window.top.__cmuxAddressBarFocusState) {
-              state = window.top.__cmuxAddressBarFocusState;
-            }
-          } catch (_) {}
-          if (!stateIsValid(state) && stateIsValid(nativeFallbackState)) {
-            state = nativeFallbackState;
-            syncState(state);
-          }
-          return state;
-        };
-        const isTextInput = (el) => {
-          if (!el) return false;
-          const tag = (el.tagName || "").toLowerCase();
-          const type = (el.type || "").toLowerCase();
-          return tag === "textarea" || (tag === "input" && type !== "hidden");
-        };
-        const targetFromStoredState = (doc) => {
-          const state = readState();
-          if (!doc || !state || typeof state.id !== "string" || !state.id) return null;
-          const selector = '[data-cmux-addressbar-focus-id="' + state.id + '"]';
-          const stateElementId = typeof state.elementId === "string" && state.elementId ? state.elementId : "";
-          const findTarget = (rootDoc) => {
-            if (!rootDoc) return null;
-            const direct = rootDoc.querySelector(selector);
-            if (direct && direct.isConnected && isTextInput(direct)) return direct;
-            if (stateElementId) {
-              const byElementId = rootDoc.getElementById(stateElementId);
-              if (byElementId && byElementId.isConnected && isTextInput(byElementId)) return byElementId;
-            }
-            const legacyByStateId = rootDoc.getElementById(state.id);
-            if (legacyByStateId && legacyByStateId.isConnected && isTextInput(legacyByStateId)) {
-              return legacyByStateId;
-            }
-            const frames = rootDoc.querySelectorAll("iframe,frame");
-            for (let i = 0; i < frames.length; i += 1) {
-              try {
-                const nested = findTarget(frames[i].contentDocument);
-                if (nested) return nested;
-              } catch (_) {}
-            }
-            return null;
-          };
-          return findTarget(doc);
-        };
-        const target = activeEditable(document) || targetFromStoredState(document);
-        if (!target) return { ok: false, reason: "missing_active_editable" };
-        const tag = (target.tagName || "").toLowerCase();
-        if (typeof target.selectionStart !== "number" || typeof target.selectionEnd !== "number") {
-          return { ok: false, reason: "missing_selection" };
-        }
-        return {
-          ok: true,
-          tag,
-          value: String(target.value || ""),
-          selectionStart: target.selectionStart,
-          selectionEnd: target.selectionEnd
-        };
-      } catch (_) {
-        return { ok: false, reason: "error" };
-      }
-    })();
-    """
-    }
-
     private static func restorableTextInputFocusScript(fallbackStateJSON: String?) -> String {
         let fallbackStateLiteral = fallbackStateJSON ?? "null"
         return """
@@ -1035,16 +915,6 @@ final class CmuxWebView: WKWebView {
         return text
     }
 
-    private func restoredTextInputSnapshot() -> RestoredTextInputSnapshot? {
-        let evaluation = evaluateJavaScriptSynchronously(
-            Self.restoredTextInputSnapshotScript(
-                fallbackStateJSON: restoredWebContentTextInputFocusFallbackJSON
-            )
-        )
-        guard evaluation.completed, evaluation.error == nil else { return nil }
-        return RestoredTextInputSnapshot(evaluation.result)
-    }
-
     func hasRestorableWebContentTextInputFocus() -> Bool {
         let evaluation = evaluateJavaScriptSynchronously(
             Self.restorableTextInputFocusScript(
@@ -1072,47 +942,13 @@ final class CmuxWebView: WKWebView {
         return ok
     }
 
-    private func performRestoredTextInputRepairIfNeeded(
-        event: NSEvent,
-        text: String
-    ) -> String? {
+    private func performRestoredTextInputRepairIfNeeded(event: NSEvent) -> String? {
         guard restoredWebContentTextInputRepairArmed else { return nil }
-        let before = restoredTextInputSnapshot()
-
+        // WebKit may apply the native edit after keyDown returns. Do not synthesize
+        // the same printable key from this path, or the page can receive it twice.
+        disarmRestoredWebContentTextInputRepair(reason: "nativeKeyForwarded")
         super.keyDown(with: event)
-
-        let after = restoredTextInputSnapshot()
-        if let before, let after, after != before {
-            disarmRestoredWebContentTextInputRepair(reason: "nativeInputObserved")
-            return "focusRepairNative"
-        }
-
-        guard let script = Self.restoredTextInputInsertScript(
-            text: text,
-            fallbackStateJSON: restoredWebContentTextInputFocusFallbackJSON
-        ) else {
-            disarmRestoredWebContentTextInputRepair(reason: "scriptBuildFailed")
-            return "focusRepairNativeOnly"
-        }
-        let insert = evaluateJavaScriptSynchronously(script)
-        let inserted = insert.completed &&
-            insert.error == nil &&
-            ((insert.result as? [String: Any])?["inserted"] as? Bool == true)
-#if DEBUG
-        let reason = ((insert.result as? [String: Any])?["reason"] as? String) ?? "nil"
-        dlog(
-            "browser.focus.textRepair.apply web=\(ObjectIdentifier(self)) " +
-            "inserted=\(inserted ? 1 : 0) reason=\(reason)"
-        )
-#endif
-        if !inserted {
-            if hasRestorableWebContentTextInputFocus() {
-                restoredWebContentTextInputRepairLastReason = "insertRetained.\(reason)"
-            } else {
-                disarmRestoredWebContentTextInputRepair(reason: "insertFailed.\(reason)")
-            }
-        }
-        return inserted ? "focusRepairInserted" : "focusRepairInsertFailed"
+        return "focusRepairNativeForwarded"
     }
 
     private func bridgeRestoredTextInputRepairToActiveElement(text: String) -> String? {
@@ -1139,7 +975,7 @@ final class CmuxWebView: WKWebView {
         )
 #endif
         if inserted {
-            restoredWebContentTextInputRepairLastReason = "bridgeInserted"
+            disarmRestoredWebContentTextInputRepair(reason: "bridgeInserted")
             return "focusRepairBridgeInserted"
         }
 
@@ -1162,8 +998,8 @@ final class CmuxWebView: WKWebView {
 
     @discardableResult
     func handleRestoredWebContentTextInputBeforeWindowDispatch(_ event: NSEvent) -> Bool {
-        guard let repairText = Self.restoredTextInputRepairText(for: event),
-              let repairRoute = performRestoredTextInputRepairIfNeeded(event: event, text: repairText) else {
+        guard Self.restoredTextInputRepairText(for: event) != nil,
+              let repairRoute = performRestoredTextInputRepairIfNeeded(event: event) else {
             return false
         }
 #if DEBUG
@@ -1387,8 +1223,8 @@ final class CmuxWebView: WKWebView {
             return
         }
 
-        if let repairText = Self.restoredTextInputRepairText(for: event),
-           let repairRoute = performRestoredTextInputRepairIfNeeded(event: event, text: repairText) {
+        if Self.restoredTextInputRepairText(for: event) != nil,
+           let repairRoute = performRestoredTextInputRepairIfNeeded(event: event) {
 #if DEBUG
             route = repairRoute
 #endif

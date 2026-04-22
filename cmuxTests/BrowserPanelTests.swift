@@ -340,6 +340,130 @@ final class BrowserPanelFindFocusRequestTests: XCTestCase {
         _ = delegate
     }
 
+    @MainActor
+    func testRestoredTextInputKeyDownForwardsNativeOnceAndDisarms() async throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        let navigation = expectation(description: "test page loaded")
+        let delegate = BrowserPanelTestNavigationDelegate {
+            navigation.fulfill()
+        }
+        panel.webView.navigationDelegate = delegate
+        panel.webView.loadHTMLString(
+            """
+            <!doctype html>
+            <input id="target" value="abc" data-cmux-addressbar-focus-id="target-id">
+            <script>
+            const input = document.getElementById("target");
+            input.focus();
+            input.setSelectionRange(3, 3);
+            </script>
+            """,
+            baseURL: nil
+        )
+        await fulfillment(of: [navigation], timeout: 2.0)
+
+        let cmuxWebView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(window.makeFirstResponder(cmuxWebView))
+        cmuxWebView.setRestoredWebContentTextInputFocusFallbackJSON(
+            #"{"id":"target-id","elementId":"target","selectionStart":3,"selectionEnd":3}"#
+        )
+        cmuxWebView.armRestoredWebContentTextInputRepair(reason: "test")
+
+        let event = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "a",
+            charactersIgnoringModifiers: "a",
+            isARepeat: false,
+            keyCode: 0
+        ))
+
+        XCTAssertTrue(cmuxWebView.handleRestoredWebContentTextInputBeforeWindowDispatch(event))
+        XCTAssertFalse(cmuxWebView.debugRestoredWebContentTextInputRepairArmed)
+        XCTAssertEqual(cmuxWebView.debugRestoredWebContentTextInputRepairLastReason, "disarm.nativeKeyForwarded")
+        XCTAssertFalse(cmuxWebView.handleRestoredWebContentTextInputBeforeWindowDispatch(event))
+
+        let value = try await panel.webView.evaluateJavaScript(
+            "document.getElementById('target').value"
+        ) as? String
+        XCTAssertNotEqual(value, "abcaa")
+        _ = delegate
+    }
+
+    @MainActor
+    func testRestoredTextInputBridgeDisarmsAfterOneSyntheticInsert() async throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        let navigation = expectation(description: "test page loaded")
+        let delegate = BrowserPanelTestNavigationDelegate {
+            navigation.fulfill()
+        }
+        panel.webView.navigationDelegate = delegate
+        panel.webView.loadHTMLString(
+            """
+            <!doctype html>
+            <input id="target" value="abc" data-cmux-addressbar-focus-id="target-id">
+            <script>
+            const input = document.getElementById("target");
+            input.focus();
+            input.setSelectionRange(3, 3);
+            </script>
+            """,
+            baseURL: nil
+        )
+        await fulfillment(of: [navigation], timeout: 2.0)
+
+        let cmuxWebView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(window.makeFirstResponder(cmuxWebView))
+        cmuxWebView.setRestoredWebContentTextInputFocusFallbackJSON(
+            #"{"id":"target-id","elementId":"target","selectionStart":3,"selectionEnd":3}"#
+        )
+        cmuxWebView.armRestoredWebContentTextInputRepair(reason: "test")
+
+        cmuxWebView.insertText("a")
+
+        let value = try await panel.webView.evaluateJavaScript(
+            "document.getElementById('target').value"
+        ) as? String
+        XCTAssertEqual(value, "abca")
+        XCTAssertFalse(cmuxWebView.debugRestoredWebContentTextInputRepairArmed)
+        XCTAssertEqual(cmuxWebView.debugRestoredWebContentTextInputRepairLastReason, "disarm.bridgeInserted")
+        _ = delegate
+    }
+
     private func stateID(fromWebContentFocusStateJSON stateJSON: String) -> String? {
         guard let data = stateJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
