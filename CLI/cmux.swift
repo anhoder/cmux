@@ -13888,7 +13888,7 @@ struct CMUXCLI {
         ]
         var result: [String: String] = [:]
         for key in allowedKeys {
-            guard let value = normalizedHookValue(env[key]) else { continue }
+            guard let value = env[key] else { continue }
             result[key] = value
         }
         if let nodeOptions = selectedAgentLaunchNodeOptions(from: env) {

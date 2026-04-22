@@ -98,6 +98,52 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(visibleFrame.y, 25, accuracy: 0.001)
     }
 
+    func testLoadReopenSessionSnapshotRequiresPreviousSnapshotFile() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-session-tests-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let bundleIdentifier = "dev.cmux.tests.\(UUID().uuidString)"
+        let activeSnapshotURL = try XCTUnwrap(
+            SessionPersistenceStore.defaultSnapshotFileURL(
+                bundleIdentifier: bundleIdentifier,
+                appSupportDirectory: tempDir
+            )
+        )
+        let previousSnapshotURL = try XCTUnwrap(
+            SessionPersistenceStore.manualRestoreSnapshotFileURL(
+                bundleIdentifier: bundleIdentifier,
+                appSupportDirectory: tempDir
+            )
+        )
+
+        XCTAssertTrue(
+            SessionPersistenceStore.save(
+                makeSnapshot(version: SessionSnapshotSchema.currentVersion),
+                fileURL: activeSnapshotURL
+            )
+        )
+        XCTAssertNil(
+            SessionPersistenceStore.loadReopenSessionSnapshot(
+                bundleIdentifier: bundleIdentifier,
+                appSupportDirectory: tempDir
+            )
+        )
+
+        var previousSnapshot = makeSnapshot(version: SessionSnapshotSchema.currentVersion)
+        previousSnapshot.windows[0].sidebar.width = 321
+        XCTAssertTrue(SessionPersistenceStore.save(previousSnapshot, fileURL: previousSnapshotURL))
+
+        let loaded = try XCTUnwrap(
+            SessionPersistenceStore.loadReopenSessionSnapshot(
+                bundleIdentifier: bundleIdentifier,
+                appSupportDirectory: tempDir
+            )
+        )
+        XCTAssertEqual(loaded.windows.first?.sidebar.width, 321)
+    }
+
     func testSaveAndLoadRoundTripPreservesWorkspaceCustomColor() {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-session-tests-\(UUID().uuidString)", isDirectory: true)
@@ -1323,6 +1369,32 @@ final class SocketListenerAcceptPolicyTests: XCTestCase {
         XCTAssertEqual(
             snapshot.resumeCommand,
             "'env' 'NODE_OPTIONS=--max-old-space-size=4096' 'claude' '--resume' 'claude-session-debug' '--debug' 'api,mcp' '--model' 'sonnet'"
+        )
+    }
+
+    func testResumeCommandPreservesSafeNonNodeEnvironmentValuesExactly() {
+        let snapshot = SessionRestorableAgentSnapshot(
+            kind: .claude,
+            sessionId: "claude-session-env",
+            workingDirectory: nil,
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "claude",
+                executablePath: "claude",
+                arguments: ["claude"],
+                workingDirectory: nil,
+                environment: [
+                    "ANTHROPIC_MODEL": "",
+                    "PATH": " /tmp/bin ",
+                    "UNSAFE_TOKEN": "secret"
+                ],
+                capturedAt: nil,
+                source: nil
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.resumeCommand,
+            "'env' 'ANTHROPIC_MODEL=' 'PATH= /tmp/bin ' 'claude' '--resume' 'claude-session-env'"
         )
     }
 

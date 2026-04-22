@@ -402,11 +402,18 @@ enum SessionPersistenceStore {
         try? FileManager.default.removeItem(at: fileURL)
     }
 
-    static func loadReopenSessionSnapshot(fileURL: URL? = nil) -> AppSessionSnapshot? {
-        if let manualRestoreSnapshot = load(fileURL: fileURL ?? manualRestoreSnapshotFileURL()) {
-            return manualRestoreSnapshot
+    static func loadReopenSessionSnapshot(
+        fileURL: URL? = nil,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = nil
+    ) -> AppSessionSnapshot? {
+        guard let fileURL = fileURL ?? manualRestoreSnapshotFileURL(
+            bundleIdentifier: bundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ) else {
+            return nil
         }
-        return load()
+        return load(fileURL: fileURL)
     }
 
     static func syncManualRestoreSnapshotCache() {

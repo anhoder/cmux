@@ -559,7 +559,7 @@ private enum AgentResumeCommandBuilder {
 
     private static func sanitizedEnvironmentValue(key: String, value: String?) -> String? {
         guard key == "NODE_OPTIONS" else {
-            return normalized(value)
+            return value
         }
         return sanitizedNodeOptions(value)
     }
