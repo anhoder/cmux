@@ -2046,6 +2046,10 @@ func shouldRouteBrowserFindCommandEquivalentThroughWebContentFirst(
     return true
 }
 
+func shouldCaptureBrowserWebContentFocusBeforeFindCommand(_ event: NSEvent) -> Bool {
+    browserFindCommandEquivalent(for: event) == .find
+}
+
 func cmuxOwningGhosttyView(for responder: NSResponder?) -> GhosttyNSView? {
     guard let responder else { return nil }
     if let ghosttyView = responder as? GhosttyNSView {

@@ -357,6 +357,7 @@ final class CmuxWebView: WKWebView {
     /// Called when "Open Link in New Tab" context menu is selected.
     /// Bypasses createWebViewWith so the link opens as a tab, not a popup.
     var onContextMenuOpenLinkInNewTab: ((URL) -> Void)?
+    var onBrowserFindCommandPreflight: (() -> Void)?
     var contextMenuLinkURLProvider: ((CmuxWebView, NSPoint, @escaping (URL?) -> Void) -> Void)?
     var contextMenuDefaultBrowserOpener: ((URL) -> Bool)?
     /// Guard against background panes stealing first responder (e.g. page autofocus).
@@ -1254,6 +1255,9 @@ final class CmuxWebView: WKWebView {
             responder: window?.firstResponder,
             owningWebView: self
         ) {
+            if shouldCaptureBrowserWebContentFocusBeforeFindCommand(event) {
+                onBrowserFindCommandPreflight?()
+            }
             replayedBrowserFindShortcutIntoWebContent = true
             let result = super.performKeyEquivalent(with: event)
 #if DEBUG

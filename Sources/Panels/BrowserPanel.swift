@@ -1903,6 +1903,7 @@ final class BrowserPanel: Panel, ObservableObject {
     private var suppressWebViewFocusForAddressBar: Bool = false
     private var webContentFocusRestoreGeneration: UInt64 = 0
     private var lastCapturedWebContentFocusStateJSON: String?
+    private var pendingBrowserFindPreflightFocusStateJSON: String?
     private let blankURLString = "about:blank"
     private static let webContentFocusCaptureScript = """
     (() => {
@@ -2950,6 +2951,12 @@ final class BrowserPanel: Panel, ObservableObject {
         webView.onContextMenuOpenLinkInNewTab = { [weak self] url in
             self?.openLinkInNewTab(url: url)
         }
+        webView.onBrowserFindCommandPreflight = { [weak self, weak webView] in
+            guard let self,
+                  let webView,
+                  self.isCurrentWebView(webView) else { return }
+            self.captureWebContentFocusSnapshotIfNeeded(reason: "browserFindPreflight")
+        }
         configureNavigationDelegateCallbacks()
         webView.navigationDelegate = navigationDelegate
         webView.uiDelegate = uiDelegate
@@ -2969,6 +2976,7 @@ final class BrowserPanel: Panel, ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.isCurrentWebView(webView, instanceID: boundWebViewInstanceID) else { return }
                 self.lastCapturedWebContentFocusStateJSON = nil
+                self.pendingBrowserFindPreflightFocusStateJSON = nil
                 (webView as? CmuxWebView)?.setRestoredWebContentTextInputFocusFallbackJSON(nil)
             }
         }
@@ -6094,13 +6102,27 @@ extension BrowserPanel {
         return stateJSON
     }
 
-    private func updateLastCapturedWebContentFocusState(result: Any?, error: Error?) -> String {
+    private func updateLastCapturedWebContentFocusState(reason: String, result: Any?, error: Error?) -> String {
         guard error == nil else { return "error" }
         let parsed = Self.webContentFocusCaptureStatusAndStateJSON(from: result)
         if let stateJSON = Self.validatedWebContentFocusStateJSON(parsed.stateJSON) {
             lastCapturedWebContentFocusStateJSON = stateJSON
+            if reason == "browserFindPreflight" {
+                pendingBrowserFindPreflightFocusStateJSON = stateJSON
+            }
         } else if parsed.status.hasPrefix("cleared") {
-            lastCapturedWebContentFocusStateJSON = nil
+            if reason == "startFind",
+               let preflightStateJSON = pendingBrowserFindPreflightFocusStateJSON {
+                lastCapturedWebContentFocusStateJSON = preflightStateJSON
+            } else {
+                lastCapturedWebContentFocusStateJSON = nil
+            }
+            if reason == "browserFindPreflight" {
+                pendingBrowserFindPreflightFocusStateJSON = nil
+            }
+        }
+        if reason == "startFind" {
+            pendingBrowserFindPreflightFocusStateJSON = nil
         }
         return parsed.status
     }
@@ -6111,6 +6133,7 @@ extension BrowserPanel {
                 script: Self.webContentFocusCaptureScript
             )
             let resultValue = updateLastCapturedWebContentFocusState(
+                reason: reason,
                 result: evaluation.result,
                 error: evaluation.error
             )
@@ -6137,7 +6160,11 @@ extension BrowserPanel {
             }
         }
         webView.evaluateJavaScript(Self.webContentFocusCaptureScript) { [weak self] result, error in
-            let resultValue = self?.updateLastCapturedWebContentFocusState(result: result, error: error) ?? "unknown"
+            let resultValue = self?.updateLastCapturedWebContentFocusState(
+                reason: reason,
+                result: result,
+                error: error
+            ) ?? "unknown"
 #if DEBUG
             guard let self else { return }
             if let error {
