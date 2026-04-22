@@ -10,7 +10,20 @@ EXT_BUNDLE_ID="${EXT_BUNDLE_ID:-${APP_BUNDLE_ID}.extension}"
 EXTENSION_POINT_ID="com.cmuxterm.app.debug.extkit.right-sidebar-panel"
 SCENE_ID="cmux-right-sidebar-demo"
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
-TARGET_TRIPLE="${TARGET_TRIPLE:-arm64-apple-macos26.0}"
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+  arm64)
+    DEFAULT_TARGET_TRIPLE="arm64-apple-macos26.0"
+    ;;
+  x86_64)
+    DEFAULT_TARGET_TRIPLE="x86_64-apple-macos26.0"
+    ;;
+  *)
+    echo "Unsupported host architecture: $HOST_ARCH. Set TARGET_TRIPLE explicitly." >&2
+    exit 1
+    ;;
+esac
+TARGET_TRIPLE="${TARGET_TRIPLE:-$DEFAULT_TARGET_TRIPLE}"
 APP_PATH="${BUILD_ROOT}/${APP_NAME}.app"
 EXT_PATH="${APP_PATH}/Contents/Extensions/${EXT_NAME}.appex"
 

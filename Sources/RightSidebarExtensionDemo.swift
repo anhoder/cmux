@@ -7,13 +7,16 @@ import SwiftUI
 
 enum RightSidebarExtensionPoint {
     static let identifier = "com.cmuxterm.app.debug.extkit.right-sidebar-panel"
+    static let productionIdentifier = "com.cmuxterm.app.extkit.right-sidebar-panel"
     static let legacyIdentifier = "com.cmuxterm.right-sidebar-panel"
     static let discoveryIdentifiers: [StaticString] = [
         "com.cmuxterm.app.debug.extkit.right-sidebar-panel",
+        "com.cmuxterm.app.extkit.right-sidebar-panel",
         "com.cmuxterm.right-sidebar-panel",
     ]
-    static let legacyDiscoveryIdentifiers = [
+    static let legacyDiscoveryIdentifiers: [String] = [
         identifier,
+        productionIdentifier,
         legacyIdentifier,
     ]
     static let sceneID = "cmux-right-sidebar-demo"
@@ -108,15 +111,26 @@ final class RightSidebarExtensionDemoStore: ObservableObject {
             $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending
         }
         if sortedIdentities.isEmpty, !identities.isEmpty {
-            statusMessage = String(
-                localized: "rightSidebar.extensionDemo.settlingStatus",
-                defaultValue: "Extension discovery is settling. Keeping the last extension."
-            )
-            return
+            let bundledIdentifier = RightSidebarExtensionDemoStore.bundledDemoExtensionBundleIdentifier()
+            let bundledIdentities = identities.filter { identity in
+                bundledIdentifier.map { $0 == identity.bundleIdentifier } == true &&
+                    RightSidebarExtensionDemoStore.bundledDemoExtensionExists()
+            }
+            if !bundledIdentities.isEmpty {
+                identities = bundledIdentities
+                if selectedIdentityID.map({ id in !bundledIdentities.contains { $0.id == id } }) ?? true {
+                    selectedIdentityID = bundledIdentities.first?.id
+                }
+                statusMessage = String(
+                    localized: "rightSidebar.extensionDemo.settlingStatus",
+                    defaultValue: "Extension discovery is settling. Keeping the last extension."
+                )
+                return
+            }
         }
 
         identities = sortedIdentities
-        if selectedIdentity == nil {
+        if selectedIdentityID.map({ id in !sortedIdentities.contains { $0.id == id } }) ?? true {
             selectedIdentityID = sortedIdentities.first?.id
         }
 
@@ -145,6 +159,22 @@ final class RightSidebarExtensionDemoStore: ObservableObject {
         return discoveredIdentities.filter { identity in
             seen.insert(identity.id).inserted
         }
+    }
+
+    private static func bundledDemoExtensionExists() -> Bool {
+        FileManager.default.fileExists(atPath: bundledDemoExtensionURL.path)
+    }
+
+    private static func bundledDemoExtensionBundleIdentifier() -> String? {
+        Bundle(url: bundledDemoExtensionURL)?.bundleIdentifier
+    }
+
+    private static var bundledDemoExtensionURL: URL {
+        let extensionURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Extensions", isDirectory: true)
+            .appendingPathComponent("RightSidebarDemoExtension.appex", isDirectory: true)
+        return extensionURL
     }
 
     @available(macOS 26.0, *)
@@ -177,12 +207,9 @@ final class RightSidebarExtensionDemoStore: ObservableObject {
         // Tagged dev builds are copied under DerivedData, so make OS registration idempotent
         // before asking ExtensionKit for the monitor snapshot.
         let appURL = Bundle.main.bundleURL
-        let extensionURL = appURL
-            .appendingPathComponent("Contents", isDirectory: true)
-            .appendingPathComponent("Extensions", isDirectory: true)
-            .appendingPathComponent("RightSidebarDemoExtension.appex", isDirectory: true)
+        let extensionURL = Self.bundledDemoExtensionURL
 
-        guard FileManager.default.fileExists(atPath: extensionURL.path) else {
+        guard Self.bundledDemoExtensionExists() else {
             return
         }
 

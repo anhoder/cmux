@@ -53,7 +53,11 @@ final class RightSidebarDemoExtension: CmuxRightSidebarExtension {
 
     @AppExtensionPoint.Bind
     var boundExtensionPoint: AppExtensionPoint {
+        #if CMUX_RELEASE_EXTENSION_POINT
+        AppExtensionPoint.Identifier(host: "com.cmuxterm.app.extkit", name: "right-sidebar-panel")
+        #else
         AppExtensionPoint.Identifier(host: "com.cmuxterm.app.debug.extkit", name: "right-sidebar-panel")
+        #endif
     }
 
     var body: some CmuxRightSidebarScene {
@@ -408,9 +412,9 @@ private struct RightSidebarDemoExtensionView: View {
     private func copySnapshot() {
         let snapshot = [
             String(localized: "sampleExtension.titleField", defaultValue: "Title") + ": \(title)",
-            String(localized: "sampleExtension.mode", defaultValue: "Mode") + ": \(selectedMode)",
-            String(localized: "sampleExtension.model", defaultValue: "Model") + ": \(selectedModel)",
-            String(localized: "sampleExtension.priority", defaultValue: "Priority") + ": \(selectedPriority)",
+            String(localized: "sampleExtension.mode", defaultValue: "Mode") + ": \(modeTitle)",
+            String(localized: "sampleExtension.model", defaultValue: "Model") + ": \(modelTitle)",
+            String(localized: "sampleExtension.priority", defaultValue: "Priority") + ": \(priorityTitle)",
             String(localized: "sampleExtension.batchSize", defaultValue: "Batch size") + ": \(batchSize)"
         ].joined(separator: "\n")
 
@@ -420,6 +424,45 @@ private struct RightSidebarDemoExtensionView: View {
             localized: "sampleExtension.actionCopied",
             defaultValue: "Snapshot copied"
         )
+    }
+
+    private var modeTitle: String {
+        switch selectedMode {
+        case 0:
+            String(localized: "sampleExtension.mode.run", defaultValue: "Run")
+        case 1:
+            String(localized: "sampleExtension.mode.review", defaultValue: "Review")
+        case 2:
+            String(localized: "sampleExtension.mode.watch", defaultValue: "Watch")
+        default:
+            "\(selectedMode)"
+        }
+    }
+
+    private var modelTitle: String {
+        switch selectedModel {
+        case 0:
+            String(localized: "sampleExtension.model.fast", defaultValue: "Fast")
+        case 1:
+            String(localized: "sampleExtension.model.balanced", defaultValue: "Balanced")
+        case 2:
+            String(localized: "sampleExtension.model.deep", defaultValue: "Deep")
+        default:
+            "\(selectedModel)"
+        }
+    }
+
+    private var priorityTitle: String {
+        switch selectedPriority {
+        case 0:
+            String(localized: "sampleExtension.priority.low", defaultValue: "Low")
+        case 1:
+            String(localized: "sampleExtension.priority.normal", defaultValue: "Normal")
+        case 2:
+            String(localized: "sampleExtension.priority.high", defaultValue: "High")
+        default:
+            "\(selectedPriority)"
+        }
     }
 
     private func resetControls() {

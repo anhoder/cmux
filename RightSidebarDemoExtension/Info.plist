@@ -23,7 +23,7 @@
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
-		<string>com.cmuxterm.app.debug.extkit.right-sidebar-panel</string>
+		<string>$(CMUX_RIGHT_SIDEBAR_EXTENSION_POINT_IDENTIFIER)</string>
 	</dict>
 </dict>
 </plist>

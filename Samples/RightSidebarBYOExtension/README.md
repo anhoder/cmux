@@ -8,6 +8,8 @@ The app installs like any other macOS app. Its embedded `.appex` declares the cm
 com.cmuxterm.app.debug.extkit.right-sidebar-panel
 ```
 
+That is the current dogfood extension point. Production builds also declare `com.cmuxterm.app.extkit.right-sidebar-panel`, and the sample can switch to that identifier when the feature ships.
+
 The extension exposes the scene id that the current cmux host demo loads:
 
 ```text
@@ -19,6 +21,8 @@ Build and register it:
 ```bash
 Samples/RightSidebarBYOExtension/build-and-register.sh
 ```
+
+The script defaults to the current Mac architecture. To cross-build manually, set `TARGET_TRIPLE`, for example `TARGET_TRIPLE=x86_64-apple-macos26.0`.
 
 Then open the tagged cmux build, switch the right sidebar to `ExtensionKit`, click refresh, and choose `cmux BYO Sidebar Sample`.
 

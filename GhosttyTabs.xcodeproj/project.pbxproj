@@ -393,6 +393,8 @@
 		E7000004A1B2C3D4E5F60718 /* RightSidebarExtensionPoints.xcappextensionpoints */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xcappextensionpoints; path = RightSidebarExtensionPoints.xcappextensionpoints; sourceTree = "<group>"; };
 		E7000005A1B2C3D4E5F60718 /* RightSidebarDemoExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.extensionkit-extension; includeInIndex = 0; path = RightSidebarDemoExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E7000015A1B2C3D4E5F60718 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
+		E7000017A1B2C3D4E5F60718 /* RightSidebarDemoExtension-Debug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "RightSidebarDemoExtension-Debug.entitlements"; sourceTree = "<group>"; };
+		E7000018A1B2C3D4E5F60718 /* RightSidebarDemoExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RightSidebarDemoExtension.entitlements; sourceTree = "<group>"; };
 		IC000002 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder; path = AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -616,6 +618,8 @@
 				E7000002A1B2C3D4E5F60718 /* RightSidebarDemoExtension.swift */,
 				E7000003A1B2C3D4E5F60718 /* Info.plist */,
 				E7000015A1B2C3D4E5F60718 /* InfoPlist.xcstrings */,
+				E7000017A1B2C3D4E5F60718 /* RightSidebarDemoExtension-Debug.entitlements */,
+				E7000018A1B2C3D4E5F60718 /* RightSidebarDemoExtension.entitlements */,
 			);
 			path = RightSidebarDemoExtension;
 			sourceTree = "<group>";
@@ -1290,6 +1294,8 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CMUX_HOST_BUNDLE_IDENTIFIER = com.cmuxterm.app.debug;
+				CMUX_RIGHT_SIDEBAR_EXTENSION_POINT_IDENTIFIER = com.cmuxterm.app.debug.extkit.right-sidebar-panel;
+				CODE_SIGN_ENTITLEMENTS = "RightSidebarDemoExtension/RightSidebarDemoExtension-Debug.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 79;
 				DEVELOPMENT_TEAM = "";
@@ -1319,6 +1325,8 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CMUX_HOST_BUNDLE_IDENTIFIER = com.cmuxterm.app;
+				CMUX_RIGHT_SIDEBAR_EXTENSION_POINT_IDENTIFIER = com.cmuxterm.app.extkit.right-sidebar-panel;
+				CODE_SIGN_ENTITLEMENTS = RightSidebarDemoExtension/RightSidebarDemoExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 79;
 				DEVELOPMENT_TEAM = "";
@@ -1337,6 +1345,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(CMUX_HOST_BUNDLE_IDENTIFIER).right-sidebar-demo";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) CMUX_RELEASE_EXTENSION_POINT";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				WRAPPER_EXTENSION = appex;

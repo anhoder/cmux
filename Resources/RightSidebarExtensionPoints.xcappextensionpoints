@@ -9,6 +9,13 @@
 		<key>EXPresentsUserInterface</key>
 		<true/>
 	</dict>
+	<key>com.cmuxterm.app.extkit.right-sidebar-panel</key>
+	<dict>
+		<key>EXExtensionPointIsPublic</key>
+		<true/>
+		<key>EXPresentsUserInterface</key>
+		<true/>
+	</dict>
 	<key>com.cmuxterm.right-sidebar-panel</key>
 	<dict>
 		<key>EXExtensionPointIsPublic</key>
