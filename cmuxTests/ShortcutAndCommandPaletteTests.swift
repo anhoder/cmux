@@ -219,6 +219,40 @@ final class ReactGrabPastebackTargetTests: XCTestCase {
         )
     }
 
+    func testSendTextToTerminalSurfaceQueuesImmediateTextOnPreferredTerminalWhenSurfaceIsMissing() {
+        let workspace = Workspace(title: "Tests")
+        guard let terminalId = workspace.focusedPanelId,
+              let terminalPanel = workspace.terminalPanel(for: terminalId),
+              let browserPanel = workspace.newBrowserSplit(
+                from: terminalId,
+                orientation: .horizontal
+              ) else {
+            XCTFail("Expected initial workspace split")
+            return
+        }
+
+        workspace.focusPanel(browserPanel.id)
+        XCTAssertNil(terminalPanel.surface.surface)
+
+        var beforeSendCalled = false
+        let payload = "<button>Save</button>"
+        XCTAssertTrue(
+            AppDelegate.sendTextToTerminalSurface(
+                payload,
+                in: workspace,
+                preferredPanelId: terminalId
+            ) {
+                beforeSendCalled = true
+            }
+        )
+
+        XCTAssertTrue(beforeSendCalled)
+        let snapshot = terminalPanel.surface.debugPendingSocketInputSnapshot()
+        XCTAssertEqual(snapshot.items, 1)
+        XCTAssertEqual(snapshot.keys, 0)
+        XCTAssertEqual(snapshot.bytes, payload.utf8.count)
+    }
+
     func testShortcutStillRoutesTerminalPastebackWhenWebViewFocusIsDeferred() {
         let manager = TabManager()
         guard let workspace = manager.selectedWorkspace,

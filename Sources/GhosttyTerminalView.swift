@@ -5203,6 +5203,16 @@ final class TerminalSurface: Identifiable, ObservableObject {
         needsConfirmCloseOverrideForTesting = value
     }
 
+    @MainActor
+    func debugPendingSocketInputSnapshot() -> (items: Int, keys: Int, bytes: Int) {
+        let pendingKeys = pendingSocketInputQueue.reduce(into: 0) { count, item in
+            if case .key = item {
+                count += 1
+            }
+        }
+        return (items: pendingSocketInputQueue.count, keys: pendingKeys, bytes: pendingSocketInputBytes)
+    }
+
     /// Test-only helper to deterministically simulate a released runtime surface.
     @MainActor
     func releaseSurfaceForTesting() {
