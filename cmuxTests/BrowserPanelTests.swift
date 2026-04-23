@@ -471,6 +471,50 @@ final class BrowserPanelFindFocusRequestTests: XCTestCase {
     }
 
     @MainActor
+    func testFindDismissRestoreWaitsForFocusedFindFieldEditingToEndAfterOverlayTeardown() throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        let findField = NSTextField(frame: NSRect(x: 20, y: 20, width: 180, height: 24))
+        setBrowserSearchOverlayPanelId(panel.id, on: findField)
+        contentView.addSubview(findField)
+
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(window.makeFirstResponder(findField))
+
+        panel.startFind()
+        let requestId = try XCTUnwrap(panel.pendingFindFieldFocusRequestId)
+        panel.noteFindFieldMounted(requestId: requestId)
+        panel.noteFindFieldFocused(requestId: requestId)
+        XCTAssertEqual(browserSearchOverlayPanelId(for: window.firstResponder), panel.id)
+
+        panel.hideFind(reason: "test")
+        XCTAssertNotNil(panel.pendingWebContentRestoreRequestId)
+        XCTAssertNil(panel.searchState)
+
+        panel.notePanelFocusChanged(true)
+        panel.noteFindOverlayDisappeared(source: "test")
+
+        XCTAssertNotNil(
+            panel.pendingWebContentRestoreRequestId,
+            "Focused find field editing has not ended yet, so restoring WKWebView focus here can be overwritten by AppKit field-editor teardown."
+        )
+        XCTAssertEqual(browserSearchOverlayPanelId(for: window.firstResponder), panel.id)
+    }
+
+    @MainActor
     func testExplicitWebViewFocusKeepsExistingWebContentResponder() throws {
         let panel = BrowserPanel(workspaceId: UUID())
         let window = NSWindow(
