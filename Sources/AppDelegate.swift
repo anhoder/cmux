@@ -1616,6 +1616,25 @@ func shouldDispatchBrowserArrowViaFirstResponderKeyDown(
     return normalizedFlags.isEmpty
 }
 
+func shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+    keyCode: UInt16,
+    firstResponderIsBrowser: Bool,
+    firstResponderHasMarkedText: Bool = false,
+    flags: NSEvent.ModifierFlags
+) -> Bool {
+    guard firstResponderIsBrowser else { return false }
+    guard !firstResponderHasMarkedText else { return false }
+    guard keyCode == 49 else { return false }
+
+    // Keep this as narrow as Return/Up/Down forwarding. Plain Space can be claimed
+    // by NSWindow.performKeyEquivalent before WebKit gets keyDown, but modified
+    // Space belongs to app, system, or input-method shortcuts.
+    let normalizedFlags = flags
+        .intersection(.deviceIndependentFlagsMask)
+        .subtracting([.numericPad, .function, .capsLock])
+    return normalizedFlags.isEmpty || normalizedFlags == [.shift]
+}
+
 func shouldToggleMainWindowFullScreenForCommandControlFShortcut(
     flags: NSEvent.ModifierFlags,
     chars: String,
@@ -12946,6 +12965,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { [weak self] note in
             guard let self, let window = note.object as? NSWindow else { return }
             self.setActiveMainWindow(window)
+            self.reassertFocusedBrowserAfterWindowBecameKey(window)
         }
     }
 
@@ -12976,7 +12996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         ) { [weak self] notification in
             guard let self else { return }
             guard let panelId = notification.object as? UUID else { return }
-            self.browserPanel(for: panelId)?.endSuppressWebViewFocusForAddressBar()
+            self.browserPanel(for: panelId)?.noteAddressBarBlurred(reason: "notification")
             if self.browserAddressBarFocusedPanelId == panelId {
                 self.browserAddressBarFocusedPanelId = nil
                 self.stopBrowserOmnibarSelectionRepeat()
@@ -13010,7 +13030,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                trackedPanelId != panel.id,
                let trackedPanel = self.browserPanel(for: trackedPanelId),
                !self.shouldPreserveBrowserAddressBarTracking(for: trackedPanel) {
-                trackedPanel.endSuppressWebViewFocusForAddressBar()
+                trackedPanel.noteAddressBarBlurred(reason: "staleOtherPanelWebViewFirstResponder")
                 self.browserAddressBarFocusedPanelId = nil
                 self.stopBrowserOmnibarSelectionRepeat()
 #if DEBUG
@@ -13030,7 +13050,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #endif
                 return
             }
-            panel.endSuppressWebViewFocusForAddressBar()
+            panel.noteWebViewFocused()
             if self.browserAddressBarFocusedPanelId == panel.id {
                 self.browserAddressBarFocusedPanelId = nil
                 self.stopBrowserOmnibarSelectionRepeat()
@@ -13137,6 +13157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             "mainWindow.active window={\(debugWindowToken(window))} context={\(debugContextToken(context))} beforeMgr=\(beforeManagerToken) afterMgr=\(debugManagerToken(tabManager)) \(debugShortcutRouteSnapshot())"
         )
 #endif
+    }
+
+    private func reassertFocusedBrowserAfterWindowBecameKey(_ window: NSWindow) {
+        guard let context = contextForMainTerminalWindow(window),
+              let workspace = context.tabManager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId,
+              let browserPanel = workspace.browserPanel(for: panelId) else { return }
+        _ = browserPanel.reassertWebContentFocusAfterWindowActivation(
+            in: window,
+            reason: "window.didBecomeKey"
+        )
     }
 
     private func unregisterMainWindow(_ window: NSWindow) {
@@ -14220,6 +14251,7 @@ private var cmuxFirstResponderGuardHitViewContext: NSView?
 private var cmuxFirstResponderGuardContextWindowNumber: Int?
 private var cmuxBrowserReturnForwardingDepth = 0
 private var cmuxBrowserArrowForwardingDepth = 0
+private var cmuxBrowserSpaceForwardingDepth = 0
 private var cmuxWindowFirstResponderBypassDepth = 0
 private var cmuxFieldEditorOwningWebViewAssociationKey: UInt8 = 0
 
@@ -14350,26 +14382,28 @@ private extension NSWindow {
             if pointerInitiatedFocus {
                 pointerInitiatedWebFocus = true
 #if DEBUG
+                let responderDescription = String(describing: type(of: responder))
+                let eventTypeDescription = currentEvent.map { String(describing: $0.type) } ?? "nil"
                 dlog(
-                    "focus.guard allowPointerFirstResponder responder=\(String(describing: type(of: responder))) " +
+                    "focus.guard allowPointerFirstResponder responder=\(responderDescription) " +
                     "window=\(ObjectIdentifier(self)) " +
                     "web=\(ObjectIdentifier(webView)) " +
                     "policy=\(webView.allowsFirstResponderAcquisition ? 1 : 0) " +
                     "pointerDepth=\(webView.debugPointerFocusAllowanceDepth) " +
-                    "programmaticDepth=\(webView.debugProgrammaticFocusAllowanceDepth) " +
-                    "eventType=\(currentEvent.map { String(describing: $0.type) } ?? "nil")"
+                    "eventType=\(eventTypeDescription)"
                 )
 #endif
             } else {
 #if DEBUG
+                let responderDescription = String(describing: type(of: responder))
+                let eventTypeDescription = currentEvent.map { String(describing: $0.type) } ?? "nil"
                 dlog(
-                    "focus.guard blockedFirstResponder responder=\(String(describing: type(of: responder))) " +
+                    "focus.guard blockedFirstResponder responder=\(responderDescription) " +
                     "window=\(ObjectIdentifier(self)) " +
                     "web=\(ObjectIdentifier(webView)) " +
                     "policy=\(webView.allowsFirstResponderAcquisition ? 1 : 0) " +
                     "pointerDepth=\(webView.debugPointerFocusAllowanceDepth) " +
-                    "programmaticDepth=\(webView.debugProgrammaticFocusAllowanceDepth) " +
-                    "eventType=\(currentEvent.map { String(describing: $0.type) } ?? "nil")"
+                    "eventType=\(eventTypeDescription)"
                 )
 #endif
                 return false
@@ -14718,6 +14752,31 @@ private extension NSWindow {
             defer { cmuxBrowserArrowForwardingDepth = max(0, cmuxBrowserArrowForwardingDepth - 1) }
 #if DEBUG
             dlog("  → browser Up/Down routed to firstResponder.keyDown")
+#endif
+            self.firstResponder?.keyDown(with: event)
+            return true
+        }
+
+        // NSWindow.performKeyEquivalent can claim plain Space when a WKWebView wrapper
+        // is first responder, which prevents WebKit from inserting a space in focused
+        // page text inputs. Route just Space through keyDown; do not broaden this to all
+        // printable keys because WebKit/AppKit can then deliver duplicate text input.
+        if shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+            keyCode: event.keyCode,
+            firstResponderIsBrowser: firstResponderWebView != nil,
+            firstResponderHasMarkedText: firstResponderHasMarkedText,
+            flags: event.modifierFlags
+        ) {
+            if cmuxBrowserSpaceForwardingDepth > 0 {
+#if DEBUG
+                dlog("  → browser Space reentry; using normal dispatch")
+#endif
+                return false
+            }
+            cmuxBrowserSpaceForwardingDepth += 1
+            defer { cmuxBrowserSpaceForwardingDepth = max(0, cmuxBrowserSpaceForwardingDepth - 1) }
+#if DEBUG
+            dlog("  → browser Space routed to firstResponder.keyDown")
 #endif
             self.firstResponder?.keyDown(with: event)
             return true

@@ -347,6 +347,11 @@ final class CmuxWebView: WKWebView {
 
     private static var contextMenuFallbackKey: UInt8 = 0
     private static let pasteAsPlainTextKeyCode: UInt16 = 9 // V key (hardware position, layout-independent)
+    private static let webContentInputSelectors: [Selector] = [
+        NSSelectorFromString("insertText:replacementRange:"),
+        NSSelectorFromString("doCommandBySelector:"),
+        NSSelectorFromString("setMarkedText:selectedRange:replacementRange:"),
+    ]
     var onContextMenuDownloadStateChanged: ((Bool) -> Void)?
     /// Called when "Open Link in New Tab" context menu is selected.
     /// Bypasses createWebViewWith so the link opens as a tab, not a popup.
@@ -354,19 +359,15 @@ final class CmuxWebView: WKWebView {
     var contextMenuLinkURLProvider: ((CmuxWebView, NSPoint, @escaping (URL?) -> Void) -> Void)?
     var contextMenuDefaultBrowserOpener: ((URL) -> Bool)?
     /// Guard against background panes stealing first responder (e.g. page autofocus).
-    /// BrowserPanelView updates this as pane focus state changes.
-    var allowsFirstResponderAcquisition: Bool = true
+    /// BrowserPanel owns this policy and updates it before app-initiated focus handoffs.
+    var allowsFirstResponderAcquisition: Bool = false
     private var pointerFocusAllowanceDepth: Int = 0
-    private var programmaticFocusAllowanceDepth: Int = 0
     private var pasteAsPlainTextTargetAvailable = false
     private var lastPasteAsPlainTextPerformKeyEventTimestamp: TimeInterval?
     var allowsFirstResponderAcquisitionEffective: Bool {
-        allowsFirstResponderAcquisition ||
-            pointerFocusAllowanceDepth > 0 ||
-            programmaticFocusAllowanceDepth > 0
+        allowsFirstResponderAcquisition || pointerFocusAllowanceDepth > 0
     }
     var debugPointerFocusAllowanceDepth: Int { pointerFocusAllowanceDepth }
-    var debugProgrammaticFocusAllowanceDepth: Int { programmaticFocusAllowanceDepth }
 
     override init(frame: NSRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame, configuration: configuration)
@@ -422,7 +423,6 @@ final class CmuxWebView: WKWebView {
                 "browser.focus.blockedBecome web=\(ObjectIdentifier(self)) " +
                 "policy=\(allowsFirstResponderAcquisition ? 1 : 0) " +
                 "pointerDepth=\(pointerFocusAllowanceDepth) " +
-                "programmaticDepth=\(programmaticFocusAllowanceDepth) " +
                 "eventType=\(eventType)"
             )
 #endif
@@ -438,7 +438,6 @@ final class CmuxWebView: WKWebView {
             "browser.focus.become web=\(ObjectIdentifier(self)) result=\(result ? 1 : 0) " +
             "policy=\(allowsFirstResponderAcquisition ? 1 : 0) " +
             "pointerDepth=\(pointerFocusAllowanceDepth) " +
-            "programmaticDepth=\(programmaticFocusAllowanceDepth) " +
             "eventType=\(eventType)"
         )
 #endif
@@ -467,54 +466,125 @@ final class CmuxWebView: WKWebView {
         return body()
     }
 
-    /// Temporarily permits explicit app-owned focus transitions into this webview
-    /// without allowing background page autofocus to bypass pane focus policy.
-    func withProgrammaticFocusAllowance<T>(_ body: () -> T) -> T {
-        programmaticFocusAllowanceDepth += 1
-#if DEBUG
-        dlog(
-            "browser.focus.programmaticAllowance.enter web=\(ObjectIdentifier(self)) " +
-            "depth=\(programmaticFocusAllowanceDepth)"
-        )
-#endif
-        defer {
-            programmaticFocusAllowanceDepth = max(0, programmaticFocusAllowanceDepth - 1)
-#if DEBUG
-            dlog(
-                "browser.focus.programmaticAllowance.exit web=\(ObjectIdentifier(self)) " +
-                "depth=\(programmaticFocusAllowanceDepth)"
-            )
-#endif
-        }
-        return body()
-    }
-
     @discardableResult
     func requestWebContentFirstResponder(in window: NSWindow) -> Bool {
-        withProgrammaticFocusAllowance {
-            if let firstResponderView = window.firstResponder as? NSView,
-               firstResponderView !== self,
-               firstResponderView.isDescendant(of: self) {
+        if let contentResponder = preferredWebContentFirstResponder(in: window) {
+            if window.firstResponder === contentResponder {
 #if DEBUG
                 dlog(
                     "browser.focus.acquireWebContent web=\(ObjectIdentifier(self)) " +
-                    "responder=\(String(describing: type(of: firstResponderView))) result=already_content"
+                    "responder=\(String(describing: type(of: contentResponder))) result=already_content"
                 )
 #endif
                 NotificationCenter.default.post(name: .browserDidBecomeFirstResponderWebView, object: self)
                 return true
             }
 
-            let focusedWrapper = window.makeFirstResponder(self)
+            if window.makeFirstResponder(contentResponder) {
+#if DEBUG
+                dlog(
+                    "browser.focus.acquireWebContent web=\(ObjectIdentifier(self)) " +
+                    "responder=\(String(describing: type(of: contentResponder))) result=content"
+                )
+#endif
+                NotificationCenter.default.post(name: .browserDidBecomeFirstResponderWebView, object: self)
+                return true
+            }
+        }
+
+        if window.firstResponder === self {
 #if DEBUG
             dlog(
                 "browser.focus.acquireWebContent web=\(ObjectIdentifier(self)) " +
-                "responder=\(String(describing: type(of: self))) " +
-                "result=\(focusedWrapper ? "wrapper" : "failed")"
+                "responder=\(String(describing: type(of: self))) result=already_wrapper"
             )
 #endif
-            return focusedWrapper
+            return true
         }
+
+        let focusedWrapper = window.makeFirstResponder(self)
+#if DEBUG
+        dlog(
+            "browser.focus.acquireWebContent web=\(ObjectIdentifier(self)) " +
+            "responder=\(String(describing: type(of: self))) " +
+            "result=\(focusedWrapper ? "wrapper" : "failed")"
+        )
+#endif
+        return focusedWrapper
+    }
+
+    @discardableResult
+    func reassertWebContentFirstResponder(in window: NSWindow, reason: String) -> Bool {
+        if let contentResponder = preferredWebContentFirstResponder(in: window) {
+            if window.firstResponder === contentResponder {
+#if DEBUG
+                dlog(
+                    "browser.focus.reassertWebContent web=\(ObjectIdentifier(self)) " +
+                    "reason=\(reason) mode=already_content " +
+                    "responder=\(String(describing: type(of: contentResponder)))"
+                )
+#endif
+                NotificationCenter.default.post(name: .browserDidBecomeFirstResponderWebView, object: self)
+                return true
+            }
+
+            let focusedContent = window.makeFirstResponder(contentResponder)
+#if DEBUG
+            dlog(
+                "browser.focus.reassertWebContent web=\(ObjectIdentifier(self)) " +
+                "reason=\(reason) mode=content " +
+                "responder=\(String(describing: type(of: contentResponder))) " +
+                "result=\(focusedContent ? 1 : 0)"
+            )
+#endif
+            if focusedContent {
+                NotificationCenter.default.post(name: .browserDidBecomeFirstResponderWebView, object: self)
+                return true
+            }
+        }
+
+        let hadWrapperResponder = window.firstResponder === self
+        let yieldedWrapper = hadWrapperResponder ? window.makeFirstResponder(nil) : true
+        let focusedWrapper = window.makeFirstResponder(self)
+#if DEBUG
+        dlog(
+            "browser.focus.reassertWebContent web=\(ObjectIdentifier(self)) " +
+            "reason=\(reason) mode=wrapper hadWrapper=\(hadWrapperResponder ? 1 : 0) " +
+            "yielded=\(yieldedWrapper ? 1 : 0) result=\(focusedWrapper ? 1 : 0)"
+        )
+#endif
+        return focusedWrapper
+    }
+
+    private func preferredWebContentFirstResponder(in window: NSWindow) -> NSView? {
+        if let firstResponder = window.firstResponder as? NSView,
+           firstResponder !== self,
+           firstResponder.isDescendant(of: self),
+           Self.isWebContentFirstResponderCandidate(firstResponder) {
+            return firstResponder
+        }
+
+        var stack = Array(subviews.reversed())
+        while let view = stack.popLast() {
+            if view.window === window,
+               !view.isHiddenOrHasHiddenAncestor,
+               Self.isWebContentFirstResponderCandidate(view) {
+                return view
+            }
+            stack.append(contentsOf: view.subviews.reversed())
+        }
+
+        return nil
+    }
+
+    private static func isWebContentFirstResponderCandidate(_ view: NSView) -> Bool {
+        guard view.acceptsFirstResponder else { return false }
+        if webContentInputSelectors.contains(where: { view.responds(to: $0) }) {
+            return true
+        }
+
+        let className = String(describing: type(of: view))
+        return className.contains("WKContent") || className == "WKView"
     }
 
     private static func isPasteAsPlainTextCommandEquivalent(_ event: NSEvent) -> Bool {

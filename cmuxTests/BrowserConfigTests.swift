@@ -284,6 +284,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         window.makeKeyAndOrderFront(nil)
@@ -317,6 +318,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         window.makeKeyAndOrderFront(nil)
@@ -350,6 +352,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let descendant = FirstResponderView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
@@ -386,6 +389,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let descendant = FirstResponderView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
@@ -423,6 +427,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let descendant = FirstResponderView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
@@ -654,6 +659,7 @@ final class CmuxWebViewKeyEquivalentTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let descendant = FirstResponderView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
@@ -2671,6 +2677,54 @@ final class BrowserOmnibarCommandNavigationTests: XCTestCase {
 
 final class BrowserIMEKeyDownRoutingTests: XCTestCase {
     @MainActor
+    func testWindowPerformKeyEquivalentForwardsSpaceToBrowserKeyDown() {
+        _ = NSApplication.shared
+        AppDelegate.installWindowResponderSwizzlesForTesting()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = container
+
+        let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
+        webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
+        container.addSubview(webView)
+
+        let responder = BrowserMarkedTextProbeTextView(frame: NSRect(x: 0, y: 0, width: 32, height: 20))
+        webView.addSubview(responder)
+
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        XCTAssertTrue(window.makeFirstResponder(responder))
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: " ",
+            charactersIgnoringModifiers: " ",
+            isARepeat: false,
+            keyCode: 49
+        ) else {
+            XCTFail("Failed to construct Space event")
+            return
+        }
+
+        let consumed = window.performKeyEquivalent(with: event)
+
+        XCTAssertTrue(consumed, "Plain browser Space should be handled by direct keyDown forwarding")
+        XCTAssertEqual(responder.keyDownEvents.count, 1, "Space should reach the browser responder exactly once")
+    }
+
+    @MainActor
     func testWindowPerformKeyEquivalentDoesNotForwardReturnDuringMarkedTextComposition() {
         _ = NSApplication.shared
         AppDelegate.installWindowResponderSwizzlesForTesting()
@@ -2686,6 +2740,7 @@ final class BrowserIMEKeyDownRoutingTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let responder = BrowserMarkedTextProbeTextView(frame: NSRect(x: 0, y: 0, width: 32, height: 20))
@@ -2735,6 +2790,7 @@ final class BrowserIMEKeyDownRoutingTests: XCTestCase {
 
         let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
         webView.autoresizingMask = [.width, .height]
+        webView.allowsFirstResponderAcquisition = true
         container.addSubview(webView)
 
         let responder = BrowserMarkedTextProbeTextView(frame: NSRect(x: 0, y: 0, width: 32, height: 20))
@@ -2877,6 +2933,61 @@ final class BrowserReturnKeyDownRoutingTests: XCTestCase {
         XCTAssertFalse(
             shouldDispatchBrowserReturnViaFirstResponderKeyDown(
                 keyCode: 36,
+                firstResponderIsBrowser: true,
+                flags: [.control]
+            )
+        )
+    }
+
+    func testRoutesForSpaceWhenBrowserFirstResponder() {
+        XCTAssertTrue(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
+                firstResponderIsBrowser: true,
+                flags: []
+            )
+        )
+    }
+
+    func testRoutesForShiftSpaceWhenBrowserFirstResponder() {
+        XCTAssertTrue(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
+                firstResponderIsBrowser: true,
+                flags: [.shift]
+            )
+        )
+    }
+
+    func testDoesNotRouteSpaceWhenBrowserFirstResponderHasMarkedText() {
+        XCTAssertFalse(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
+                firstResponderIsBrowser: true,
+                firstResponderHasMarkedText: true,
+                flags: []
+            )
+        )
+    }
+
+    func testDoesNotRouteModifiedSpaceWhenBrowserFirstResponder() {
+        XCTAssertFalse(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
+                firstResponderIsBrowser: true,
+                flags: [.command]
+            )
+        )
+        XCTAssertFalse(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
+                firstResponderIsBrowser: true,
+                flags: [.option]
+            )
+        )
+        XCTAssertFalse(
+            shouldDispatchBrowserSpaceViaFirstResponderKeyDown(
+                keyCode: 49,
                 firstResponderIsBrowser: true,
                 flags: [.control]
             )

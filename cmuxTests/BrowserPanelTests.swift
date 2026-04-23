@@ -220,6 +220,34 @@ final class BrowserPanelAddressBarFocusRequestTests: XCTestCase {
         panel.acknowledgeAddressBarFocusRequest(secondRequest)
         XCTAssertNil(panel.pendingAddressBarFocusRequestId)
     }
+
+    func testAddressBarBlurClearsPreferredFocusIntentAndSuppression() {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let requestId = panel.requestAddressBarFocus()
+        panel.acknowledgeAddressBarFocusRequest(requestId)
+
+        XCTAssertEqual(panel.preferredFocusIntentForActivation(), .browser(.addressBar))
+        XCTAssertTrue(panel.shouldSuppressWebViewFocus())
+
+        panel.noteAddressBarBlurred(reason: "test")
+
+        XCTAssertNil(panel.pendingAddressBarFocusRequestId)
+        XCTAssertEqual(panel.preferredFocusIntentForActivation(), .browser(.webView))
+        XCTAssertFalse(panel.shouldSuppressWebViewFocus())
+    }
+
+    func testWebViewFocusClearsStaleAddressBarIntent() {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let requestId = panel.requestAddressBarFocus()
+        panel.acknowledgeAddressBarFocusRequest(requestId)
+
+        XCTAssertEqual(panel.preferredFocusIntentForActivation(), .browser(.addressBar))
+
+        panel.noteWebViewFocused()
+
+        XCTAssertEqual(panel.preferredFocusIntentForActivation(), .browser(.webView))
+        XCTAssertFalse(panel.shouldSuppressWebViewFocus())
+    }
 }
 
 @MainActor
@@ -545,8 +573,44 @@ final class BrowserPanelFindFocusRequestTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         contentView.layoutSubtreeIfNeeded()
 
+        let cmuxWebView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        cmuxWebView.allowsFirstResponderAcquisition = true
         XCTAssertTrue(window.makeFirstResponder(contentResponder))
         XCTAssertTrue(window.firstResponder === contentResponder)
+        cmuxWebView.allowsFirstResponderAcquisition = false
+
+        XCTAssertTrue(panel.requestExplicitWebViewFocus())
+        XCTAssertTrue(window.firstResponder === contentResponder)
+        XCTAssertEqual(panel.captureFocusIntent(in: window), .browser(.webView))
+    }
+
+    @MainActor
+    func testExplicitWebViewFocusPromotesWrapperToWebContentResponder() throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        let contentResponder = BrowserPanelFakeWebContentResponderView(frame: panel.webView.bounds)
+        contentResponder.autoresizingMask = [.width, .height]
+        panel.webView.addSubview(contentResponder)
+
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+
+        let cmuxWebView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        cmuxWebView.allowsFirstResponderAcquisition = true
+        XCTAssertTrue(window.makeFirstResponder(panel.webView))
+        XCTAssertTrue(window.firstResponder === panel.webView)
+        cmuxWebView.allowsFirstResponderAcquisition = false
 
         XCTAssertTrue(panel.requestExplicitWebViewFocus())
         XCTAssertTrue(window.firstResponder === contentResponder)
@@ -636,6 +700,75 @@ final class BrowserPanelFindFocusRequestTests: XCTestCase {
         XCTAssertFalse(window.makeFirstResponder(panel.webView))
         XCTAssertTrue(panel.requestExplicitWebViewFocus())
         XCTAssertEqual(panel.captureFocusIntent(in: window), .browser(.webView))
+    }
+
+    @MainActor
+    func testWindowActivationReassertsFocusedWebContentIntent() throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+
+        let cmuxWebView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        cmuxWebView.allowsFirstResponderAcquisition = true
+        XCTAssertTrue(window.makeFirstResponder(panel.webView))
+        XCTAssertTrue(window.firstResponder === panel.webView)
+        cmuxWebView.allowsFirstResponderAcquisition = false
+
+        panel.notePanelFocusChanged(true)
+        cmuxWebView.allowsFirstResponderAcquisition = false
+
+        XCTAssertTrue(panel.reassertWebContentFocusAfterWindowActivation(in: window, reason: "test"))
+        XCTAssertTrue(window.firstResponder === panel.webView)
+        XCTAssertTrue(cmuxWebView.allowsFirstResponderAcquisition)
+        XCTAssertEqual(panel.captureFocusIntent(in: window), .browser(.webView))
+    }
+
+    @MainActor
+    func testWindowActivationDoesNotStealAddressBarIntent() throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 480),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+
+        let contentView = try XCTUnwrap(window.contentView)
+        panel.webView.frame = contentView.bounds
+        panel.webView.autoresizingMask = [.width, .height]
+        contentView.addSubview(panel.webView)
+
+        let addressResponder = BrowserPanelFakeWebContentResponderView(
+            frame: NSRect(x: 20, y: 20, width: 180, height: 24)
+        )
+        contentView.addSubview(addressResponder)
+
+        window.makeKeyAndOrderFront(nil)
+        contentView.layoutSubtreeIfNeeded()
+
+        panel.notePanelFocusChanged(true)
+        let requestId = panel.requestAddressBarFocus()
+        panel.acknowledgeAddressBarFocusRequest(requestId)
+        XCTAssertTrue(window.makeFirstResponder(addressResponder))
+
+        XCTAssertFalse(panel.reassertWebContentFocusAfterWindowActivation(in: window, reason: "test"))
+        XCTAssertTrue(window.firstResponder === addressResponder)
+        XCTAssertEqual(panel.preferredFocusIntentForActivation(), .browser(.addressBar))
+        XCTAssertTrue(panel.shouldSuppressWebViewFocus())
     }
 
     @MainActor

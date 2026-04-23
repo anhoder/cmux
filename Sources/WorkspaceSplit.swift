@@ -577,8 +577,33 @@ enum WorkspaceLayoutDebugCounters {
 }
 #endif
 
+#if DEBUG
+private let cmuxDebugLogLock = NSLock()
+#endif
+
 func dlog(_ message: String) {
     NSLog("%@", message)
+#if DEBUG
+    guard let rawLogPath = ProcessInfo.processInfo.environment["CMUX_DEBUG_LOG"],
+          !rawLogPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return
+    }
+
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    let line = "\(timestamp) \(message)\n"
+    let data = Data(line.utf8)
+
+    cmuxDebugLogLock.lock()
+    defer { cmuxDebugLogLock.unlock() }
+
+    if let handle = FileHandle(forWritingAtPath: rawLogPath) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: rawLogPath, contents: data)
+    }
+#endif
 }
 
 #if DEBUG

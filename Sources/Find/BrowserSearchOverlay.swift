@@ -303,10 +303,21 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         }
 
         func focusField(_ field: BrowserSearchNativeTextField, in window: NSWindow, requestId: UUID?) {
-            guard window.makeFirstResponder(field) else { return }
+            let before = window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+            let focused = window.makeFirstResponder(field)
+#if DEBUG
+            dlog(
+                "browser.focus.find.fieldFocus panel=\(parent.panelId.uuidString.prefix(5)) " +
+                "request=\((requestId ?? parent.focusRequestId)?.uuidString.prefix(8) ?? "nil") " +
+                "result=\(focused ? 1 : 0) before=\(before) " +
+                "after=\(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")"
+            )
+#endif
+            guard focused else { return }
             activeFocusRequestId = requestId ?? parent.focusRequestId
             setBrowserSearchOverlayPanelId(parent.panelId, on: field)
             setActiveBrowserSearchOverlayPanelId(parent.panelId, on: window)
+            parent.onFieldDidFocus(activeFocusRequestId)
             DispatchQueue.main.async { [weak field] in
                 guard let field,
                       let editor = field.currentEditor() as? NSTextView else { return }
@@ -319,14 +330,32 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
         func requestFocusIfNeeded(for field: BrowserSearchNativeTextField) {
             guard let requestId = parent.focusRequestId,
                   parent.canApplyFocusRequest(requestId),
-                  let window = field.window else { return }
+                  let window = field.window else {
+#if DEBUG
+                dlog(
+                    "browser.focus.find.fieldFocus.skip panel=\(parent.panelId.uuidString.prefix(5)) " +
+                    "request=\(parent.focusRequestId?.uuidString.prefix(8) ?? "nil") " +
+                    "reason=not_applicable"
+                )
+#endif
+                return
+            }
 
             let fr = window.firstResponder
             let isFirstResponder =
                 fr === field ||
                 field.currentEditor() != nil ||
                 ((fr as? NSTextView)?.delegate as? NSTextField) === field
-            guard !isFirstResponder, pendingFocusRequest != true else { return }
+            guard !isFirstResponder, pendingFocusRequest != true else {
+#if DEBUG
+                dlog(
+                    "browser.focus.find.fieldFocus.skip panel=\(parent.panelId.uuidString.prefix(5)) " +
+                    "request=\(requestId.uuidString.prefix(8)) reason=\(isFirstResponder ? "already_focused" : "pending") " +
+                    "fr=\(fr.map { String(describing: type(of: $0)) } ?? "nil")"
+                )
+#endif
+                return
+            }
 
             pendingFocusRequest = true
             DispatchQueue.main.async { [weak field, weak self] in
@@ -341,7 +370,16 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
                     fr === field ||
                     field.currentEditor() != nil ||
                     ((fr as? NSTextView)?.delegate as? NSTextField) === field
-                guard !alreadyFocused else { return }
+                guard !alreadyFocused else {
+#if DEBUG
+                    dlog(
+                        "browser.focus.find.fieldFocus.skip panel=\(self.parent.panelId.uuidString.prefix(5)) " +
+                        "request=\(requestId.uuidString.prefix(8)) reason=already_focused_async " +
+                        "fr=\(fr.map { String(describing: type(of: $0)) } ?? "nil")"
+                    )
+#endif
+                    return
+                }
                 self.focusField(field, in: window, requestId: requestId)
             }
         }
@@ -358,11 +396,27 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
                 setActiveBrowserSearchOverlayPanelId(parent.panelId, on: field.window)
                 markFieldEditor(field.currentEditor() as? NSTextView)
             }
+#if DEBUG
+            let window = (obj.object as? NSView)?.window
+            dlog(
+                "browser.focus.find.fieldBeginEditing panel=\(parent.panelId.uuidString.prefix(5)) " +
+                "request=\((activeFocusRequestId ?? parent.focusRequestId)?.uuidString.prefix(8) ?? "nil") " +
+                "fr=\(window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")"
+            )
+#endif
             parent.onFieldDidFocus(activeFocusRequestId ?? parent.focusRequestId)
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
             let requestId = activeFocusRequestId ?? parent.focusRequestId
+#if DEBUG
+            let window = (obj.object as? NSView)?.window
+            dlog(
+                "browser.focus.find.fieldEndEditing panel=\(parent.panelId.uuidString.prefix(5)) " +
+                "request=\(requestId?.uuidString.prefix(8) ?? "nil") " +
+                "fr=\(window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")"
+            )
+#endif
             clearActiveBrowserSearchOverlayPanelId(parent.panelId, on: (obj.object as? NSView)?.window)
             parent.onFieldDidEndEditing(requestId)
             activeFocusRequestId = nil
@@ -456,6 +510,17 @@ private struct BrowserSearchTextFieldRepresentable: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: BrowserSearchNativeTextField, coordinator: Coordinator) {
+        let activeRequestId = coordinator.activeFocusRequestId ?? coordinator.parent.focusRequestId
+#if DEBUG
+        dlog(
+            "browser.focus.find.fieldDismantle panel=\(coordinator.parent.panelId.uuidString.prefix(5)) " +
+            "request=\(activeRequestId?.uuidString.prefix(8) ?? "nil") " +
+            "fr=\(nsView.window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")"
+        )
+#endif
+        if let activeRequestId {
+            coordinator.parent.onFieldDidEndEditing(activeRequestId)
+        }
         clearActiveBrowserSearchOverlayPanelId(coordinator.parent.panelId, on: nsView.window)
         nsView.delegate = nil
         nsView.onWindowAttachment = nil
