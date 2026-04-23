@@ -219,7 +219,7 @@ final class ReactGrabPastebackTargetTests: XCTestCase {
         )
     }
 
-    func testSendTextToTerminalSurfaceQueuesImmediateTextOnPreferredTerminalWhenSurfaceIsMissing() {
+    func testSendTextToTerminalSurfaceDoesNotInvokeBeforeSendWhileTextIsOnlyQueued() {
         let workspace = Workspace(title: "Tests")
         guard let terminalId = workspace.focusedPanelId,
               let terminalPanel = workspace.terminalPanel(for: terminalId),
@@ -246,7 +246,7 @@ final class ReactGrabPastebackTargetTests: XCTestCase {
             }
         )
 
-        XCTAssertTrue(beforeSendCalled)
+        XCTAssertFalse(beforeSendCalled)
         let snapshot = terminalPanel.surface.debugPendingSocketInputSnapshot()
         XCTAssertEqual(snapshot.items, 1)
         XCTAssertEqual(snapshot.keys, 0)
