@@ -4044,6 +4044,10 @@ class TerminalController {
 
         let identityFile = v2RawString(params, "identity_file")?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sshOptions = v2StringArray(params, "ssh_options") ?? []
+        let transportRaw = v2RawString(params, "transport")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let transport = WorkspaceRemoteTransport(rawValue: transportRaw ?? "") ?? .ssh
         let autoConnect = v2Bool(params, "auto_connect") ?? true
         var relayPort: Int?
         if v2HasNonNullParam(params, "relay_port") {
@@ -4075,7 +4079,7 @@ class TerminalController {
 #if DEBUG
         dlog(
             "workspace.remote.configure.request workspace=\(workspaceId.uuidString.prefix(8)) " +
-            "target=\(destination) port=\(sshPort.map(String.init) ?? "nil") " +
+            "target=\(destination) transport=\(transport.rawValue) port=\(sshPort.map(String.init) ?? "nil") " +
             "autoConnect=\(autoConnect ? 1 : 0) relayPort=\(relayPort.map(String.init) ?? "nil") " +
             "localSocket=\(localSocketPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? localSocketPath! : "nil") " +
             "sshOptions=\(sshOptions.joined(separator: "|"))"
@@ -4094,6 +4098,7 @@ class TerminalController {
             }
 
             let config = WorkspaceRemoteConfiguration(
+                transport: transport,
                 destination: destination,
                 port: sshPort,
                 identityFile: identityFile?.isEmpty == true ? nil : identityFile,

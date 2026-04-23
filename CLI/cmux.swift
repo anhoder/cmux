@@ -2157,7 +2157,14 @@ struct CMUXCLI {
                 if let normalizedProvider { params["provider"] = normalizedProvider }
                 let idempotency = try Self.activeVMCreateIdempotency(image: imageOpt, provider: normalizedProvider)
                 params["idempotency_key"] = idempotency.key
+                let vmCreateStartedAt = Date()
                 let response = try client.sendV2(method: "vm.create", params: params, responseTimeout: 300)
+                logVMTiming(
+                    "create",
+                    vmID: (response["id"] as? String) ?? "?",
+                    provider: (response["provider"] as? String) ?? normalizedProvider ?? "?",
+                    startedAt: vmCreateStartedAt
+                )
                 if jsonOutput {
                     Self.clearVMCreateIdempotency(idempotency)
                     print(jsonString(response))
@@ -2425,8 +2432,9 @@ struct CMUXCLI {
                                   (remote["enabled"] as? Bool) == true else {
                                 return ""
                             }
+                            let transport = (remote["transport"] as? String) ?? "remote"
                             let state = (remote["state"] as? String) ?? "unknown"
-                            return "  [ssh:\(state)]"
+                            return "  [\(transport):\(state)]"
                         }()
                         let prefix = selected ? "* " : "  "
                         let selTag = selected ? "  [selected]" : ""
@@ -2440,6 +2448,8 @@ struct CMUXCLI {
             try runSSH(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
         case "ssh-session-end":
             try runSSHSessionEnd(commandArgs: commandArgs, client: client)
+        case "vm-pty-attach":
+            try runVMPtyAttach(commandArgs: commandArgs, client: client)
 
         case "new-workspace":
             let (commandOpt, rem0) = parseOption(commandArgs, name: "--command")
@@ -4582,15 +4592,23 @@ struct CMUXCLI {
             localCLIPath: resolvedExecutableURL()?.path,
             foregroundAuthToken: deferredRemoteReconnectToken
         )
+        let sshConnectionTimingCommand = sshConnectionTimingLocalCommand(
+            target: sshOptions.displayDestination,
+            relayPort: sshOptions.remoteRelayPort
+        )
+        let combinedLocalCommand = combinedLocalShellCommand([
+            deferredRemoteReconnectCommand,
+            sshConnectionTimingCommand,
+        ])
         let configuredForegroundAuthToken = deferredRemoteReconnectCommand == nil ? nil : deferredRemoteReconnectToken
         let startupInitialSSHCommand = buildSSHCommandText(
             sshOptions,
-            localCommand: deferredRemoteReconnectCommand
+            localCommand: combinedLocalCommand
         )
         let startupRemoteTerminalSSHCommand = buildSSHCommandText(
             sshOptions,
             remoteBootstrapScript: remoteTerminalBootstrapScript,
-            localCommand: deferredRemoteReconnectCommand
+            localCommand: combinedLocalCommand
         )
         let initialSSHStartupCommand: String
         let remoteTerminalSSHStartupCommand: String
@@ -4600,7 +4618,7 @@ struct CMUXCLI {
                 remoteBootstrapScript: remoteTerminalBootstrapScript,
                 shellFeatures: shellFeaturesValue,
                 remoteRelayPort: sshOptions.remoteRelayPort,
-                localCommand: deferredRemoteReconnectCommand
+                localCommand: combinedLocalCommand
             )
             initialSSHStartupCommand = bootstrapSSHStartupCommand
             remoteTerminalSSHStartupCommand = bootstrapSSHStartupCommand
@@ -4698,7 +4716,12 @@ struct CMUXCLI {
             // so we intentionally select the newly created workspace after wiring
             // up the remote connection — unless --no-focus is passed.
             if !sshOptions.noFocus {
+                let selectStartedAt = Date()
                 _ = try client.sendV2(method: "workspace.select", params: selectParams)
+                cliDebugLog(
+                    "cli.ssh.timing target=\(sshOptions.displayDestination) relayPort=\(sshOptions.remoteRelayPort) " +
+                    "workspace=\(String(workspaceId.prefix(8))) stage=workspace.select elapsedMs=\(Int(Date().timeIntervalSince(selectStartedAt) * 1000))"
+                )
             }
             let remoteState = ((configuredPayload["remote"] as? [String: Any])?["state"] as? String) ?? "unknown"
             cliDebugLog(
@@ -5478,11 +5501,40 @@ struct CMUXCLI {
     /// Open an interactive cmux-managed shell on a cloud VM. Freestyle uses the existing SSH
     /// workspace path. E2B uses the cmuxd-remote WebSocket PTY path because E2B does not expose
     /// raw TCP/22.
+    private func logVMTiming(
+        _ stage: String,
+        vmID: String,
+        provider: String? = nil,
+        transport: String? = nil,
+        startedAt: Date,
+        extra: String = ""
+    ) {
+        let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+        var parts = [
+            "cli.vm.timing",
+            "vm=\(String(vmID.prefix(8)))",
+            "stage=\(stage)",
+            "elapsedMs=\(elapsedMs)",
+        ]
+        if let provider, !provider.isEmpty {
+            parts.append("provider=\(provider)")
+        }
+        if let transport, !transport.isEmpty {
+            parts.append("transport=\(transport)")
+        }
+        if !extra.isEmpty {
+            parts.append(extra)
+        }
+        cliDebugLog(parts.joined(separator: " "))
+    }
+
     private func vmOpenShell(id: String, workspaceName: String?, client: SocketClient, jsonOutput: Bool, idFormat: CLIIDFormat) throws {
+        let attachInfoStartedAt = Date()
         let response = try client.sendV2(method: "vm.attach_info", params: ["id": id], responseTimeout: 60)
         let transport = (response["transport"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? "ssh"
+        logVMTiming("attach_info", vmID: id, transport: transport, startedAt: attachInfoStartedAt)
         if transport == "websocket" {
             let endpoint = try parseVMPtyWebSocketEndpoint(response)
             try runVMPtyWebSocketWorkspace(
@@ -5593,35 +5645,87 @@ struct CMUXCLI {
         jsonOutput: Bool,
         idFormat: CLIIDFormat
     ) throws {
+        let startedAt = Date()
         let configURL = try writeVMPtyWebSocketConfig(endpoint)
         let executablePath = resolvedExecutableURL()?.path ?? (args.first ?? "cmux")
-        let startupCommand = "\(shellQuote(executablePath)) vm-pty-connect --config \(shellQuote(configURL.path))"
+        let initialStartupCommand = "\(shellQuote(executablePath)) vm-pty-connect --config \(shellQuote(configURL.path)) --id \(shellQuote(id))"
+        let splitStartupCommand = "\(shellQuote(executablePath)) vm-pty-attach --id \(shellQuote(id))"
         var params: [String: Any] = [
-            "initial_command": startupCommand,
+            "initial_command": initialStartupCommand,
             "description": "E2B WebSocket PTY",
         ]
         if let workspaceName = workspaceName?.trimmingCharacters(in: .whitespacesAndNewlines),
            !workspaceName.isEmpty {
             params["title"] = workspaceName
         }
+        let workspaceCreateStartedAt = Date()
         let workspaceCreate = try client.sendV2(method: "workspace.create", params: params)
         guard let workspaceId = workspaceCreate["workspace_id"] as? String, !workspaceId.isEmpty else {
             throw CLIError(message: "workspace.create did not return workspace_id")
         }
+        logVMTiming(
+            "workspace.create",
+            vmID: id,
+            transport: "websocket",
+            startedAt: workspaceCreateStartedAt,
+            extra: "workspace=\(String(workspaceId.prefix(8)))"
+        )
 
-        var payload = workspaceCreate
+        let target = URL(string: endpoint.url)?.host ?? "websocket"
+        let configureStartedAt = Date()
+        let configuredPayload = try client.sendV2(method: "workspace.remote.configure", params: [
+            "workspace_id": workspaceId,
+            "destination": target,
+            "transport": "websocket",
+            "auto_connect": false,
+            "terminal_startup_command": splitStartupCommand,
+            "skip_daemon_bootstrap": true,
+        ])
+        logVMTiming(
+            "workspace.remote.configure",
+            vmID: id,
+            transport: "websocket",
+            startedAt: configureStartedAt,
+            extra: "workspace=\(String(workspaceId.prefix(8)))"
+        )
+
+        var selectParams: [String: Any] = ["workspace_id": workspaceId]
+        if let workspaceWindowId = (workspaceCreate["window_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !workspaceWindowId.isEmpty {
+            selectParams["window_id"] = workspaceWindowId
+        }
+        let selectStartedAt = Date()
+        _ = try client.sendV2(method: "workspace.select", params: selectParams)
+        logVMTiming(
+            "workspace.select",
+            vmID: id,
+            transport: "websocket",
+            startedAt: selectStartedAt,
+            extra: "workspace=\(String(workspaceId.prefix(8)))"
+        )
+
+        var payload = configuredPayload
+        payload["workspace_id"] = workspaceId
+        payload["workspace_ref"] = workspaceCreate["workspace_ref"] ?? payload["workspace_ref"] ?? NSNull()
+        payload["window_id"] = workspaceCreate["window_id"] ?? payload["window_id"] ?? NSNull()
+        payload["window_ref"] = workspaceCreate["window_ref"] ?? payload["window_ref"] ?? NSNull()
         payload["vm_id"] = id
         payload["transport"] = "websocket"
-        if let host = URL(string: endpoint.url)?.host {
-            payload["target"] = host
-        }
+        payload["target"] = target
         payload["expires_at_unix"] = endpoint.expiresAtUnix
+        logVMTiming(
+            "complete",
+            vmID: id,
+            transport: "websocket",
+            startedAt: startedAt,
+            extra: "workspace=\(String(workspaceId.prefix(8)))"
+        )
 
         if jsonOutput {
             print(jsonString(formatIDs(payload, mode: idFormat)))
         } else {
             let workspaceHandle = formatHandle(payload, kind: "workspace", idFormat: idFormat) ?? workspaceId
-            let target = (payload["target"] as? String) ?? "websocket"
             print("OK workspace=\(workspaceHandle) target=\(target) transport=websocket")
         }
     }
@@ -5642,7 +5746,8 @@ struct CMUXCLI {
     }
 
     private func runVMPtyConnect(commandArgs: [String]) throws {
-        let (configPath, remaining) = parseOption(commandArgs, name: "--config")
+        let (configPath, rem0) = parseOption(commandArgs, name: "--config")
+        let (vmIDOpt, remaining) = parseOption(rem0, name: "--id")
         if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
             throw CLIError(message: "vm-pty-connect: unknown flag '\(unknown)'")
         }
@@ -5653,7 +5758,48 @@ struct CMUXCLI {
         let data = try Data(contentsOf: configURL)
         try? FileManager.default.removeItem(at: configURL)
         let config = try JSONDecoder().decode(VMPtyWebSocketConfig.self, from: data)
-        try VMPtyWebSocketBridge(config: config).run()
+        let vmID = vmIDOpt?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let startedAt = Date()
+        let debugEvent: ((String) -> Void)? = {
+            guard let vmID, !vmID.isEmpty else { return nil }
+            return { [self] stage in
+                logVMTiming(stage, vmID: vmID, transport: "websocket", startedAt: startedAt)
+            }
+        }()
+        try VMPtyWebSocketBridge(config: config, debugEvent: debugEvent).run()
+    }
+
+    private func runVMPtyAttach(commandArgs: [String], client: SocketClient) throws {
+        let (vmIDOpt, remaining) = parseOption(commandArgs, name: "--id")
+        if let unknown = remaining.first(where: { $0.hasPrefix("--") }) {
+            throw CLIError(message: "vm-pty-attach: unknown flag '\(unknown)'")
+        }
+        guard remaining.isEmpty else {
+            throw CLIError(message: "Usage: cmux vm-pty-attach --id <vm-id>")
+        }
+        guard let vmID = vmIDOpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !vmID.isEmpty else {
+            throw CLIError(message: "Usage: cmux vm-pty-attach --id <vm-id>")
+        }
+
+        let startedAt = Date()
+        func log(_ stage: String, extra: String = "") {
+            logVMTiming(stage, vmID: vmID, transport: "websocket", startedAt: startedAt, extra: extra)
+        }
+
+        let attachInfoStartedAt = Date()
+        let response = try client.sendV2(method: "vm.attach_info", params: ["id": vmID], responseTimeout: 60)
+        logVMTiming("attach_info", vmID: vmID, transport: "websocket", startedAt: attachInfoStartedAt)
+        let endpoint = try parseVMPtyWebSocketEndpoint(response)
+        let config = VMPtyWebSocketConfig(
+            url: endpoint.url,
+            headers: endpoint.headers,
+            token: endpoint.token,
+            sessionId: endpoint.sessionId
+        )
+        try VMPtyWebSocketBridge(config: config, debugEvent: { stage in
+            log(stage)
+        }).run()
     }
 
     private final class VMPtyWebSocketBridgeDelegate: NSObject, URLSessionWebSocketDelegate {
@@ -5703,13 +5849,15 @@ struct CMUXCLI {
 
     private final class VMPtyWebSocketBridge {
         private let config: VMPtyWebSocketConfig
+        private let debugEvent: ((String) -> Void)?
         private let sendQueue = DispatchQueue(label: "com.cmux.vm-pty.websocket.send")
         private let stopLock = NSLock()
         private var stopped = false
         private var task: URLSessionWebSocketTask?
 
-        init(config: VMPtyWebSocketConfig) {
+        init(config: VMPtyWebSocketConfig, debugEvent: ((String) -> Void)? = nil) {
             self.config = config
+            self.debugEvent = debugEvent
         }
 
         func run() throws {
@@ -5735,9 +5883,12 @@ struct CMUXCLI {
             guard delegate.waitForOpen(timeout: 15) else {
                 throw CLIError(message: "vm-pty-connect: timed out opening websocket")
             }
+            debugEvent?("websocket.open")
 
             try sendAuthFrame()
+            debugEvent?("websocket.auth")
             try waitForReady(delegate: delegate)
+            debugEvent?("websocket.ready")
 
             let rawMode = TerminalRawMode()
             defer { rawMode?.restore() }
@@ -6144,6 +6295,30 @@ struct CMUXCLI {
             "fi;",
             "unset cmux_reconnect_socket cmux_reconnect_cli;",
         ].joined(separator: " ")
+    }
+
+    private func sshConnectionTimingLocalCommand(target: String, relayPort: Int) -> String {
+        let escapedTarget = target
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return [
+            "cmux_ssh_log_path=\"$(tr -d '\\r\\n' < /tmp/cmux-last-debug-log-path 2>/dev/null || true)\";",
+            "if [ -n \"$cmux_ssh_log_path\" ]; then",
+            "cmux_ssh_ts=\"$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec=\"milliseconds\").replace(\"+00:00\", \"Z\"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)\";",
+            "printf '%s [cmux-cli] cli.ssh.handshake target=\(escapedTarget) relayPort=\(relayPort) stage=ssh.connected workspace=%s surface=%s\\n' \"$cmux_ssh_ts\" \"${CMUX_WORKSPACE_ID:-nil}\" \"${CMUX_SURFACE_ID:-nil}\" >> \"$cmux_ssh_log_path\";",
+            "fi;",
+            "unset cmux_ssh_log_path cmux_ssh_ts;",
+        ].joined(separator: " ")
+    }
+
+    private func combinedLocalShellCommand(_ parts: [String?]) -> String? {
+        let filtered = parts.compactMap { raw -> String? in
+            guard let raw else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        guard !filtered.isEmpty else { return nil }
+        return filtered.joined(separator: " ")
     }
 
     private func shouldDeferRemoteReconnect(in options: [String]) -> Bool {

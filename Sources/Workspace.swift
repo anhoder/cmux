@@ -6016,7 +6016,13 @@ struct WorkspaceRemoteDaemonStatus: Equatable {
     }
 }
 
+enum WorkspaceRemoteTransport: String, Equatable {
+    case ssh
+    case websocket
+}
+
 struct WorkspaceRemoteConfiguration: Equatable {
+    let transport: WorkspaceRemoteTransport
     let destination: String
     let port: Int?
     let identityFile: String?
@@ -6036,6 +6042,7 @@ struct WorkspaceRemoteConfiguration: Equatable {
     let skipDaemonBootstrap: Bool
 
     init(
+        transport: WorkspaceRemoteTransport = .ssh,
         destination: String,
         port: Int?,
         identityFile: String?,
@@ -6049,6 +6056,7 @@ struct WorkspaceRemoteConfiguration: Equatable {
         foregroundAuthToken: String? = nil,
         skipDaemonBootstrap: Bool = false
     ) {
+        self.transport = transport
         self.destination = destination
         self.port = port
         self.identityFile = identityFile
@@ -8181,12 +8189,14 @@ final class Workspace: Identifiable, ObservableObject {
             ]
         }
         if let remoteConfiguration {
+            payload["transport"] = remoteConfiguration.transport.rawValue
             payload["destination"] = remoteConfiguration.destination
             payload["port"] = remoteConfiguration.port ?? NSNull()
             payload["has_identity_file"] = remoteConfiguration.identityFile != nil
             payload["has_ssh_options"] = !remoteConfiguration.sshOptions.isEmpty
             payload["local_proxy_port"] = remoteConfiguration.localProxyPort ?? NSNull()
         } else {
+            payload["transport"] = NSNull()
             payload["destination"] = NSNull()
             payload["port"] = NSNull()
             payload["has_identity_file"] = false
@@ -8228,6 +8238,11 @@ final class Workspace: Identifiable, ObservableObject {
             autoConnect
             || (foregroundAuthToken != nil && foregroundAuthToken == pendingRemoteForegroundAuthToken)
         pendingRemoteForegroundAuthToken = nil
+        if configuration.transport == .websocket {
+            remoteConnectionState = .connected
+            applyBrowserRemoteWorkspaceStatusToPanels()
+            return
+        }
         guard shouldAutoConnect else {
             remoteConnectionState = .disconnected
             applyBrowserRemoteWorkspaceStatusToPanels()
@@ -8905,6 +8920,14 @@ final class Workspace: Identifiable, ObservableObject {
         insertFirst: Bool = false,
         focus: Bool = true
     ) -> TerminalPanel? {
+#if DEBUG
+        let splitTimingStart = ProcessInfo.processInfo.systemUptime
+        let splitTransport = remoteConfiguration?.transport.rawValue ?? "local"
+        dlog(
+            "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
+            "transport=\(splitTransport) stage=start elapsedMs=0.00"
+        )
+#endif
         // Find the pane containing the source panel
         guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
         var sourcePaneId: PaneID?
@@ -8929,6 +8952,13 @@ final class Workspace: Identifiable, ObservableObject {
             template.waitAfterCommand = true
             inheritedConfig = template
         }
+#if DEBUG
+        dlog(
+            "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
+            "transport=\(splitTransport) stage=command_resolved elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
+            "remoteCommand=\(remoteTerminalStartupCommand == nil ? 0 : 1)"
+        )
+#endif
 
         // Inherit working directory: prefer the source panel's reported cwd,
         // then its requested startup cwd if shell integration has not reported
@@ -8969,6 +8999,13 @@ final class Workspace: Identifiable, ObservableObject {
             trackRemoteTerminalSurface(newPanel.id)
         }
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
+#if DEBUG
+        dlog(
+            "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
+            "transport=\(splitTransport) stage=panel_ready elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
+            "newPanel=\(newPanel.id.uuidString.prefix(5))"
+        )
+#endif
 
         // Pre-generate the bonsplit tab ID so we can install the panel mapping before bonsplit
         // mutates layout state (avoids transient "Empty Panel" flashes during split).
@@ -9002,6 +9039,11 @@ final class Workspace: Identifiable, ObservableObject {
 
 #if DEBUG
         dlog("split.created pane=\(paneId.id.uuidString.prefix(5)) orientation=\(orientation)")
+        dlog(
+            "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
+            "transport=\(splitTransport) stage=layout_committed elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
+            "newPanel=\(newPanel.id.uuidString.prefix(5))"
+        )
 #endif
 
         // Suppress the old view's becomeFirstResponder side-effects during SwiftUI reparenting.
@@ -9020,6 +9062,13 @@ final class Workspace: Identifiable, ObservableObject {
                 previousHostedView: previousHostedView
             )
         }
+#if DEBUG
+        dlog(
+            "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
+            "transport=\(splitTransport) stage=focus_scheduled elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
+            "newPanel=\(newPanel.id.uuidString.prefix(5)) focus=\(focus ? 1 : 0)"
+        )
+#endif
 
         owningTabManager?.scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
             workspaceId: id,
