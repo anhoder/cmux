@@ -34,6 +34,7 @@ private final class AuthPresentationContext: NSObject, ASWebAuthenticationPresen
 enum AuthManagerError: LocalizedError {
     case invalidCallback
     case missingAccessToken
+    case missingRefreshToken
 
     var errorDescription: String? {
         switch self {
@@ -46,6 +47,11 @@ enum AuthManagerError: LocalizedError {
             return String(
                 localized: "settings.account.error.missingAccessToken",
                 defaultValue: "Account access token is unavailable."
+            )
+        case .missingRefreshToken:
+            return String(
+                localized: "settings.account.error.missingRefreshToken",
+                defaultValue: "Account refresh token is unavailable."
             )
         }
     }
@@ -594,8 +600,11 @@ final class AuthManager: ObservableObject {
         await awaitBootstrapped()
         let access = await tokenStore.currentAccessToken()
         let refresh = await tokenStore.currentRefreshToken()
-        guard let access, !access.isEmpty, let refresh, !refresh.isEmpty else {
+        guard let access, !access.isEmpty else {
             throw AuthManagerError.missingAccessToken
+        }
+        guard let refresh, !refresh.isEmpty else {
+            throw AuthManagerError.missingRefreshToken
         }
         return (access, refresh)
     }

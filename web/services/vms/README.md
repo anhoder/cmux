@@ -4,12 +4,12 @@ Backend for `cmux vm new/ls/rm/exec/attach` and the upcoming sidebar Cloud butto
 
 ## Layout
 
-```
+```text
 services/vms/
   drivers/
     types.ts       VMProvider interface, shared types, errors
     e2b.ts         E2BProvider — real driver over @e2b SDK
-    freestyle.ts   FreestyleProvider — stub, throws NotImplemented
+    freestyle.ts   FreestyleProvider — real driver over @freestyle/sdk
     index.ts       getProvider / defaultProviderId
   actors/
     vm.ts          One per VM. Tracks connection count for idle-pause.
@@ -26,9 +26,10 @@ services/vms/
   protocol (HTTP POST to action endpoints, WebSocket for attach). Swift client hits this directly.
 - `/api/vm` — REST facade for curl + debug: `GET` (list) / `POST` (create).
 - `/api/vm/:id` — REST facade for curl + debug: `DELETE` (destroy).
+- `/api/vm/:id/exec` — REST facade for curl + debug: `POST` (run a command).
 
 All endpoints verify `Authorization: Bearer <stack access token>` plus `X-Stack-Refresh-Token:
-<refresh>` from the mac client (matches the tokens the mac app stashes in keychain after
+<refresh>` from the Mac client (matches the tokens the Mac app stashes in keychain after
 `cmux auth login`). Browsers going through `/handler/*` hit the same functions via the Stack
 Auth cookie path.
 
@@ -74,8 +75,6 @@ attach token into `/tmp/cmux/attach-lease.json`; the raw token is returned once 
 
 ## Next steps
 
-- Finish the Freestyle driver (today stubbed) and ship the baked snapshot. Unblocks
-  `cmux vm new` shell + workspace modes.
 - Keep Freestyle SSH and E2B WebSocket attach paths sharing the same `POST /api/vm/:id/attach-endpoint`
   contract.
 - Add `/api/vm/:id/pause`, `/api/vm/:id/resume`, `/api/vm/:id/snapshot` REST wrappers once Swift

@@ -91687,6 +91687,35 @@
         }
       }
     },
+    "settings.account.error.missingRefreshToken": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account refresh token is unavailable."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アカウントの更新トークンを取得できません。"
+          }
+        },
+        "uk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Токен оновлення облікового запису недоступний."
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "계정 새로 고침 토큰을 사용할 수 없습니다."
+          }
+        }
+      }
+    },
     "remote.state.connected.vmNoProxy": {
       "extractionState": "manual",
       "localizations": {

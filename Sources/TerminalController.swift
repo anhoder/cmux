@@ -2129,7 +2129,7 @@ class TerminalController {
             guard let command = params["command"] as? String else {
                 return v2Error(id: id, code: "invalid_params", message: "vm.exec requires `command`")
             }
-            let timeoutMs = (params["timeout_ms"] as? Int) ?? 30_000
+            let timeoutMs = max(1, v2Int(params, "timeout_ms") ?? 30_000)
             return v2VmCall(id: id) {
                 let r = try await VMClient.shared.exec(id: vmId, command: command, timeoutMs: timeoutMs)
                 return ["exit_code": r.exitCode, "stdout": r.stdout, "stderr": r.stderr]
@@ -3154,27 +3154,45 @@ class TerminalController {
     /// Bridge an async throws closure into a socket RPC response. Runs the work on a detached
     /// Task (so VMClient's URLSession hops are free to use any actor) and blocks the socket
     /// worker thread on a semaphore. Mirrors the auth.begin_sign_in pattern above.
-    private func v2VmCall(id: Any?, _ work: @escaping () async throws -> [String: Any]) -> String {
+    private func v2VmCall(
+        id: Any?,
+        timeoutSeconds: TimeInterval = 17 * 60,
+        _ work: @escaping () async throws -> [String: Any]
+    ) -> String {
         let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var payload: [String: Any]? = nil
-        nonisolated(unsafe) var caughtError: Error? = nil
-        Task {
+        nonisolated(unsafe) var result: Result<[String: Any], Error>?
+        let task = Task {
             do {
-                payload = try await work()
+                result = .success(try await work())
             } catch {
-                caughtError = error
+                result = .failure(error)
             }
             semaphore.signal()
         }
-        semaphore.wait()
-        if let payload {
-            return v2Ok(id: id, result: payload)
+        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+            task.cancel()
+            return v2Error(
+                id: id,
+                code: "timeout",
+                message: "VM request timed out after \(Int(timeoutSeconds)) seconds"
+            )
         }
-        return v2Error(
-            id: id,
-            code: "vm_error",
-            message: caughtError.map { String(describing: $0) } ?? "unknown vm error"
-        )
+        switch result {
+        case .success(let payload):
+            return v2Ok(id: id, result: payload)
+        case .failure(let error):
+            return v2Error(
+                id: id,
+                code: "vm_error",
+                message: String(describing: error)
+            )
+        case nil:
+            return v2Error(
+                id: id,
+                code: "vm_error",
+                message: "unknown vm error"
+            )
+        }
     }
 
     private func v2Error(id: Any?, code: String, message: String, data: Any? = nil) -> String {

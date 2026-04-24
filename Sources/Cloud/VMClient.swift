@@ -99,11 +99,16 @@ actor VMClient {
         guard let items = obj["vms"] as? [[String: Any]] else {
             throw VMClientError.malformedResponse("missing `vms` array")
         }
-        return items.compactMap { dict -> VMSummary? in
-            guard let id = dict["id"] as? String,
-                  let provider = dict["provider"] as? String,
-                  let image = dict["image"] as? String
-            else { return nil }
+        return try items.enumerated().map { index, dict -> VMSummary in
+            guard let id = dict["id"] as? String, !id.isEmpty else {
+                throw VMClientError.malformedResponse("missing `id` in /api/vm item \(index)")
+            }
+            guard let provider = dict["provider"] as? String, !provider.isEmpty else {
+                throw VMClientError.malformedResponse("missing `provider` in /api/vm item \(index)")
+            }
+            guard let image = dict["image"] as? String, !image.isEmpty else {
+                throw VMClientError.malformedResponse("missing `image` in /api/vm item \(index)")
+            }
             let createdAt = (dict["createdAt"] as? Int64)
                 ?? Int64((dict["createdAt"] as? Double) ?? 0)
             return VMSummary(id: id, provider: provider, image: image, createdAt: createdAt)

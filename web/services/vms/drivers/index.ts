@@ -24,7 +24,7 @@ export function getProvider(id: ProviderId): VMProvider {
 export function defaultProviderId(): ProviderId {
   const configured = process.env.CMUX_VM_DEFAULT_PROVIDER as ProviderId | undefined;
   if (configured === "e2b" || configured === "freestyle") return configured;
-  // Freestyle is the default for all interactive work: it has a real SSH gateway at
-  // vm-ssh.freestyle.sh:22, unlike E2B which only exposes HTTPS.
+  // Freestyle is the default for interactive work. The driver carries a baked
+  // snapshot fallback, so this does not depend on dashboard env configuration.
   return "freestyle";
 }
