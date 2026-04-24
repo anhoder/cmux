@@ -4,152 +4,6 @@ import Darwin
 import Bonsplit
 import UniformTypeIdentifiers
 
-enum WorkspaceTitlebarSettings {
-    static let showTitlebarKey = "workspaceTitlebarVisible"
-    static let defaultShowTitlebar = true
-
-    static func isVisible(defaults: UserDefaults = .standard) -> Bool {
-        if defaults.object(forKey: showTitlebarKey) == nil {
-            return defaultShowTitlebar
-        }
-        return defaults.bool(forKey: showTitlebarKey)
-    }
-}
-
-enum WorkspacePresentationModeSettings {
-    static let modeKey = "workspacePresentationMode"
-
-    enum Mode: String {
-        case standard
-        case minimal
-    }
-
-    static let defaultMode: Mode = .standard
-
-    static func mode(for rawValue: String?) -> Mode {
-        Mode(rawValue: rawValue ?? "") ?? defaultMode
-    }
-
-    static func mode(defaults: UserDefaults = .standard) -> Mode {
-        mode(for: defaults.string(forKey: modeKey))
-    }
-
-    static func isMinimal(defaults: UserDefaults = .standard) -> Bool {
-        mode(defaults: defaults) == .minimal
-    }
-}
-
-enum WorkspaceButtonFadeSettings {
-    static let modeKey = "workspaceButtonsFadeMode"
-    static let legacyTitlebarControlsVisibilityModeKey = "titlebarControlsVisibilityMode"
-    static let legacyPaneTabBarControlsVisibilityModeKey = "paneTabBarControlsVisibilityMode"
-
-    enum Mode: String {
-        case enabled
-        case disabled
-    }
-
-    static let defaultMode: Mode = .disabled
-
-    static func mode(for rawValue: String?) -> Mode {
-        Mode(rawValue: rawValue ?? "") ?? defaultMode
-    }
-
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        mode(for: defaults.string(forKey: modeKey)) == .enabled
-    }
-
-    static func initializeStoredModeIfNeeded(defaults: UserDefaults = .standard) {
-        guard defaults.string(forKey: modeKey) == nil else { return }
-
-        if let migratedMode = migratedLegacyMode(defaults: defaults) {
-            defaults.set(migratedMode.rawValue, forKey: modeKey)
-            return
-        }
-
-        let initialMode: Mode = WorkspaceTitlebarSettings.isVisible(defaults: defaults) ? .disabled : .enabled
-        defaults.set(initialMode.rawValue, forKey: modeKey)
-    }
-
-    private static func migratedLegacyMode(defaults: UserDefaults) -> Mode? {
-        let legacyValues = [
-            defaults.string(forKey: legacyTitlebarControlsVisibilityModeKey),
-            defaults.string(forKey: legacyPaneTabBarControlsVisibilityModeKey),
-        ]
-
-        if legacyValues.contains(where: { $0 == "onHover" || $0 == "hover" || $0 == "enabled" }) {
-            return .enabled
-        }
-        if legacyValues.contains(where: { $0 == "always" || $0 == "disabled" }) {
-            return .disabled
-        }
-        return nil
-    }
-}
-
-enum PaneFirstClickFocusSettings {
-    static let enabledKey = "paneFirstClickFocus.enabled"
-    static let defaultEnabled = false
-
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: enabledKey) as? Bool ?? defaultEnabled
-    }
-}
-
-enum TerminalScrollBarSettings {
-    static let showScrollBarKey = "terminal.showScrollBar"
-    static let defaultShowScrollBar = true
-    static let didChangeNotification = Notification.Name("cmux.terminalScrollBarSettingsDidChange")
-
-    static func isVisible(defaults: UserDefaults = .standard) -> Bool {
-        if defaults.object(forKey: showScrollBarKey) == nil {
-            return defaultShowScrollBar
-        }
-        return defaults.bool(forKey: showScrollBarKey)
-    }
-
-    static func notifyDidChange(notificationCenter: NotificationCenter = .default) {
-        notificationCenter.post(name: didChangeNotification, object: nil)
-    }
-}
-
-enum UITestLaunchManifest {
-    static let argumentName = "-cmuxUITestLaunchManifest"
-
-    struct Payload: Decodable {
-        let environment: [String: String]
-    }
-
-    static func applyIfPresent(
-        arguments: [String] = CommandLine.arguments,
-        loadData: (String) -> Data? = { path in
-            try? Data(contentsOf: URL(fileURLWithPath: path))
-        },
-        applyEnvironment: (String, String) -> Void = { key, value in
-            setenv(key, value, 1)
-        }
-    ) {
-        guard let path = manifestPath(from: arguments),
-              let data = loadData(path),
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
-            return
-        }
-
-        for (key, value) in payload.environment {
-            applyEnvironment(key, value)
-        }
-    }
-
-    static func manifestPath(from arguments: [String]) -> String? {
-        guard let index = arguments.firstIndex(of: argumentName) else { return nil }
-        let valueIndex = arguments.index(after: index)
-        guard valueIndex < arguments.endIndex else { return nil }
-
-        let rawPath = arguments[valueIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-        return rawPath.isEmpty ? nil : rawPath
-    }
-}
-
 @main
 struct cmuxApp: App {
     @StateObject private var tabManager: TabManager
@@ -584,16 +438,12 @@ struct cmuxApp: App {
 
                 splitCommandButton(title: String(localized: "menu.file.newWorkspace", defaultValue: "New Workspace"), shortcut: menuShortcut(for: .newTab)) {
                     if let appDelegate = AppDelegate.shared {
-                        if appDelegate.addWorkspaceInPreferredMainWindow(debugSource: "menu.newWorkspace") == nil {
-#if DEBUG
-                            FocusLogStore.shared.append(
-                                "cmdn.route phase=fallback_new_window src=menu.newWorkspace reason=workspace_creation_returned_nil"
-                            )
-#endif
-                            appDelegate.openNewMainWindow(nil)
-                        }
+                        appDelegate.performNewWorkspaceAction(
+                            tabManager: activeTabManager,
+                            debugSource: "menu.newWorkspace"
+                        )
                     } else {
-                        activeTabManager.addTab()
+                        activeTabManager.addWorkspace()
                     }
                 }
 
@@ -650,6 +500,12 @@ struct cmuxApp: App {
                     workspaceCommandMenuContent(manager: activeTabManager)
                 }
 
+                splitCommandButton(title: String(localized: "menu.file.reopenPreviousSession", defaultValue: "Reopen Previous Session"), shortcut: menuShortcut(for: .reopenPreviousSession)) {
+                    if AppDelegate.shared?.reopenPreviousSession() != true {
+                        NSSound.beep()
+                    }
+                }
+
                 splitCommandButton(title: String(localized: "menu.file.reopenClosedBrowserPanel", defaultValue: "Reopen Closed Browser Panel"), shortcut: menuShortcut(for: .reopenClosedBrowserPanel)) {
                     _ = activeTabManager.reopenMostRecentlyClosedBrowserPanel()
                 }
@@ -660,7 +516,7 @@ struct cmuxApp: App {
                 Menu(String(localized: "menu.find.title", defaultValue: "Find")) {
                     splitCommandButton(title: String(localized: "menu.find.find", defaultValue: "Find…"), shortcut: menuShortcut(for: .find)) {
 #if DEBUG
-                        dlog("find.menu Cmd+F fired")
+                        cmuxDebugLog("find.menu Cmd+F fired")
 #endif
                         activeTabManager.startSearch()
                     }
@@ -2534,7 +2390,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func show(navigationTarget: SettingsNavigationTarget? = nil) {
         guard let window else { return }
 #if DEBUG
-        dlog("settings.window.show requested isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
+        cmuxDebugLog("settings.window.show requested isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
 #endif
         SettingsAboutTitlebarDebugStore.shared.applyCurrentOptions(to: window, for: .settings)
         if !window.isVisible {
@@ -2547,7 +2403,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             }
         }
 #if DEBUG
-        dlog("settings.window.show completed isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
+        cmuxDebugLog("settings.window.show completed isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
 #endif
     }
 
@@ -4493,7 +4349,6 @@ struct SettingsView: View {
     @State private var showLanguageRestartAlert = false
     @State private var isResettingSettings = false
     @State private var workspaceTabPaletteEntries = WorkspaceTabColorSettings.palette()
-    @State private var trustedDirectoriesDraft: String = CmuxDirectoryTrust.shared.allTrustedPaths.joined(separator: "\n")
 
     private var selectedWorkspacePlacement: NewWorkspacePlacement {
         NewWorkspacePlacement(rawValue: newWorkspacePlacement) ?? WorkspacePlacementSettings.defaultPlacement
@@ -4735,14 +4590,6 @@ struct SettingsView: View {
         browserInsecureHTTPAllowlistDraft != browserInsecureHTTPAllowlist
     }
 
-    private func saveTrustedDirectories() {
-        let paths = trustedDirectoriesDraft
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        CmuxDirectoryTrust.shared.replaceAll(with: paths)
-    }
-
     private var hasCustomNotificationSoundFilePath: Bool {
         !notificationSoundCustomFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -4933,7 +4780,7 @@ struct SettingsView: View {
     private func handleNotificationPermissionAction() {
         let state = notificationStore.authorizationState.statusLabel
 #if DEBUG
-        dlog("notification.ui enableTapped state=\(state)")
+        cmuxDebugLog("notification.ui enableTapped state=\(state)")
 #endif
         NSLog("notification.ui enableTapped state=%@", state)
         switch notificationStore.authorizationState {
@@ -5961,39 +5808,6 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardNote(String(localized: "settings.automation.port.note", defaultValue: "Each workspace gets CMUX_PORT and CMUX_PORT_END env vars with a dedicated port range. New terminals inherit these values."))
-                    }
-
-                    SettingsSectionHeader(title: String(localized: "settings.section.customCommands", defaultValue: "Custom Commands"))
-                    SettingsCard {
-                        VStack(alignment: .leading, spacing: 6) {
-                            SettingsCardRow(
-                                configurationReview: .json("customCommands.trustedDirectories"),
-                                String(localized: "settings.customCommands.trustedDirectories", defaultValue: "Trusted Directories"),
-                                subtitle: String(localized: "settings.customCommands.trustedDirectories.subtitle", defaultValue: "Commands from cmux.json in these directories run without confirmation. One path per line.")
-                            ) {
-                                EmptyView()
-                            }
-
-                            TextEditor(text: $trustedDirectoriesDraft)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(minHeight: 60, maxHeight: 120)
-                                .scrollContentBackground(.hidden)
-                                .padding(6)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-                                )
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 12)
-                                .onChange(of: trustedDirectoriesDraft) { _ in
-                                    saveTrustedDirectories()
-                                }
-                        }
-
-                        SettingsCardDivider()
-                        SettingsCardNote(String(localized: "settings.customCommands.trustedDirectories.note", defaultValue: "Place a cmux.json in your project root to define custom commands. Trust a directory from the confirmation dialog, or add paths here. For git repos, trusting the root covers all subdirectories."))
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.browser", defaultValue: "Browser"))
