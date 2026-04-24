@@ -1,0 +1,2058 @@
+diff --git a/content/browser/renderer_host/render_widget_host_view_mac.mm b/content/browser/renderer_host/render_widget_host_view_mac.mm
+index 63041c4311..4cc2d07cd9 100644
+--- a/content/browser/renderer_host/render_widget_host_view_mac.mm
++++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
+@@ -589,6 +589,9 @@
+ }
+ 
+ void RenderWidgetHostViewMac::WasOccluded() {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    return;
++  }
+   if (host()->IsHidden()) {
+     return;
+   }
+@@ -656,6 +659,9 @@
+ }
+ 
+ bool RenderWidgetHostViewMac::HasFocus() {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    return true;
++  }
+   return is_first_responder_;
+ }
+ 
+@@ -1825,13 +1831,15 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
+   // - Losing focus:
+   //   - Only when the host is currently focused.
+   //   This prevents duplicate LostFocus notifications.
++  const bool fresh_owl_force_focus =
++      base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed");
+   if (is_first_responder_) {
+-    if (IsHeadless() || is_getting_focus_ || is_window_key_) {
++    if (fresh_owl_force_focus || IsHeadless() || is_getting_focus_ || is_window_key_) {
+       host()->GotFocus();
+       SetTextInputActive(true);
+     }
+   } else {
+-    if (IsHeadless() || host()->is_focused()) {
++    if (fresh_owl_force_focus || IsHeadless() || host()->is_focused()) {
+       SetTextInputActive(false);
+       host()->LostFocus();
+     }
+@@ -1839,6 +1847,9 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
+ }
+ 
+ void RenderWidgetHostViewMac::OnWindowIsKeyChanged(bool is_key) {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    is_key = true;
++  }
+   if (is_window_key_ == is_key)
+     return;
+   is_window_key_ = is_key;
+diff --git a/content/shell/BUILD.gn b/content/shell/BUILD.gn
+index 462cfd3ef3..75ea06788a 100644
+--- a/content/shell/BUILD.gn
++++ b/content/shell/BUILD.gn
+@@ -260,6 +260,8 @@ static_library("content_shell_lib") {
+       "browser/shell_browser_main_parts_mac.mm",
+       "browser/shell_javascript_dialog_mac.mm",
+       "browser/shell_platform_delegate_mac.mm",
++      "browser/owl_fresh_host_mac.h",
++      "browser/owl_fresh_host_mac.mm",
+       "browser/shell_web_contents_view_delegate_mac.mm",
+     ]
+   }
+@@ -371,11 +373,14 @@ static_library("content_shell_lib") {
+     "//third_party/blink/public/strings",
+     "//third_party/inspector_protocol:crdtp",
+     "//ui/base",
++    "//ui/accelerated_widget_mac",
+     "//ui/base/clipboard",
+     "//ui/base/ime/init",
+     "//ui/gfx",
++    "//ui/gfx/codec",
+     "//ui/gfx/geometry",
+     "//ui/platform_window",
++    "//ui/snapshot",
+     "//ui/strings:auto_image_annotation_strings",
+     "//url",
+     "//v8",
+@@ -1143,3 +1148,21 @@ mojom("shell_controller_mojom") {
+   sources = [ "common/shell_controller.test-mojom" ]
+   public_deps = [ "//mojo/public/mojom/base" ]
+ }
++
++
++shared_library("owl_fresh_bridge") {
++  testonly = true
++  sources = [
++    "//fresh_owl/owl_fresh_bridge.cc",
++    "//fresh_owl/owl_fresh_bridge.h",
++  ]
++  deps = [
++    ":shell_controller_mojom",
++    "//base",
++    "//mojo/core/embedder",
++    "//mojo/public/cpp/bindings",
++    "//mojo/public/cpp/platform",
++    "//mojo/public/cpp/system",
++  ]
++  ldflags = [ "-Wl,-install_name,@rpath/libowl_fresh_bridge.dylib" ]
++}
+diff --git a/content/shell/browser/shell_browser_main_parts.cc b/content/shell/browser/shell_browser_main_parts.cc
+index 76ba15e7f8..f4c221edad 100644
+--- a/content/shell/browser/shell_browser_main_parts.cc
++++ b/content/shell/browser/shell_browser_main_parts.cc
+@@ -188,7 +188,12 @@ int ShellBrowserMainParts::PreMainMessageLoopRun() {
+   InitializeBrowserContexts();
+   Shell::Initialize(CreateShellPlatformDelegate());
+   net::NetModule::SetResourceProvider(PlatformResourceProvider);
+-  ShellDevToolsManagerDelegate::StartHttpHandler(browser_context_.get());
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFreshOwlEmbed) &&
++      !base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "owl-fresh-disable-devtools")) {
++    ShellDevToolsManagerDelegate::StartHttpHandler(browser_context_.get());
++  }
+   InitializeMessageLoopContext();
+   return 0;
+ }
+diff --git a/content/shell/browser/shell_content_browser_client.cc b/content/shell/browser/shell_content_browser_client.cc
+index a926ca5c57..b89573bbab 100644
+--- a/content/shell/browser/shell_content_browser_client.cc
++++ b/content/shell/browser/shell_content_browser_client.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "content/shell/browser/shell_content_browser_client.h"
++#if BUILDFLAG(IS_MAC)
++#include "content/shell/browser/owl_fresh_host_mac.h"
++#endif
+ 
+ #include <stddef.h>
+ 
+@@ -189,6 +192,15 @@ class ShellControllerImpl : public mojom::ShellController {
+   }
+ 
+   void ShutDown() override { Shell::Shutdown(); }
++
++  void BindOwlFreshHost(
++      mojo::PendingReceiver<mojom::OwlFreshHost> receiver) override {
++#if BUILDFLAG(IS_MAC)
++    BindOwlFreshHostForCurrentShell(std::move(receiver));
++#else
++    receiver.reset();
++#endif
++  }
+ };
+ 
+ void BindNetworkHintsHandler(
+diff --git a/content/shell/browser/shell_platform_delegate_mac.mm b/content/shell/browser/shell_platform_delegate_mac.mm
+index 274dffa179..1cc5a230f0 100644
+--- a/content/shell/browser/shell_platform_delegate_mac.mm
++++ b/content/shell/browser/shell_platform_delegate_mac.mm
+@@ -11,8 +11,10 @@
+ #import "base/apple/foundation_util.h"
+ #include "base/check_op.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/command_line.h"
+ #include "base/notreached.h"
+ #include "base/strings/sys_string_conversions.h"
++#include "content/shell/common/shell_switches.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_widget_host.h"
+@@ -201,8 +203,30 @@ void MakeShellButton(NSRect* rect,
+     shell_data.url_edit_view = url_edit_view;
+   }
+ 
+-  // Show the new window.
+-  [window makeKeyAndOrderFront:nil];
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFreshOwlEmbed)) {
++    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
++    window.alphaValue = 0.01;
++    window.level = NSWindowLevel(NSNormalWindowLevel - 1000);
++    window.collectionBehavior =
++        NSWindowCollectionBehaviorStationary |
++        NSWindowCollectionBehaviorCanJoinAllSpaces |
++        NSWindowCollectionBehaviorIgnoresCycle;
++    window.ignoresMouseEvents = YES;
++    [window orderFront:nil];
++  } else {
++    if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++            "owl-fresh-visible-control")) {
++      [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
++      window.level = NSFloatingWindowLevel;
++      window.collectionBehavior |=
++          NSWindowCollectionBehaviorStationary |
++          NSWindowCollectionBehaviorCanJoinAllSpaces;
++      [NSApp activateIgnoringOtherApps:YES];
++      [window orderFrontRegardless];
++    }
++    [window makeKeyAndOrderFront:nil];
++  }
+ 
+   shell_data.delegate = delegate;
+ }
+diff --git a/content/shell/common/shell_controller.test-mojom b/content/shell/common/shell_controller.test-mojom
+index 53b2a8b770..b9fa891fd3 100644
+--- a/content/shell/common/shell_controller.test-mojom
++++ b/content/shell/common/shell_controller.test-mojom
+@@ -7,6 +7,60 @@ module content.mojom;
+ import "mojo/public/mojom/base/string16.mojom";
+ import "mojo/public/mojom/base/values.mojom";
+ 
++enum OwlFreshMouseKind {
++  kDown = 0,
++  kUp = 1,
++  kMove = 2,
++  kWheel = 3,
++};
++
++struct OwlFreshMouseEvent {
++  OwlFreshMouseKind kind;
++  float x;
++  float y;
++  uint32 button;
++  uint32 click_count;
++  float delta_x;
++  float delta_y;
++  uint32 modifiers;
++};
++
++struct OwlFreshKeyEvent {
++  bool key_down;
++  uint32 key_code;
++  string text;
++  uint32 modifiers;
++};
++
++struct OwlFreshCompositorInfo {
++  uint32 context_id;
++};
++
++struct OwlFreshCaptureResult {
++  array<uint8> png;
++  uint32 width;
++  uint32 height;
++  string capture_mode;
++  string error;
++};
++
++interface OwlFreshClient {
++  OnReady(int32 host_pid, OwlFreshCompositorInfo compositor);
++  OnCompositorChanged(OwlFreshCompositorInfo compositor);
++  OnNavigationChanged(string url, string title, bool loading);
++  OnHostLog(string message);
++};
++
++interface OwlFreshHost {
++  SetClient(pending_remote<OwlFreshClient> client);
++  Navigate(string url);
++  Resize(uint32 width, uint32 height, float scale);
++  SetFocus(bool focused);
++  SendMouse(OwlFreshMouseEvent event);
++  SendKey(OwlFreshKeyEvent event);
++  CaptureSurface() => (OwlFreshCaptureResult result);
++};
++
+ // A control interface which can be accessed by clients launching Content Shell
+ // with a Mojo invitation on the command line. This is used by
+ // LaunchAsMojoClientBrowserTest to exercise that mode of execution.
+@@ -21,7 +75,10 @@ interface ShellController {
+       => (mojo_base.mojom.Value value);
+ 
+   // Tells Content Shell to close all windows and shut down. After sending this
+-  // message, the Content Shell browser process should be expected to terminate
+-  // soon.
++  // message, Content Shell should be expected to terminate soon.
+   ShutDown();
++
++  // Binds the fresh OWL browser host. Every browser command after this point
++  // uses typed Mojo messages, never sockets or DevTools.
++  BindOwlFreshHost(pending_receiver<OwlFreshHost> receiver);
+ };
+diff --git a/content/shell/common/shell_switches.h b/content/shell/common/shell_switches.h
+index 8757fa418d..b9d7d028b7 100644
+--- a/content/shell/common/shell_switches.h
++++ b/content/shell/common/shell_switches.h
+@@ -40,6 +40,8 @@ inline constexpr char kContentShellHostWindowSize[] =
+ // Hides toolbar from content_shell's host window.
+ inline constexpr char kContentShellHideToolbar[] = "content-shell-hide-toolbar";
+ 
++inline constexpr char kFreshOwlEmbed[] = "fresh-owl-embed";
++
+ // Enables APIs guarded with the [IsolatedContext] IDL attribute for the given
+ // comma-separated list of origins.
+ inline constexpr char kIsolatedContextOrigins[] = "isolated-context-origins";
+diff --git a/ios/chrome/browser/snapshots/model/image_file_manager_unittest.mm b/ios/chrome/browser/snapshots/model/image_file_manager_unittest.mm
+index 65f6c9b457..3bda6ceb05 100644
+--- a/ios/chrome/browser/snapshots/model/image_file_manager_unittest.mm
++++ b/ios/chrome/browser/snapshots/model/image_file_manager_unittest.mm
+@@ -53,7 +53,7 @@ void ComputeColorComponents(CGImageRef cgImage,
+     *blue = 3;
+   }
+ 
+-  if (byteOrder != kCGImageByteOrder32Host) {
++  if (byteOrder != kCGBitmapByteOrder32Host) {
+     int lastChannel = (CGImageGetBitsPerPixel(cgImage) == 24) ? 2 : 3;
+     *red = lastChannel - *red;
+     *green = lastChannel - *green;
+diff --git a/services/shape_detection/text_detection_impl_mac_unittest.mm b/services/shape_detection/text_detection_impl_mac_unittest.mm
+index f5797e9d31..8c9028c8b2 100644
+--- a/services/shape_detection/text_detection_impl_mac_unittest.mm
++++ b/services/shape_detection/text_detection_impl_mac_unittest.mm
+@@ -59,7 +59,7 @@ void DetectCallback(std::vector<mojom::TextDetectionResultPtr> results) {
+       nullptr, width, height, /*bitsPerComponent=*/8,
+       /*bytesPerRow=*/width * 4, rgb_colorspace.get(),
+       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-          kCGImageByteOrder32Host));
++          kCGBitmapByteOrder32Host));
+ 
+   // Draw a white background.
+   CGContextSetRGBFillColor(context.get(), 1.0, 1.0, 1.0, 1.0);
+diff --git a/skia/ext/skia_utils_ios.mm b/skia/ext/skia_utils_ios.mm
+index 1b202bf6f3..6b11ce44b0 100644
+--- a/skia/ext/skia_utils_ios.mm
++++ b/skia/ext/skia_utils_ios.mm
+@@ -52,7 +52,7 @@ SkBitmap CGImageToSkBitmap(CGImageRef image, CGSize size, bool is_opaque) {
+   base::apple::ScopedCFTypeRef<CGContextRef> context(CGBitmapContextCreate(
+       data, size.width, size.height, 8, size.width * 4, color_space.get(),
+       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-          kCGImageByteOrder32Host));
++          kCGBitmapByteOrder32Host));
+ #else
+ #error We require that Skia's and CoreGraphics's recommended \
+        image memory layout match.
+diff --git a/skia/ext/skia_utils_mac.mm b/skia/ext/skia_utils_mac.mm
+index 07e7f51fc7..e621aa1000 100644
+--- a/skia/ext/skia_utils_mac.mm
++++ b/skia/ext/skia_utils_mac.mm
+@@ -81,7 +81,7 @@ SkBitmap NSImageOrNSImageRepToSkBitmap(NSImage* image,
+   base::apple::ScopedCFTypeRef<CGContextRef> context(CGBitmapContextCreate(
+       data, size.width, size.height, 8, size.width * 4, cg_color_space.get(),
+       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-          kCGImageByteOrder32Host));
++          kCGBitmapByteOrder32Host));
+ #else
+ #error We require that Skia's and CoreGraphics's recommended \
+        image memory layout match.
+diff --git a/third_party/blink/renderer/platform/mac/graphics_context_canvas.mm b/third_party/blink/renderer/platform/mac/graphics_context_canvas.mm
+index 9234de2adf..46e143f458 100644
+--- a/third_party/blink/renderer/platform/mac/graphics_context_canvas.mm
++++ b/third_party/blink/renderer/platform/mac/graphics_context_canvas.mm
+@@ -64,7 +64,7 @@
+   cg_context_.reset(CGBitmapContextCreate(
+       offscreen_.getPixels(), offscreen_.width(), offscreen_.height(), 8,
+       offscreen_.rowBytes(), color_space.get(),
+-      kCGImageByteOrder32Host |
++      kCGBitmapByteOrder32Host |
+           static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst)));
+   DCHECK(cg_context_);
+ 
+diff --git a/ui/accelerated_widget_mac/BUILD.gn b/ui/accelerated_widget_mac/BUILD.gn
+index 0f8a6f75b7..3d972155ea 100644
+--- a/ui/accelerated_widget_mac/BUILD.gn
++++ b/ui/accelerated_widget_mac/BUILD.gn
+@@ -69,6 +69,8 @@ component("accelerated_widget_mac") {
+     sources += [
+       "display_ca_layer_tree.h",
+       "display_ca_layer_tree.mm",
++      "owl_fresh_context.h",
++      "owl_fresh_context.cc",
+     ]
+   }
+ 
+diff --git a/ui/accelerated_widget_mac/display_ca_layer_tree.h b/ui/accelerated_widget_mac/display_ca_layer_tree.h
+index 73f18b87af..e476f49fd8 100644
+--- a/ui/accelerated_widget_mac/display_ca_layer_tree.h
++++ b/ui/accelerated_widget_mac/display_ca_layer_tree.h
+@@ -11,6 +11,7 @@
+ #include "ui/accelerated_widget_mac/accelerated_widget_mac_export.h"
+ #include "ui/accelerated_widget_mac/ca_layer_frame_sink.h"
+ 
++@class CAContext;
+ @class CALayer;
+ @class CALayerHost;
+ 
+@@ -38,6 +39,7 @@ class ACCELERATED_WIDGET_MAC_EXPORT DisplayCALayerTree
+   void GotIOSurfaceFrame(base::apple::ScopedCFTypeRef<IOSurfaceRef> io_surface,
+                          const gfx::Size& dip_size,
+                          float scale_factor);
++  void UpdateOwlFreshRelay(uint32_t ca_context_id);
+ 
+   // The root layer of the tree specified at creation time.
+   CALayer* __strong root_layer_;
+@@ -62,6 +64,13 @@ class ACCELERATED_WIDGET_MAC_EXPORT DisplayCALayerTree
+ 
+   // A CALayer that has its content set to an IOSurface.
+   CALayer* __strong io_surface_layer_;
++
++  // Browser-process CAContext that re-hosts the GPU-process CAContext so the
++  // embedding app can attach it with CALayerHost.
++  CAContext* __strong owl_fresh_relay_context_;
++  CALayer* __strong owl_fresh_relay_root_;
++  CALayerHost* __strong owl_fresh_relay_host_;
++
+ };
+ 
+ }  // namespace ui
+diff --git a/ui/accelerated_widget_mac/display_ca_layer_tree.mm b/ui/accelerated_widget_mac/display_ca_layer_tree.mm
+index dcf493d629..37ebd72063 100644
+--- a/ui/accelerated_widget_mac/display_ca_layer_tree.mm
++++ b/ui/accelerated_widget_mac/display_ca_layer_tree.mm
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "ui/accelerated_widget_mac/display_ca_layer_tree.h"
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
+ 
+ #import <QuartzCore/QuartzCore.h>
+ 
+@@ -123,6 +124,9 @@ - (void)setContentsChanged;
+ void DisplayCALayerTree::GotCALayerFrame(uint32_t ca_context_id) {
+   // Early-out if the remote layer has not changed.
+   if (remote_layer_.contextId == ca_context_id) {
++#if BUILDFLAG(IS_MAC)
++    UpdateOwlFreshRelay(ca_context_id);
++#endif
+     return;
+   }
+ 
+@@ -150,6 +154,46 @@ - (void)setContentsChanged;
+     [io_surface_layer_ removeFromSuperlayer];
+     io_surface_layer_ = nil;
+   }
++
++#if BUILDFLAG(IS_MAC)
++  UpdateOwlFreshRelay(ca_context_id);
++#endif
++}
++
++void DisplayCALayerTree::UpdateOwlFreshRelay(uint32_t ca_context_id) {
++#if BUILDFLAG(IS_MAC)
++  ScopedCAActionDisabler disabler;
++  CGRect frame = root_layer_.bounds;
++  if (CGRectIsEmpty(frame)) {
++    frame = CGRectMake(0, 0, 1, 1);
++  }
++
++  if (!owl_fresh_relay_context_) {
++    owl_fresh_relay_root_ = [[CALayer alloc] init];
++    owl_fresh_relay_root_.geometryFlipped = YES;
++    owl_fresh_relay_root_.anchorPoint = CGPointZero;
++    owl_fresh_relay_root_.frame = frame;
++
++    owl_fresh_relay_host_ = [[CALayerHost alloc] init];
++    owl_fresh_relay_host_.anchorPoint = CGPointZero;
++    owl_fresh_relay_host_.frame = frame;
++    owl_fresh_relay_host_.autoresizingMask =
++        kCALayerWidthSizable | kCALayerHeightSizable;
++    [owl_fresh_relay_root_ addSublayer:owl_fresh_relay_host_];
++
++    CGSConnectionID connection = CGSMainConnectionID();
++    owl_fresh_relay_context_ =
++        [CAContext contextWithCGSConnection:connection options:@{}];
++    owl_fresh_relay_context_.layer = owl_fresh_relay_root_;
++  } else {
++    owl_fresh_relay_root_.frame = frame;
++    owl_fresh_relay_host_.frame = frame;
++  }
++
++  owl_fresh_relay_host_.contextId = ca_context_id;
++  [CATransaction flush];
++  ui::OwlFreshSetLatestContextID(owl_fresh_relay_context_.contextId);
++#endif
+ }
+ 
+ void DisplayCALayerTree::GotIOSurfaceFrame(
+diff --git a/ui/base/resource/resource_bundle_ios.mm b/ui/base/resource/resource_bundle_ios.mm
+index bd4b5cc84e..5322109a15 100644
+--- a/ui/base/resource/resource_bundle_ios.mm
++++ b/ui/base/resource/resource_bundle_ios.mm
+@@ -127,7 +127,7 @@
+           /*data=*/nullptr, target_size.width, target_size.height, 8,
+           target_size.width * 4, color_space.get(),
+           static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-              kCGImageByteOrder32Host));
++              kCGBitmapByteOrder32Host));
+ 
+       CGRect target_rect = CGRectMake(0, 0,
+                                       target_size.width, target_size.height);
+diff --git a/ui/display/mac/screen_utils_mac.mm b/ui/display/mac/screen_utils_mac.mm
+index eace771c4b..b2f5debb14 100644
+--- a/ui/display/mac/screen_utils_mac.mm
++++ b/ui/display/mac/screen_utils_mac.mm
+@@ -9,12 +9,8 @@
+ NSScreen* GetNSScreenFromDisplayID(CGDirectDisplayID display_id) {
+   for (NSScreen* screen in NSScreen.screens) {
+     CGDirectDisplayID screen_display_id = kCGNullDirectDisplay;
+-    if (@available(macOS 26, *)) {
+-      screen_display_id = screen.CGDirectDisplayID;
+-    } else {
+-      screen_display_id =
+-          [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+-    }
++    screen_display_id =
++        [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+     if (screen_display_id == display_id) {
+       return screen;
+     }
+diff --git a/ui/gfx/image/image_ios.mm b/ui/gfx/image/image_ios.mm
+index 676998a61f..cc7ec3d592 100644
+--- a/ui/gfx/image/image_ios.mm
++++ b/ui/gfx/image/image_ios.mm
+@@ -34,7 +34,7 @@
+       /*bitsPerComponent=*/8,
+       /*bytesPerRow=*/0, color_space.get(),
+       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-          kCGImageByteOrder32Host));
++          kCGBitmapByteOrder32Host));
+   CGContextSetRGBFillColor(context.get(), 1.0, 0.0, 0.0, 1.0);
+   CGContextFillRect(context.get(), CGRectMake(0.0, 0.0, 16, 16));
+   base::apple::ScopedCFTypeRef<CGImageRef> cg_image(
+diff --git a/ui/gfx/image/image_ios_unittest.mm b/ui/gfx/image/image_ios_unittest.mm
+index fe3ea09bf4..2756dd475a 100644
+--- a/ui/gfx/image/image_ios_unittest.mm
++++ b/ui/gfx/image/image_ios_unittest.mm
+@@ -33,7 +33,7 @@
+       nullptr, target_size.width, target_size.height, 8, target_size.width * 4,
+       color_space.get(),
+       static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-          kCGImageByteOrder32Host));
++          kCGBitmapByteOrder32Host));
+ 
+   CGRect target_rect = CGRectMake(0, 0,
+                                   target_size.width, target_size.height);
+diff --git a/ui/gfx/image/image_unittest_util_apple.mm b/ui/gfx/image/image_unittest_util_apple.mm
+index 4a6e3016b0..74e4544015 100644
+--- a/ui/gfx/image/image_unittest_util_apple.mm
++++ b/ui/gfx/image/image_unittest_util_apple.mm
+@@ -48,7 +48,7 @@ SkColor GetPlatformImageColor(PlatformImage image, int x, int y) {
+           /*bitsPerComponent=*/8,
+           /*bytesPerRow=*/4, color_space.get(),
+           static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedFirst) |
+-              kCGImageByteOrder32Host));
++              kCGBitmapByteOrder32Host));
+   CGContextDrawImage(bitmap_context.get(), CGRectMake(0, 0, 1, 1),
+                      pixel_image.get());
+ 
+diff --git a/content/shell/browser/owl_fresh_host_mac.h b/content/shell/browser/owl_fresh_host_mac.h
+new file mode 100644
+index 0000000000..09928bd888
+--- /dev/null
++++ b/content/shell/browser/owl_fresh_host_mac.h
+@@ -0,0 +1,15 @@
++#ifndef CONTENT_SHELL_BROWSER_OWL_FRESH_HOST_MAC_H_
++#define CONTENT_SHELL_BROWSER_OWL_FRESH_HOST_MAC_H_
++
++#include "content/shell/common/shell_controller.test-mojom.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++
++namespace content {
++
++void BindOwlFreshHostForCurrentShell(
++    mojo::PendingReceiver<mojom::OwlFreshHost> receiver);
++
++}  // namespace content
++
++#endif
++
+diff --git a/content/shell/browser/owl_fresh_host_mac.mm b/content/shell/browser/owl_fresh_host_mac.mm
+new file mode 100644
+index 0000000000..f885f85de4
+--- /dev/null
++++ b/content/shell/browser/owl_fresh_host_mac.mm
+@@ -0,0 +1,853 @@
++#include "content/shell/browser/owl_fresh_host_mac.h"
++
++#import <Cocoa/Cocoa.h>
++#import <QuartzCore/QuartzCore.h>
++
++#include <algorithm>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/command_line.h"
++#include "base/process/process.h"
++#include "base/strings/strcat.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/sys_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "components/viz/host/client_frame_sink_video_capturer.h"
++#include "content/browser/devtools/devtools_video_consumer.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/shell/browser/shell.h"
++#include "media/base/video_frame.h"
++#include "media/base/video_types.h"
++#include "media/capture/mojom/video_capture_buffer.mojom.h"
++#include "media/capture/mojom/video_capture_types.mojom.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image.h"
++#include "ui/gfx/native_ui_types.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/base/cocoa/remote_layer_api.h"
++#include "ui/snapshot/snapshot.h"
++#include "url/gurl.h"
++
++@interface CAContext (OwlFreshRemoteContext)
+++ (instancetype)remoteContextWithOptions:(NSDictionary*)optionsDict;
++@end
++
++namespace content {
++namespace {
++
++Shell* CurrentShell() {
++  if (Shell::windows().empty()) {
++    return nullptr;
++  }
++  return Shell::windows()[0];
++}
++
++WebContents* CurrentWebContents() {
++  Shell* shell = CurrentShell();
++  return shell ? shell->web_contents() : nullptr;
++}
++
++NSWindow* CurrentWindow() {
++  WebContents* contents = CurrentWebContents();
++  if (!contents) {
++    return nil;
++  }
++  NSView* view = contents->GetNativeView().GetNativeNSView();
++  return view.window;
++}
++
++RenderWidgetHost* CurrentRenderWidgetHost() {
++  WebContents* contents = CurrentWebContents();
++  if (!contents) {
++    return nullptr;
++  }
++  RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
++  return view ? view->GetRenderWidgetHost() : nullptr;
++}
++
++void EnsureRenderWidgetProducingFramesForOwlFresh() {
++  WebContents* contents = CurrentWebContents();
++  if (!contents) {
++    return;
++  }
++  RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
++  if (view) {
++    if (!view->IsShowing()) {
++      view->Show();
++    }
++    view->WasUnOccluded();
++    view->EnsureSurfaceSynchronizedForWebTest();
++  }
++  if (RenderWidgetHost* host = CurrentRenderWidgetHost()) {
++    host->SetActive(true);
++  }
++}
++
++std::string CopyFromSurfaceErrorToString(CopyFromSurfaceError error) {
++  switch (error) {
++    case CopyFromSurfaceError::kUnknown:
++      return "CopyFromSurface failed: unknown";
++    case CopyFromSurfaceError::kNotImplemented:
++      return "CopyFromSurface failed: not implemented";
++    case CopyFromSurfaceError::kFrameGone:
++      return "CopyFromSurface failed: frame gone";
++    case CopyFromSurfaceError::kTimeout:
++      return "CopyFromSurface failed: timeout";
++    case CopyFromSurfaceError::kEmbeddingTokenChanged:
++      return "CopyFromSurface failed: embedding token changed";
++    case CopyFromSurfaceError::kVizSentEmptyBitmap:
++      return "CopyFromSurface failed: viz sent empty bitmap";
++    case CopyFromSurfaceError::kUnknownVizError:
++      return "CopyFromSurface failed: unknown viz error";
++  }
++  return "CopyFromSurface failed";
++}
++
++mojom::OwlFreshCaptureResultPtr CaptureError(const std::string& message) {
++  auto result = mojom::OwlFreshCaptureResult::New();
++  result->capture_mode = "mojo-copy-from-surface";
++  result->error = message;
++  return result;
++}
++
++std::string CaptureState(WebContents* contents, RenderWidgetHostView* view) {
++  std::string url = contents ? contents->GetLastCommittedURL().spec() : "";
++  gfx::Rect bounds = view ? view->GetViewBounds() : gfx::Rect();
++  NSWindow* window = CurrentWindow();
++  return base::StringPrintf(
++      "url=%s loading=%d view_showing=%d surface_available=%d bounds=%s "
++      "context_id=%u window_visible=%d window_alpha=%.3f",
++      url.c_str(), contents ? contents->IsLoading() : 0,
++      view ? view->IsShowing() : 0,
++      view ? view->IsSurfaceAvailableForCopy() : 0,
++      bounds.ToString().c_str(), ui::OwlFreshLatestContextID(),
++      window ? [window isVisible] : 0, window ? [window alphaValue] : 0.0);
++}
++
++std::string CaptureStateError(const std::string& message,
++                              WebContents* contents,
++                              RenderWidgetHostView* view) {
++  return base::StrCat({message, " (", CaptureState(contents, view), ")"});
++}
++
++mojom::OwlFreshCaptureResultPtr CaptureAppKitViewSnapshot(
++    NSView* view,
++    const std::string& capture_state) {
++  if (!view) {
++    return CaptureError("no NSView for AppKit snapshot");
++  }
++
++  NSRect bounds = view.bounds;
++  if (NSIsEmptyRect(bounds)) {
++    return CaptureError(
++        base::StrCat({"NSView bounds are empty (", capture_state, ")"}));
++  }
++
++  NSBitmapImageRep* rep = [view bitmapImageRepForCachingDisplayInRect:bounds];
++  if (!rep) {
++    return CaptureError(base::StrCat(
++        {"bitmapImageRepForCachingDisplayInRect returned nil (", capture_state,
++         ")"}));
++  }
++  [view cacheDisplayInRect:bounds toBitmapImageRep:rep];
++  NSData* data = [rep representationUsingType:NSBitmapImageFileTypePNG
++                                   properties:@{}];
++  if (!data || data.length == 0) {
++    return CaptureError(
++        base::StrCat({"AppKit snapshot returned empty PNG data (",
++                      capture_state, ")"}));
++  }
++
++  auto result = mojom::OwlFreshCaptureResult::New();
++  result->png.resize(static_cast<size_t>(data.length));
++  const uint8_t* bytes = static_cast<const uint8_t*>(data.bytes);
++  UNSAFE_BUFFERS(base::span(result->png))
++      .copy_from(UNSAFE_BUFFERS(base::span<const uint8_t>(
++          bytes, static_cast<size_t>(data.length))));
++  result->width = static_cast<uint32_t>(rep.pixelsWide);
++  result->height = static_cast<uint32_t>(rep.pixelsHigh);
++  result->capture_mode = "mojo-appkit-cache-display";
++  return result;
++}
++
++int BlinkModifiersFromCocoa(uint32_t cocoa) {
++  int modifiers = 0;
++  if (cocoa & NSEventModifierFlagShift) {
++    modifiers |= blink::WebInputEvent::kShiftKey;
++  }
++  if (cocoa & NSEventModifierFlagControl) {
++    modifiers |= blink::WebInputEvent::kControlKey;
++  }
++  if (cocoa & NSEventModifierFlagOption) {
++    modifiers |= blink::WebInputEvent::kAltKey;
++  }
++  if (cocoa & NSEventModifierFlagCommand) {
++    modifiers |= blink::WebInputEvent::kMetaKey;
++  }
++  if (cocoa & NSEventModifierFlagCapsLock) {
++    modifiers |= blink::WebInputEvent::kCapsLockOn;
++  }
++  return modifiers;
++}
++
++class OwlFreshVideoCapture final : public viz::mojom::FrameSinkVideoConsumer {
++ public:
++  using FrameCallback = base::OnceCallback<void(SkBitmap bitmap)>;
++  using ErrorCallback = base::OnceCallback<void(std::string message)>;
++
++  OwlFreshVideoCapture(RenderWidgetHostView* view,
++                       FrameCallback frame_callback,
++                       ErrorCallback error_callback)
++      : view_(view),
++        frame_callback_(std::move(frame_callback)),
++        error_callback_(std::move(error_callback)) {}
++
++  OwlFreshVideoCapture(const OwlFreshVideoCapture&) = delete;
++  OwlFreshVideoCapture& operator=(const OwlFreshVideoCapture&) = delete;
++
++  ~OwlFreshVideoCapture() override {
++    if (capturer_) {
++      capturer_->Stop();
++    }
++  }
++
++  void Start() {
++    if (!view_) {
++      FinishError("no view for frame-sink video capture");
++      return;
++    }
++    capturer_ = view_->CreateVideoCapturer();
++    if (!capturer_) {
++      FinishError("CreateVideoCapturer returned null");
++      return;
++    }
++    gfx::Size size = view_->GetViewBounds().size();
++    if (size.IsEmpty()) {
++      FinishError("view bounds are empty for frame-sink video capture");
++      return;
++    }
++    capturer_->SetResolutionConstraints(size, size, false);
++    capturer_->SetAutoThrottlingEnabled(false);
++    capturer_->SetMinSizeChangePeriod(base::TimeDelta());
++    capturer_->SetFormat(media::PIXEL_FORMAT_ARGB);
++    capturer_->SetMinCapturePeriod(base::Milliseconds(16));
++    capturer_->Start(this, viz::mojom::BufferFormatPreference::kDefault);
++  }
++
++ private:
++  void OnFrameCaptured(
++      media::mojom::VideoBufferHandlePtr data,
++      media::mojom::VideoFrameInfoPtr info,
++      const gfx::Rect& content_rect,
++      mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
++          callbacks) override {
++    if (!frame_callback_) {
++      return;
++    }
++    mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
++        callbacks_remote(std::move(callbacks));
++    if (!data->is_read_only_shmem_region()) {
++      FinishError("video capture returned non-shared-memory frame");
++      return;
++    }
++    base::ReadOnlySharedMemoryRegion& shmem_region =
++        data->get_read_only_shmem_region();
++    base::ReadOnlySharedMemoryMapping mapping = shmem_region.Map();
++    if (!mapping.IsValid()) {
++      FinishError("video capture shared-memory mapping failed");
++      return;
++    }
++    base::span<const uint8_t> mapping_memory(mapping);
++    if (mapping_memory.size() <
++        media::VideoFrame::AllocationSize(info->pixel_format,
++                                          info->coded_size)) {
++      FinishError("video capture shared-memory frame was too small");
++      return;
++    }
++
++    scoped_refptr<media::VideoFrame> frame =
++        media::VideoFrame::WrapExternalData(
++            info->pixel_format, info->coded_size, content_rect,
++            content_rect.size(), mapping_memory, info->timestamp);
++    if (!frame) {
++      FinishError("video capture could not wrap frame memory");
++      return;
++    }
++    frame->set_metadata(info->metadata);
++    frame->set_color_space(info->color_space);
++    SkBitmap bitmap = DevToolsVideoConsumer::GetSkBitmapFromFrame(frame);
++    callbacks_remote->Done();
++    FrameCallback callback = std::move(frame_callback_);
++    error_callback_.Reset();
++    std::move(callback).Run(std::move(bitmap));
++  }
++
++  void OnNewCaptureVersion(const media::CaptureVersion& capture_version) override {}
++  void OnFrameWithEmptyRegionCapture() override {}
++  void OnStopped() override {}
++  void OnLog(const std::string& message) override {}
++
++  void FinishError(const std::string& message) {
++    if (!error_callback_) {
++      return;
++    }
++    ErrorCallback callback = std::move(error_callback_);
++    frame_callback_.Reset();
++    std::move(callback).Run(message);
++  }
++
++  raw_ptr<RenderWidgetHostView> view_;
++  FrameCallback frame_callback_;
++  ErrorCallback error_callback_;
++  std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer_;
++};
++
++void FocusWebContents(bool focused) {
++  NSWindow* window = CurrentWindow();
++  WebContents* contents = CurrentWebContents();
++  RenderWidgetHost* host = CurrentRenderWidgetHost();
++  if (!window || !contents || !host) {
++    return;
++  }
++  if (!focused) {
++    [window makeFirstResponder:nil];
++    host->SetActive(false);
++    return;
++  }
++  NSView* view = contents->GetNativeView().GetNativeNSView();
++  [window makeFirstResponder:view];
++  host->SetActive(true);
++  host->Focus();
++}
++
++mojom::OwlFreshCompositorInfoPtr CompositorInfoForContextID(
++    uint32_t context_id) {
++  auto info = mojom::OwlFreshCompositorInfo::New();
++  info->context_id = context_id;
++  return info;
++}
++
++class OwlFreshHostImpl final : public mojom::OwlFreshHost {
++ public:
++  OwlFreshHostImpl() = default;
++  ~OwlFreshHostImpl() override = default;
++
++  OwlFreshHostImpl(const OwlFreshHostImpl&) = delete;
++  OwlFreshHostImpl& operator=(const OwlFreshHostImpl&) = delete;
++
++  void SetClient(mojo::PendingRemote<mojom::OwlFreshClient> client) override {
++    client_.Bind(std::move(client));
++    EnsureRenderWidgetProducingFramesForOwlFresh();
++    if (client_) {
++      client_->OnReady(base::GetCurrentProcId(), CurrentCompositorInfo());
++      client_->OnHostLog("OwlFreshHost bound over Mojo");
++    }
++    PublishCompositorWithRetry(80);
++  }
++
++  void Navigate(const std::string& url) override {
++    Shell* shell = CurrentShell();
++    if (!shell) {
++      Log("Navigate dropped: no shell");
++      return;
++    }
++    shell->LoadURL(GURL(url));
++    EnsureRenderWidgetProducingFramesForOwlFresh();
++    if (client_) {
++      client_->OnNavigationChanged(url, std::string(), true);
++    }
++    PublishCompositorWithRetry(40);
++  }
++
++  void Resize(uint32_t width, uint32_t height, float scale) override {
++    NSWindow* window = CurrentWindow();
++    if (!window || width == 0 || height == 0) {
++      return;
++    }
++    [CATransaction begin];
++    [CATransaction setDisableActions:YES];
++    NSRect frame = window.frame;
++    frame.size = NSMakeSize(width, height);
++    [window setFrame:frame display:YES animate:NO];
++    [window.contentView setNeedsLayout:YES];
++    [CATransaction commit];
++    [CATransaction flush];
++    EnsureRenderWidgetProducingFramesForOwlFresh();
++    PublishCompositorWithRetry(10);
++  }
++
++  void SetFocus(bool focused) override {
++    FocusWebContents(focused);
++    if (focused) {
++      EnsureRenderWidgetProducingFramesForOwlFresh();
++    }
++  }
++
++  void SendMouse(mojom::OwlFreshMouseEventPtr event) override {
++    RenderWidgetHost* host = CurrentRenderWidgetHost();
++    if (!host || !event) {
++      return;
++    }
++    int modifiers = BlinkModifiersFromCocoa(event->modifiers);
++    base::TimeTicks now = base::TimeTicks::Now();
++
++    if (event->kind == mojom::OwlFreshMouseKind::kWheel) {
++      blink::WebMouseWheelEvent wheel(
++          blink::WebInputEvent::Type::kMouseWheel, modifiers, now);
++      wheel.SetPositionInWidget(event->x, event->y);
++      wheel.SetPositionInScreen(event->x, event->y);
++      wheel.delta_x = event->delta_x;
++      wheel.delta_y = event->delta_y;
++      wheel.wheel_ticks_x = event->delta_x / 100.0f;
++      wheel.wheel_ticks_y = event->delta_y / 100.0f;
++      wheel.phase = blink::WebMouseWheelEvent::kPhaseChanged;
++      wheel.has_synthetic_phase = true;
++      host->ForwardWheelEvent(wheel);
++      return;
++    }
++
++    blink::WebInputEvent::Type type = blink::WebInputEvent::Type::kMouseMove;
++    if (event->kind == mojom::OwlFreshMouseKind::kDown) {
++      type = blink::WebInputEvent::Type::kMouseDown;
++    } else if (event->kind == mojom::OwlFreshMouseKind::kUp) {
++      type = blink::WebInputEvent::Type::kMouseUp;
++    }
++
++    blink::WebPointerProperties::Button button =
++        blink::WebPointerProperties::Button::kNoButton;
++    if (event->button == 0) {
++      button = blink::WebPointerProperties::Button::kLeft;
++    } else if (event->button == 1) {
++      button = blink::WebPointerProperties::Button::kMiddle;
++    } else if (event->button == 2) {
++      button = blink::WebPointerProperties::Button::kRight;
++    }
++
++    if (type == blink::WebInputEvent::Type::kMouseDown) {
++      if (button == blink::WebPointerProperties::Button::kLeft) {
++        modifiers |= blink::WebInputEvent::kLeftButtonDown;
++      } else if (button == blink::WebPointerProperties::Button::kRight) {
++        modifiers |= blink::WebInputEvent::kRightButtonDown;
++      } else if (button == blink::WebPointerProperties::Button::kMiddle) {
++        modifiers |= blink::WebInputEvent::kMiddleButtonDown;
++      }
++    }
++
++    blink::WebMouseEvent mouse(type, modifiers, now);
++    mouse.SetPositionInWidget(event->x, event->y);
++    mouse.SetPositionInScreen(event->x, event->y);
++    mouse.button =
++        type == blink::WebInputEvent::Type::kMouseMove
++            ? blink::WebPointerProperties::Button::kNoButton
++            : button;
++    mouse.click_count = event->click_count > 0 ? event->click_count : 1;
++    host->ForwardMouseEvent(mouse);
++  }
++
++  void SendKey(mojom::OwlFreshKeyEventPtr event) override {
++    RenderWidgetHost* host = CurrentRenderWidgetHost();
++    if (!host || !event) {
++      return;
++    }
++
++    int modifiers = BlinkModifiersFromCocoa(event->modifiers);
++    blink::WebInputEvent::Type type =
++        event->key_down ? blink::WebInputEvent::Type::kRawKeyDown
++                        : blink::WebInputEvent::Type::kKeyUp;
++    input::NativeWebKeyboardEvent key_event(type, modifiers,
++                                            base::TimeTicks::Now());
++    key_event.native_key_code = event->key_code;
++    key_event.windows_key_code = event->key_code;
++    CopyText(event->text, &key_event);
++    host->ForwardKeyboardEvent(key_event);
++
++    if (event->key_down && !event->text.empty()) {
++      input::NativeWebKeyboardEvent char_event(
++          blink::WebInputEvent::Type::kChar, modifiers, base::TimeTicks::Now());
++      char_event.native_key_code = event->key_code;
++      char_event.windows_key_code = event->key_code;
++      CopyText(event->text, &char_event);
++      host->ForwardKeyboardEvent(char_event);
++    }
++  }
++
++  void CaptureSurface(CaptureSurfaceCallback callback) override {
++    WebContents* contents = CurrentWebContents();
++    if (!contents) {
++      std::move(callback).Run(CaptureError("no current WebContents"));
++      return;
++    }
++
++    RenderWidgetHostView* view = contents->GetRenderWidgetHostView();
++    if (!view) {
++      std::move(callback).Run(CaptureError("no RenderWidgetHostView"));
++      return;
++    }
++
++    if (!view->IsSurfaceAvailableForCopy()) {
++      std::move(callback).Run(CaptureError(CaptureStateError(
++          "RenderWidgetHostView surface is not available", contents, view)));
++      return;
++    }
++
++    if (!view->IsShowing()) {
++      view->Show();
++    }
++    view->WasUnOccluded();
++    view->EnsureSurfaceSynchronizedForWebTest();
++
++    if (view->GetViewBounds().size().IsEmpty()) {
++      std::move(callback).Run(CaptureError(CaptureStateError(
++          "RenderWidgetHostView bounds are empty", contents, view)));
++      return;
++    }
++
++    if (!pending_capture_callback_.is_null()) {
++      std::move(callback).Run(CaptureError(CaptureStateError(
++          "CaptureSurface already has a pending request", contents, view)));
++      return;
++    }
++
++    pending_capture_state_ = CaptureState(contents, view);
++    const bool from_surface =
++        !base::CommandLine::ForCurrentProcess()->HasSwitch(
++            "owl-fresh-window-snapshot");
++
++    if (!from_surface) {
++      std::move(callback).Run(CaptureAppKitViewSnapshot(
++          view->GetNativeView().GetNativeNSView(), pending_capture_state_));
++      pending_capture_state_.clear();
++      pending_capture_mode_.clear();
++      return;
++    }
++
++    pending_capture_mode_ = "mojo-frame-sink-video-capture";
++    pending_capture_callback_ = std::move(callback);
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&OwlFreshHostImpl::OnCaptureSurfaceTimeout,
++                       weak_factory_.GetWeakPtr()),
++        base::Seconds(20));
++
++    video_capture_ = std::make_unique<OwlFreshVideoCapture>(
++        view,
++        base::BindOnce(&OwlFreshHostImpl::OnVideoCaptureFrame,
++                       weak_factory_.GetWeakPtr()),
++        base::BindOnce(&OwlFreshHostImpl::OnVideoCaptureError,
++                       weak_factory_.GetWeakPtr()));
++    video_capture_->Start();
++    return;
++  }
++
++ private:
++  void CopyText(const std::string& text,
++                input::NativeWebKeyboardEvent* event) {
++    size_t n = std::min(text.size(), blink::WebKeyboardEvent::kTextLengthCap - 1);
++    for (size_t i = 0; i < n; ++i) {
++      event->text[i] = static_cast<char16_t>(
++          static_cast<unsigned char>(text[i]));
++      event->unmodified_text[i] = event->text[i];
++    }
++    event->text[n] = 0;
++    event->unmodified_text[n] = 0;
++  }
++
++  void PublishCompositorWithRetry(int attempts_remaining) {
++    if (!client_) {
++      return;
++    }
++    uint32_t context_id = CurrentContextID();
++    if (context_id != 0) {
++      if (context_id != last_context_id_) {
++        last_context_id_ = context_id;
++      }
++      client_->OnCompositorChanged(CompositorInfoForContextID(context_id));
++    }
++    if (attempts_remaining <= 0) {
++      return;
++    }
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&OwlFreshHostImpl::PublishCompositorWithRetry,
++                       weak_factory_.GetWeakPtr(), attempts_remaining - 1),
++        base::Milliseconds(100));
++  }
++
++  bool UseLayerFixtureContext() const {
++    return base::CommandLine::ForCurrentProcess()->HasSwitch(
++        "owl-fresh-layer-fixture-context");
++  }
++
++  mojom::OwlFreshCompositorInfoPtr CurrentCompositorInfo() {
++    return CompositorInfoForContextID(CurrentContextID());
++  }
++
++  uint32_t CurrentContextID() {
++    if (UseLayerFixtureContext()) {
++      return EnsureLayerFixtureContext();
++    }
++    return ui::OwlFreshLatestContextID();
++  }
++
++  uint32_t EnsureLayerFixtureContext() {
++    if (!fixture_context_) {
++      fixture_root_ = [[CALayer alloc] init];
++      fixture_root_.geometryFlipped = YES;
++      fixture_root_.anchorPoint = CGPointZero;
++      fixture_root_.frame = CGRectMake(0, 0, 960, 640);
++      fixture_root_.backgroundColor =
++          [[NSColor colorWithCalibratedRed:0.972
++                                     green:0.972
++                                      blue:0.972
++                                     alpha:1.0] CGColor];
++
++      auto add_block = [&](CGFloat x,
++                           CGFloat y,
++                           CGFloat width,
++                           CGFloat height,
++                           NSColor* color) {
++        CALayer* layer = [[CALayer alloc] init];
++        layer.anchorPoint = CGPointZero;
++        layer.frame = CGRectMake(x, y, width, height);
++        layer.backgroundColor = [color CGColor];
++        [fixture_root_ addSublayer:layer];
++      };
++      add_block(48, 56, 180, 140, [NSColor colorWithCalibratedRed:1
++                                                            green:0
++                                                             blue:0
++                                                            alpha:1]);
++      add_block(288, 56, 180, 140, [NSColor colorWithCalibratedRed:0
++                                                             green:0.8
++                                                              blue:0.267
++                                                             alpha:1]);
++      add_block(528, 56, 180, 140, [NSColor colorWithCalibratedRed:0
++                                                             green:0.349
++                                                              blue:1
++                                                             alpha:1]);
++
++      CATextLayer* text = [CATextLayer layer];
++      text.anchorPoint = CGPointZero;
++      text.frame = CGRectMake(48, 238, 760, 72);
++      text.string = @"OWL_LAYER_HOST_SENTINEL";
++      text.fontSize = 40;
++      text.contentsScale = [NSScreen mainScreen].backingScaleFactor;
++      text.foregroundColor = [[NSColor colorWithCalibratedRed:0.078
++                                                        green:0.078
++                                                         blue:0.078
++                                                        alpha:1.0] CGColor];
++      [fixture_root_ addSublayer:text];
++
++      if ([CAContext respondsToSelector:@selector(contextWithCGSConnection:options:)]) {
++        CGSConnectionID connection = CGSMainConnectionID();
++        fixture_context_ =
++            [CAContext contextWithCGSConnection:connection options:@{}];
++      } else {
++        fixture_context_ = [CAContext remoteContextWithOptions:@{}];
++      }
++      fixture_context_.layer = fixture_root_;
++      [CATransaction flush];
++    }
++    return fixture_context_.contextId;
++  }
++
++  void Log(const std::string& message) {
++    if (client_) {
++      client_->OnHostLog(message);
++    }
++  }
++
++  void OnCaptureSurface(const CopyFromSurfaceResult& copy_result) {
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    std::string capture_state = std::exchange(pending_capture_state_, "");
++    pending_capture_mode_.clear();
++
++    if (!copy_result.has_value()) {
++      std::move(callback).Run(CaptureError(base::StrCat(
++          {CopyFromSurfaceErrorToString(copy_result.error()), " (",
++           capture_state, ")"})));
++      return;
++    }
++
++    const SkBitmap& bitmap = copy_result->bitmap;
++    if (bitmap.drawsNothing()) {
++      std::move(callback).Run(CaptureError(base::StrCat(
++          {"CopyFromSurface returned no pixels (", capture_state, ")"})));
++      return;
++    }
++
++    std::optional<std::vector<uint8_t>> png =
++        gfx::PNGCodec::EncodeBGRASkBitmap(bitmap,
++                                          /*discard_transparency=*/false);
++    if (!png || png->empty()) {
++      std::move(callback).Run(CaptureError("failed to encode PNG"));
++      return;
++    }
++
++    auto result = mojom::OwlFreshCaptureResult::New();
++    result->png = std::move(*png);
++    result->width = bitmap.width();
++    result->height = bitmap.height();
++    result->capture_mode = "mojo-copy-from-surface";
++    std::move(callback).Run(std::move(result));
++  }
++
++  void OnSnapshotFromBrowser(const gfx::Image& image) {
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    std::string capture_state = std::exchange(pending_capture_state_, "");
++    std::string capture_mode = std::exchange(pending_capture_mode_, "");
++
++    if (image.IsEmpty()) {
++      std::move(callback).Run(CaptureError(base::StrCat(
++          {"GetSnapshotFromBrowser returned an empty image (", capture_state,
++           ")"})));
++      return;
++    }
++
++    SkBitmap bitmap = image.AsBitmap();
++    if (bitmap.drawsNothing()) {
++      std::move(callback).Run(CaptureError(base::StrCat(
++          {"GetSnapshotFromBrowser returned no pixels (", capture_state,
++           ")"})));
++      return;
++    }
++
++    std::optional<std::vector<uint8_t>> png =
++        gfx::PNGCodec::EncodeBGRASkBitmap(bitmap,
++                                          /*discard_transparency=*/false);
++    if (!png || png->empty()) {
++      std::move(callback).Run(CaptureError("failed to encode PNG"));
++      return;
++    }
++
++    auto result = mojom::OwlFreshCaptureResult::New();
++    result->png = std::move(*png);
++    result->width = bitmap.width();
++    result->height = bitmap.height();
++    result->capture_mode = capture_mode;
++    std::move(callback).Run(std::move(result));
++  }
++
++  void OnVideoCaptureFrame(SkBitmap bitmap) {
++    video_capture_.reset();
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    std::string capture_state = std::exchange(pending_capture_state_, "");
++    std::string capture_mode = std::exchange(pending_capture_mode_, "");
++
++    if (bitmap.drawsNothing()) {
++      std::move(callback).Run(CaptureError(base::StrCat(
++          {"FrameSinkVideoCapturer returned no pixels (", capture_state,
++           ")"})));
++      return;
++    }
++
++    std::optional<std::vector<uint8_t>> png =
++        gfx::PNGCodec::EncodeBGRASkBitmap(bitmap,
++                                          /*discard_transparency=*/false);
++    if (!png || png->empty()) {
++      std::move(callback).Run(CaptureError("failed to encode PNG"));
++      return;
++    }
++
++    auto result = mojom::OwlFreshCaptureResult::New();
++    result->png = std::move(*png);
++    result->width = bitmap.width();
++    result->height = bitmap.height();
++    result->capture_mode = capture_mode;
++    std::move(callback).Run(std::move(result));
++  }
++
++  void OnVideoCaptureError(std::string message) {
++    video_capture_.reset();
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    std::string capture_state = std::exchange(pending_capture_state_, "");
++    pending_capture_mode_.clear();
++    std::move(callback).Run(CaptureError(
++        base::StrCat({message, " (", capture_state, ")"})));
++  }
++
++  void OnGrabViewSnapshot(gfx::Image image) {
++    OnSnapshotFromBrowser(image);
++  }
++
++  void OnSnapshotError(const std::string& message) {
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    pending_capture_state_.clear();
++    pending_capture_mode_.clear();
++    std::move(callback).Run(CaptureError(message));
++  }
++
++  void OnCaptureSurfaceTimeout() {
++    if (pending_capture_callback_.is_null()) {
++      return;
++    }
++
++    CaptureSurfaceCallback callback = std::move(pending_capture_callback_);
++    std::string capture_state = std::exchange(pending_capture_state_, "");
++    pending_capture_mode_.clear();
++    video_capture_.reset();
++    std::move(callback).Run(CaptureError(base::StrCat(
++        {"capture did not call back before host timeout (",
++         capture_state, ")"})));
++  }
++
++  mojo::Remote<mojom::OwlFreshClient> client_;
++  uint32_t last_context_id_ = 0;
++  CAContext* __strong fixture_context_ = nil;
++  CALayer* __strong fixture_root_ = nil;
++  CaptureSurfaceCallback pending_capture_callback_;
++  std::string pending_capture_state_;
++  std::string pending_capture_mode_;
++  std::unique_ptr<OwlFreshVideoCapture> video_capture_;
++  base::WeakPtrFactory<OwlFreshHostImpl> weak_factory_{this};
++};
++
++}  // namespace
++
++void BindOwlFreshHostForCurrentShell(
++    mojo::PendingReceiver<mojom::OwlFreshHost> receiver) {
++  mojo::MakeSelfOwnedReceiver(std::make_unique<OwlFreshHostImpl>(),
++                              std::move(receiver));
++}
++
++}  // namespace content
+diff --git a/fresh_owl/BUILD.gn b/fresh_owl/BUILD.gn
+new file mode 100644
+index 0000000000..1bf493f610
+--- /dev/null
++++ b/fresh_owl/BUILD.gn
+@@ -0,0 +1,17 @@
++shared_library("owl_fresh_bridge") {
++  testonly = true
++  sources = [
++    "owl_fresh_bridge.cc",
++    "owl_fresh_bridge.h",
++  ]
++  deps = [
++    "//base",
++    "//content/shell:shell_controller_mojom",
++    "//mojo/core/embedder",
++    "//mojo/public/cpp/bindings",
++    "//mojo/public/cpp/platform",
++    "//mojo/public/cpp/system",
++  ]
++  ldflags = [ "-Wl,-install_name,@rpath/libowl_fresh_bridge.dylib" ]
++}
++
+diff --git a/fresh_owl/owl_fresh_bridge.cc b/fresh_owl/owl_fresh_bridge.cc
+new file mode 100644
+index 0000000000..c8a090bd9d
+--- /dev/null
++++ b/fresh_owl/owl_fresh_bridge.cc
+@@ -0,0 +1,468 @@
++#include "fresh_owl/owl_fresh_bridge.h"
++
++#include <cstdlib>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/apple/foundation_util.h"
++#include "base/at_exit.h"
++#include "base/command_line.h"
++#include "base/compiler_specific.h"
++#include "base/containers/span.h"
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/memory/raw_ptr.h"
++#include "base/process/launch.h"
++#include "base/process/process.h"
++#include "base/run_loop.h"
++#include "base/task/single_thread_task_executor.h"
++#include "base/task/thread_pool/thread_pool_instance.h"
++#include "base/threading/thread.h"
++#include "content/shell/common/shell_controller.test-mojom.h"
++#include "mojo/core/embedder/configuration.h"
++#include "mojo/core/embedder/embedder.h"
++#include "mojo/core/embedder/scoped_ipc_support.h"
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/platform/platform_channel.h"
++#include "mojo/public/cpp/system/invitation.h"
++
++namespace {
++
++struct GlobalState {
++  base::AtExitManager at_exit;
++  std::unique_ptr<base::SingleThreadTaskExecutor> main_executor;
++  std::unique_ptr<base::Thread> ipc_thread;
++  std::unique_ptr<mojo::core::ScopedIPCSupport> ipc_support;
++  bool initialized = false;
++};
++
++GlobalState& GetGlobal() {
++  static base::NoDestructor<GlobalState> global;
++  return *global;
++}
++
++void Emit(OwlFreshEventCallback callback,
++          void* user_data,
++          const OwlFreshEvent& event) {
++  if (callback) {
++    callback(&event, user_data);
++  }
++}
++
++char* DuplicateCString(const std::string& value) {
++  char* copy = static_cast<char*>(std::malloc(value.size() + 1));
++  if (!copy) {
++    return nullptr;
++  }
++  // SAFETY: `copy` was allocated as `value.size() + 1` bytes above.
++  auto [text, terminator] =
++      UNSAFE_BUFFERS(base::span<char>(copy, value.size() + 1))
++          .split_at(value.size());
++  text.copy_from(base::span(std::string_view(value)));
++  terminator.copy_from(base::span_from_ref('\0'));
++  return copy;
++}
++
++}  // namespace
++
++struct OwlFreshSession;
++
++class OwlFreshClientImpl final : public content::mojom::OwlFreshClient {
++ public:
++  explicit OwlFreshClientImpl(OwlFreshSession* session) : session_(session) {}
++  ~OwlFreshClientImpl() override = default;
++
++  void OnReady(int32_t host_pid,
++               content::mojom::OwlFreshCompositorInfoPtr compositor) override;
++  void OnCompositorChanged(
++      content::mojom::OwlFreshCompositorInfoPtr compositor) override;
++  void OnNavigationChanged(const std::string& url,
++                           const std::string& title,
++                           bool loading) override;
++  void OnHostLog(const std::string& message) override;
++
++ private:
++  raw_ptr<OwlFreshSession> session_;
++};
++
++struct OwlFreshSession {
++  base::Process process;
++  mojo::Remote<content::mojom::ShellController> controller;
++  mojo::Remote<content::mojom::OwlFreshHost> host;
++  std::unique_ptr<OwlFreshClientImpl> client_impl;
++  std::unique_ptr<mojo::Receiver<content::mojom::OwlFreshClient>>
++      client_receiver;
++  OwlFreshEventCallback callback = nullptr;
++  raw_ptr<void> user_data = nullptr;
++};
++
++void OwlFreshClientImpl::OnReady(
++    int32_t host_pid,
++    content::mojom::OwlFreshCompositorInfoPtr compositor) {
++  OwlFreshEvent event = {};
++  event.kind = kOwlFreshEventReady;
++  event.host_pid = host_pid;
++  event.context_id = compositor ? compositor->context_id : 0;
++  Emit(session_->callback, session_->user_data, event);
++}
++
++void OwlFreshClientImpl::OnCompositorChanged(
++    content::mojom::OwlFreshCompositorInfoPtr compositor) {
++  OwlFreshEvent event = {};
++  event.kind = kOwlFreshEventCompositor;
++  event.context_id = compositor ? compositor->context_id : 0;
++  Emit(session_->callback, session_->user_data, event);
++}
++
++void OwlFreshClientImpl::OnNavigationChanged(const std::string& url,
++                                             const std::string& title,
++                                             bool loading) {
++  OwlFreshEvent event = {};
++  event.kind = kOwlFreshEventNavigation;
++  event.url = url.c_str();
++  event.title = title.c_str();
++  event.loading = loading;
++  Emit(session_->callback, session_->user_data, event);
++}
++
++void OwlFreshClientImpl::OnHostLog(const std::string& message) {
++  OwlFreshEvent event = {};
++  event.kind = kOwlFreshEventLog;
++  event.message = message.c_str();
++  Emit(session_->callback, session_->user_data, event);
++}
++
++extern "C" int owl_fresh_global_init(void) {
++  GlobalState& global = GetGlobal();
++  if (global.initialized) {
++    return 0;
++  }
++
++  base::apple::SetBaseBundleIDOverride("org.chromium.ContentShell");
++
++  const char* argv[] = {"owl_fresh_bridge"};
++  base::CommandLine::Init(1, argv);
++  logging::SetMinLogLevel(logging::LOGGING_INFO);
++
++  base::ThreadPoolInstance::CreateAndStartWithDefaultParams(
++      "owl_fresh_bridge");
++
++  mojo::core::Configuration config;
++  config.is_broker_process = true;
++  config.max_message_num_bytes = 128 * 1024 * 1024;
++  mojo::core::Init(config);
++
++  global.ipc_thread = std::make_unique<base::Thread>("owl_fresh_ipc");
++  base::Thread::Options options;
++  options.message_pump_type = base::MessagePumpType::IO;
++  if (!global.ipc_thread->StartWithOptions(std::move(options))) {
++    return 1;
++  }
++  global.ipc_support = std::make_unique<mojo::core::ScopedIPCSupport>(
++      global.ipc_thread->task_runner(),
++      mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
++  global.main_executor = std::make_unique<base::SingleThreadTaskExecutor>();
++  global.initialized = true;
++  return 0;
++}
++
++extern "C" OwlFreshSession* owl_fresh_session_create(
++    const char* content_shell_path,
++    const char* initial_url,
++    const char* user_data_dir,
++    OwlFreshEventCallback callback,
++    void* user_data) {
++  if (!GetGlobal().initialized || !content_shell_path || !*content_shell_path) {
++    return nullptr;
++  }
++
++  mojo::PlatformChannel channel;
++  base::LaunchOptions launch_options;
++  base::FilePath program_path(content_shell_path);
++  base::CommandLine command_line(program_path);
++  command_line.AppendSwitch("no-sandbox");
++  const bool visible_control_mode = std::getenv("OWL_FRESH_NO_EMBED") != nullptr;
++  if (!visible_control_mode) {
++    command_line.AppendSwitch("fresh-owl-embed");
++  } else {
++    command_line.AppendSwitch("owl-fresh-visible-control");
++  }
++  command_line.AppendSwitch("owl-fresh-disable-devtools");
++  if (std::getenv("OWL_FRESH_WINDOW_SNAPSHOT") != nullptr) {
++    command_line.AppendSwitch("owl-fresh-window-snapshot");
++  }
++  if (std::getenv("OWL_FRESH_LAYER_FIXTURE") != nullptr) {
++    command_line.AppendSwitch("owl-fresh-layer-fixture-context");
++  }
++  command_line.AppendSwitch("content-shell-hide-toolbar");
++  command_line.AppendSwitch("no-first-run");
++  command_line.AppendSwitch("no-default-browser-check");
++  if (std::getenv("OWL_FRESH_DISABLE_GPU") != nullptr) {
++    command_line.AppendSwitch("disable-gpu");
++  }
++  if (std::getenv("OWL_FRESH_NO_IN_PROCESS_GPU") == nullptr) {
++    command_line.AppendSwitch("in-process-gpu");
++  }
++  command_line.AppendSwitchASCII("enable-logging", "stderr");
++  command_line.AppendSwitchASCII("vmodule", "*owl*=1,*fresh*=1,*shell*=1");
++  if (user_data_dir && *user_data_dir) {
++    command_line.AppendSwitchASCII("user-data-dir", user_data_dir);
++  }
++  if (initial_url && *initial_url) {
++    command_line.AppendArg(initial_url);
++  }
++  channel.PrepareToPassRemoteEndpoint(&launch_options, &command_line);
++
++  base::Process process = base::LaunchProcess(command_line, launch_options);
++  channel.RemoteProcessLaunchAttempted();
++  if (!process.IsValid()) {
++    return nullptr;
++  }
++
++  auto session = std::make_unique<OwlFreshSession>();
++  session->callback = callback;
++  session->user_data = user_data;
++  session->process = std::move(process);
++
++  mojo::OutgoingInvitation invitation;
++  session->controller =
++      mojo::Remote<content::mojom::ShellController>(
++          mojo::PendingRemote<content::mojom::ShellController>(
++              invitation.AttachMessagePipe(0), 0));
++  mojo::OutgoingInvitation::Send(std::move(invitation),
++                                 session->process.Handle(),
++                                 channel.TakeLocalEndpoint());
++
++  session->controller->BindOwlFreshHost(
++      session->host.BindNewPipeAndPassReceiver());
++  session->client_impl = std::make_unique<OwlFreshClientImpl>(session.get());
++  session->client_receiver =
++      std::make_unique<mojo::Receiver<content::mojom::OwlFreshClient>>(
++          session->client_impl.get());
++  session->host->SetClient(
++      session->client_receiver->BindNewPipeAndPassRemote());
++
++  session->controller.set_disconnect_handler(base::BindRepeating(
++      [](OwlFreshSession* session) {
++        OwlFreshEvent event = {};
++        event.kind = kOwlFreshEventDisconnected;
++        Emit(session->callback, session->user_data, event);
++      },
++      session.get()));
++  session->host.set_disconnect_handler(base::BindRepeating(
++      [](OwlFreshSession* session) {
++        OwlFreshEvent event = {};
++        event.kind = kOwlFreshEventDisconnected;
++        Emit(session->callback, session->user_data, event);
++      },
++      session.get()));
++
++  return session.release();
++}
++
++extern "C" void owl_fresh_session_destroy(OwlFreshSession* session) {
++  if (!session) {
++    return;
++  }
++  if (session->controller.is_bound()) {
++    session->controller->ShutDown();
++  }
++  session->host.reset();
++  session->controller.reset();
++  base::RunLoop loop;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE, loop.QuitClosure(), base::Milliseconds(100));
++  loop.Run();
++  session->process.WaitForExitWithTimeout(base::Seconds(2), nullptr);
++  delete session;
++}
++
++extern "C" int32_t owl_fresh_session_host_pid(OwlFreshSession* session) {
++  return session && session->process.IsValid() ? session->process.Pid() : -1;
++}
++
++extern "C" void owl_fresh_navigate(OwlFreshSession* session, const char* url) {
++  if (session && session->host.is_bound() && url) {
++    session->host->Navigate(url);
++  }
++}
++
++extern "C" void owl_fresh_resize(OwlFreshSession* session,
++                                 uint32_t width,
++                                 uint32_t height,
++                                 float scale) {
++  if (session && session->host.is_bound()) {
++    session->host->Resize(width, height, scale);
++  }
++}
++
++extern "C" void owl_fresh_set_focus(OwlFreshSession* session, bool focused) {
++  if (session && session->host.is_bound()) {
++    session->host->SetFocus(focused);
++  }
++}
++
++extern "C" void owl_fresh_send_mouse(OwlFreshSession* session,
++                                     uint32_t kind,
++                                     float x,
++                                     float y,
++                                     uint32_t button,
++                                     uint32_t click_count,
++                                     float delta_x,
++                                     float delta_y,
++                                     uint32_t modifiers) {
++  if (!session || !session->host.is_bound()) {
++    return;
++  }
++  auto event = content::mojom::OwlFreshMouseEvent::New();
++  event->kind = static_cast<content::mojom::OwlFreshMouseKind>(kind);
++  event->x = x;
++  event->y = y;
++  event->button = button;
++  event->click_count = click_count;
++  event->delta_x = delta_x;
++  event->delta_y = delta_y;
++  event->modifiers = modifiers;
++  session->host->SendMouse(std::move(event));
++}
++
++extern "C" void owl_fresh_send_key(OwlFreshSession* session,
++                                   bool key_down,
++                                   uint32_t key_code,
++                                   const char* text,
++                                   uint32_t modifiers) {
++  if (!session || !session->host.is_bound()) {
++    return;
++  }
++  auto event = content::mojom::OwlFreshKeyEvent::New();
++  event->key_down = key_down;
++  event->key_code = key_code;
++  event->text = text ? text : "";
++  event->modifiers = modifiers;
++  session->host->SendKey(std::move(event));
++}
++
++extern "C" int owl_fresh_capture_surface_png(OwlFreshSession* session,
++                                             uint8_t** png_bytes,
++                                             uintptr_t* png_length,
++                                             uint32_t* width,
++                                             uint32_t* height,
++                                             char** capture_mode,
++                                             char** error) {
++  if (png_bytes) {
++    *png_bytes = nullptr;
++  }
++  if (png_length) {
++    *png_length = 0;
++  }
++  if (width) {
++    *width = 0;
++  }
++  if (height) {
++    *height = 0;
++  }
++  if (capture_mode) {
++    *capture_mode = nullptr;
++  }
++  if (error) {
++    *error = nullptr;
++  }
++
++  if (!session || !session->host.is_bound()) {
++    if (error) {
++      *error = DuplicateCString("OwlFreshSession is not bound");
++    }
++    return 1;
++  }
++
++  int status = 1;
++  base::RunLoop loop;
++  session->host->CaptureSurface(base::BindOnce(
++      [](base::OnceClosure quit,
++         int* status,
++         uint8_t** png_bytes,
++         uintptr_t* png_length,
++         uint32_t* width,
++         uint32_t* height,
++         char** capture_mode,
++         char** error,
++         content::mojom::OwlFreshCaptureResultPtr result) {
++        if (!result) {
++          if (error) {
++            *error = DuplicateCString("CaptureSurface returned no result");
++          }
++          std::move(quit).Run();
++          return;
++        }
++
++        if (width) {
++          *width = result->width;
++        }
++        if (height) {
++          *height = result->height;
++        }
++        if (capture_mode) {
++          *capture_mode = DuplicateCString(result->capture_mode);
++        }
++
++        if (!result->error.empty()) {
++          if (error) {
++            *error = DuplicateCString(result->error);
++          }
++          std::move(quit).Run();
++          return;
++        }
++
++        if (result->png.empty()) {
++          if (error) {
++            *error = DuplicateCString("CaptureSurface returned empty PNG bytes");
++          }
++          std::move(quit).Run();
++          return;
++        }
++
++        uint8_t* bytes =
++            static_cast<uint8_t*>(std::malloc(result->png.size()));
++        if (!bytes) {
++          if (error) {
++            *error = DuplicateCString("failed to allocate PNG output buffer");
++          }
++          std::move(quit).Run();
++          return;
++        }
++        // SAFETY: `bytes` was allocated as `result->png.size()` bytes above.
++        UNSAFE_BUFFERS(base::span<uint8_t>(bytes, result->png.size()))
++            .copy_from(base::span(result->png));
++        if (png_bytes) {
++          *png_bytes = bytes;
++        } else {
++          std::free(bytes);
++        }
++        if (png_length) {
++          *png_length = result->png.size();
++        }
++        *status = 0;
++        std::move(quit).Run();
++      },
++      loop.QuitClosure(), &status, png_bytes, png_length, width, height,
++      capture_mode, error));
++  loop.Run();
++  return status;
++}
++
++extern "C" void owl_fresh_poll_events(uint32_t timeout_ms) {
++  base::RunLoop loop;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE, loop.QuitClosure(), base::Milliseconds(timeout_ms));
++  loop.Run();
++}
++
++extern "C" void owl_fresh_free_buffer(void* buffer) {
++  std::free(buffer);
++}
+diff --git a/fresh_owl/owl_fresh_bridge.h b/fresh_owl/owl_fresh_bridge.h
+new file mode 100644
+index 0000000000..cf41a9654c
+--- /dev/null
++++ b/fresh_owl/owl_fresh_bridge.h
+@@ -0,0 +1,85 @@
++#ifndef FRESH_OWL_OWL_FRESH_BRIDGE_H_
++#define FRESH_OWL_OWL_FRESH_BRIDGE_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#if defined(__GNUC__)
++#define OWL_FRESH_EXPORT __attribute__((visibility("default")))
++#else
++#define OWL_FRESH_EXPORT
++#endif
++
++typedef struct OwlFreshSession OwlFreshSession;
++
++typedef enum OwlFreshEventKind {
++  kOwlFreshEventLog = 1,
++  kOwlFreshEventReady = 2,
++  kOwlFreshEventCompositor = 3,
++  kOwlFreshEventNavigation = 4,
++  kOwlFreshEventDisconnected = 5,
++} OwlFreshEventKind;
++
++typedef struct OwlFreshEvent {
++  OwlFreshEventKind kind;
++  uint32_t context_id;
++  int32_t host_pid;
++  bool loading;
++  const char* url;
++  const char* title;
++  const char* message;
++} OwlFreshEvent;
++
++typedef void (*OwlFreshEventCallback)(const OwlFreshEvent* event,
++                                      void* user_data);
++
++OWL_FRESH_EXPORT int owl_fresh_global_init(void);
++OWL_FRESH_EXPORT OwlFreshSession* owl_fresh_session_create(
++    const char* content_shell_path,
++    const char* initial_url,
++    const char* user_data_dir,
++    OwlFreshEventCallback callback,
++    void* user_data);
++OWL_FRESH_EXPORT void owl_fresh_session_destroy(OwlFreshSession* session);
++OWL_FRESH_EXPORT int32_t owl_fresh_session_host_pid(OwlFreshSession* session);
++OWL_FRESH_EXPORT void owl_fresh_navigate(OwlFreshSession* session,
++                                         const char* url);
++OWL_FRESH_EXPORT void owl_fresh_resize(OwlFreshSession* session,
++                                       uint32_t width,
++                                       uint32_t height,
++                                       float scale);
++OWL_FRESH_EXPORT void owl_fresh_set_focus(OwlFreshSession* session,
++                                          bool focused);
++OWL_FRESH_EXPORT void owl_fresh_send_mouse(OwlFreshSession* session,
++                                           uint32_t kind,
++                                           float x,
++                                           float y,
++                                           uint32_t button,
++                                           uint32_t click_count,
++                                           float delta_x,
++                                           float delta_y,
++                                           uint32_t modifiers);
++OWL_FRESH_EXPORT void owl_fresh_send_key(OwlFreshSession* session,
++                                         bool key_down,
++                                         uint32_t key_code,
++                                         const char* text,
++                                         uint32_t modifiers);
++OWL_FRESH_EXPORT int owl_fresh_capture_surface_png(OwlFreshSession* session,
++                                                   uint8_t** png_bytes,
++                                                   uintptr_t* png_length,
++                                                   uint32_t* width,
++                                                   uint32_t* height,
++                                                   char** capture_mode,
++                                                   char** error);
++OWL_FRESH_EXPORT void owl_fresh_poll_events(uint32_t timeout_ms);
++OWL_FRESH_EXPORT void owl_fresh_free_buffer(void* buffer);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/ui/accelerated_widget_mac/owl_fresh_context.cc b/ui/accelerated_widget_mac/owl_fresh_context.cc
+new file mode 100644
+index 0000000000..ebfa0546b0
+--- /dev/null
++++ b/ui/accelerated_widget_mac/owl_fresh_context.cc
+@@ -0,0 +1,21 @@
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
++
++#include <atomic>
++
++namespace ui {
++namespace {
++
++std::atomic<uint32_t> g_latest_context_id{0};
++
++}  // namespace
++
++void OwlFreshSetLatestContextID(uint32_t id) {
++  g_latest_context_id.store(id, std::memory_order_relaxed);
++}
++
++uint32_t OwlFreshLatestContextID() {
++  return g_latest_context_id.load(std::memory_order_relaxed);
++}
++
++}  // namespace ui
++
+diff --git a/ui/accelerated_widget_mac/owl_fresh_context.h b/ui/accelerated_widget_mac/owl_fresh_context.h
+new file mode 100644
+index 0000000000..0cc270a820
+--- /dev/null
++++ b/ui/accelerated_widget_mac/owl_fresh_context.h
+@@ -0,0 +1,16 @@
++#ifndef UI_ACCELERATED_WIDGET_MAC_OWL_FRESH_CONTEXT_H_
++#define UI_ACCELERATED_WIDGET_MAC_OWL_FRESH_CONTEXT_H_
++
++#include <stdint.h>
++
++#include "ui/accelerated_widget_mac/accelerated_widget_mac_export.h"
++
++namespace ui {
++
++ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshSetLatestContextID(uint32_t id);
++ACCELERATED_WIDGET_MAC_EXPORT uint32_t OwlFreshLatestContextID();
++
++}  // namespace ui
++
++#endif
++

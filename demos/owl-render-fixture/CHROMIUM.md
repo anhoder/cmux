@@ -3,6 +3,11 @@
 The verified AWS host is `cmux-aws-mac` at Chromium checkout `~/chromium/src`,
 base commit `0bd9366db7`.
 
+`chromium-patches/aws-m1-ultra-verified-owl-host.patch` captures the exact
+dirty Chromium working tree that produced the verified artifacts. It is a
+checkpoint patch, not an upstream-ready Chromium change. Keep it until the
+Chromium work is split into a smaller proper branch.
+
 The Swift verifier expects a Chromium build with:
 
 - `fresh_owl/owl_fresh_bridge.*`, exposing a C ABI that launches Content Shell
