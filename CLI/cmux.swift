@@ -1595,6 +1595,7 @@ struct CMUXCLI {
     private static let debugLastSocketHintPath = "/tmp/cmux-last-socket-path"
     private static let vmCreateIdempotencyTTLSeconds: TimeInterval = 10 * 60
     private static let vmCreateResponseTimeoutSeconds: TimeInterval = 16 * 60
+    private static let vmAttachResponseTimeoutSeconds: TimeInterval = 16 * 60
 
     private struct VMCreateIdempotencyStore: Codable {
         var records: [String: VMCreateIdempotencyRecord] = [:]
@@ -5768,7 +5769,7 @@ struct CMUXCLI {
         let response = try client.sendV2(
             method: "vm.attach_info",
             params: ["id": id, "require_daemon": true],
-            responseTimeout: 60
+            responseTimeout: Self.vmAttachResponseTimeoutSeconds
         )
         let transport = (response["transport"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5885,7 +5886,7 @@ struct CMUXCLI {
         }
 
         let attachInfoStartedAt = Date()
-        let response = try client.sendV2(method: "vm.attach_info", params: ["id": vmID], responseTimeout: 60)
+        let response = try client.sendV2(method: "vm.attach_info", params: ["id": vmID], responseTimeout: Self.vmAttachResponseTimeoutSeconds)
         logVMTiming("attach_info", vmID: vmID, transport: "ssh", startedAt: attachInfoStartedAt)
         let options = try vmSSHOptions(
             fromAttachInfo: response,
@@ -6119,7 +6120,7 @@ struct CMUXCLI {
         }
 
         let attachInfoStartedAt = Date()
-        let response = try client.sendV2(method: "vm.attach_info", params: ["id": vmID], responseTimeout: 60)
+        let response = try client.sendV2(method: "vm.attach_info", params: ["id": vmID], responseTimeout: Self.vmAttachResponseTimeoutSeconds)
         logVMTiming("attach_info", vmID: vmID, transport: "websocket", startedAt: attachInfoStartedAt)
         let endpoint = try parseVMPtyWebSocketEndpoint(response)
         let config = VMPtyWebSocketConfig(

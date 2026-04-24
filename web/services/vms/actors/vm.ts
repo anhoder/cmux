@@ -33,6 +33,8 @@ export type VMCreateInput = {
   image: string;
 };
 
+const VM_ACTION_TIMEOUT_MS = 16 * 60 * 1000;
+
 // One actor per VM. Actor key is the provider's own id. The provider VM is already created by
 // the caller (userVmsActor.create) before we spawn this actor — we just own lifecycle,
 // per-VM actions (exec, snapshot, openSSH, remove, …), and cleanup of the credential material
@@ -46,7 +48,11 @@ export type VMCreateInput = {
 // liveness (see the follow-up task for heartbeat wiring). Explicit `pause`/`resume` actions
 // still work; we just don't fire them on our own schedule.
 export const vmActor = actor({
-  options: { name: "VM", icon: "cloud" },
+  options: {
+    name: "VM",
+    icon: "cloud",
+    actionTimeout: VM_ACTION_TIMEOUT_MS,
+  },
 
   createState: (_c, input: VMCreateInput): VMState => ({
     provider: input.provider,

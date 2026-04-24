@@ -84,6 +84,7 @@ enum VMAttachEndpoint {
 actor VMClient {
     static let shared = VMClient()
     private static let createTimeoutSeconds: TimeInterval = 16 * 60
+    private static let attachTimeoutSeconds: TimeInterval = 16 * 60
 
     private let session: URLSession
 
@@ -161,7 +162,8 @@ actor VMClient {
         let (data, http) = try await request(
             "POST",
             path: "/api/vm/\(encodedID)/attach-endpoint",
-            jsonBody: ["requireDaemon": requireDaemon]
+            jsonBody: ["requireDaemon": requireDaemon],
+            timeoutSeconds: Self.attachTimeoutSeconds
         )
         try ensureOK(http, data: data)
         let obj = try decodeJSONObject(data)
