@@ -1,7 +1,9 @@
 import AppKit
+import AVKit
 import Bonsplit
 import Combine
 import Foundation
+import PDFKit
 import Quartz
 import SwiftUI
 import UniformTypeIdentifiers
@@ -115,6 +117,9 @@ final class FilePreviewDragPasteboardWriter: NSObject, NSPasteboardWriting {
 
 enum FilePreviewMode: Equatable {
     case text
+    case pdf
+    case image
+    case media
     case quickLook
 }
 
@@ -142,6 +147,32 @@ enum FilePreviewKindResolver {
     static func mode(for url: URL) -> FilePreviewMode {
         if isTextFile(url: url) {
             return .text
+        }
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+            if type.conforms(to: .pdf) {
+                return .pdf
+            }
+            if type.conforms(to: .image) {
+                return .image
+            }
+            if type.conforms(to: .movie)
+                || type.conforms(to: .audiovisualContent)
+                || type.conforms(to: .audio) {
+                return .media
+            }
+        }
+        if let fallbackType = UTType(filenameExtension: url.pathExtension.lowercased()) {
+            if fallbackType.conforms(to: .pdf) {
+                return .pdf
+            }
+            if fallbackType.conforms(to: .image) {
+                return .image
+            }
+            if fallbackType.conforms(to: .movie)
+                || fallbackType.conforms(to: .audiovisualContent)
+                || fallbackType.conforms(to: .audio) {
+                return .media
+            }
         }
         return .quickLook
     }
@@ -401,6 +432,12 @@ struct FilePreviewPanelView: View {
             switch panel.previewMode {
             case .text:
                 FilePreviewTextEditor(panel: panel)
+            case .pdf:
+                FilePreviewPDFView(url: panel.fileURL)
+            case .image:
+                FilePreviewImageView(url: panel.fileURL)
+            case .media:
+                FilePreviewMediaView(url: panel.fileURL)
             case .quickLook:
                 QuickLookPreviewView(url: panel.fileURL, title: panel.displayTitle)
             }
@@ -536,6 +573,481 @@ private final class SavingTextView: NSTextView {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+private struct FilePreviewPDFView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> FilePreviewPDFContainerView {
+        let view = FilePreviewPDFContainerView()
+        view.setURL(url)
+        return view
+    }
+
+    func updateNSView(_ nsView: FilePreviewPDFContainerView, context: Context) {
+        nsView.setURL(url)
+    }
+}
+
+private final class FilePreviewPDFContainerView: NSView {
+    private let pdfView = PDFView()
+    private let pageLabel = NSTextField(labelWithString: "")
+    private var currentURL: URL?
+    private var previousButton: NSButton!
+    private var nextButton: NSButton!
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func setURL(_ url: URL) {
+        guard currentURL != url else { return }
+        currentURL = url
+        pdfView.document = PDFDocument(url: url)
+        pdfView.autoScales = true
+        updatePageControls()
+    }
+
+    private func setupView() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        previousButton = makeToolbarButton(
+            systemSymbolName: "chevron.left",
+            fallbackTitle: "<",
+            label: String(localized: "filePreview.pdf.previousPage", defaultValue: "Previous Page"),
+            action: #selector(previousPage)
+        )
+        nextButton = makeToolbarButton(
+            systemSymbolName: "chevron.right",
+            fallbackTitle: ">",
+            label: String(localized: "filePreview.pdf.nextPage", defaultValue: "Next Page"),
+            action: #selector(nextPage)
+        )
+        let zoomOutButton = makeToolbarButton(
+            systemSymbolName: "minus.magnifyingglass",
+            fallbackTitle: "-",
+            label: String(localized: "filePreview.pdf.zoomOut", defaultValue: "Zoom Out"),
+            action: #selector(zoomOut)
+        )
+        let zoomInButton = makeToolbarButton(
+            systemSymbolName: "plus.magnifyingglass",
+            fallbackTitle: "+",
+            label: String(localized: "filePreview.pdf.zoomIn", defaultValue: "Zoom In"),
+            action: #selector(zoomIn)
+        )
+        let fitButton = makeToolbarButton(
+            systemSymbolName: "arrow.up.left.and.arrow.down.right",
+            fallbackTitle: "Fit",
+            label: String(localized: "filePreview.pdf.zoomToFit", defaultValue: "Zoom to Fit"),
+            action: #selector(zoomToFit)
+        )
+        let actualSizeButton = makeToolbarButton(
+            systemSymbolName: "1.magnifyingglass",
+            fallbackTitle: "1x",
+            label: String(localized: "filePreview.pdf.actualSize", defaultValue: "Actual Size"),
+            action: #selector(actualSize)
+        )
+
+        pageLabel.font = .systemFont(ofSize: 11)
+        pageLabel.textColor = .secondaryLabelColor
+        pageLabel.alignment = .center
+        pageLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let toolbar = NSStackView(views: [
+            previousButton,
+            nextButton,
+            pageLabel,
+            zoomOutButton,
+            zoomInButton,
+            fitButton,
+            actualSizeButton,
+        ])
+        toolbar.orientation = .horizontal
+        toolbar.alignment = .centerY
+        toolbar.spacing = 6
+        toolbar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+
+        pdfView.displayMode = .singlePageContinuous
+        pdfView.displayDirection = .vertical
+        pdfView.displaysPageBreaks = true
+        pdfView.backgroundColor = .textBackgroundColor
+        pdfView.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(toolbar)
+        addSubview(pdfView)
+        NSLayoutConstraint.activate([
+            toolbar.topAnchor.constraint(equalTo: topAnchor),
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            toolbar.heightAnchor.constraint(equalToConstant: 34),
+            pdfView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pdfView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(pdfPageChanged),
+            name: Notification.Name.PDFViewPageChanged,
+            object: pdfView
+        )
+    }
+
+    private func makeToolbarButton(
+        systemSymbolName: String,
+        fallbackTitle: String,
+        label: String,
+        action: Selector
+    ) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        if let image = NSImage(systemSymbolName: systemSymbolName, accessibilityDescription: label) {
+            button.image = image
+            button.imagePosition = .imageOnly
+        } else {
+            button.title = fallbackTitle
+        }
+        button.bezelStyle = .texturedRounded
+        button.controlSize = .small
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 28),
+            button.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        return button
+    }
+
+    @objc private func previousPage() {
+        pdfView.goToPreviousPage(nil)
+        updatePageControls()
+    }
+
+    @objc private func nextPage() {
+        pdfView.goToNextPage(nil)
+        updatePageControls()
+    }
+
+    @objc private func zoomOut() {
+        pdfView.autoScales = false
+        pdfView.zoomOut(nil)
+    }
+
+    @objc private func zoomIn() {
+        pdfView.autoScales = false
+        pdfView.zoomIn(nil)
+    }
+
+    @objc private func zoomToFit() {
+        pdfView.autoScales = true
+    }
+
+    @objc private func actualSize() {
+        pdfView.autoScales = false
+        pdfView.scaleFactor = 1.0
+    }
+
+    @objc private func pdfPageChanged() {
+        updatePageControls()
+    }
+
+    private func updatePageControls() {
+        guard let document = pdfView.document, document.pageCount > 0 else {
+            pageLabel.stringValue = ""
+            previousButton.isEnabled = false
+            nextButton.isEnabled = false
+            return
+        }
+
+        let pageIndex: Int
+        if let currentPage = pdfView.currentPage {
+            pageIndex = max(0, document.index(for: currentPage))
+        } else {
+            pageIndex = 0
+        }
+        let format = String(localized: "filePreview.pdf.pageCount", defaultValue: "Page %d of %d")
+        pageLabel.stringValue = String(format: format, pageIndex + 1, document.pageCount)
+        previousButton.isEnabled = pageIndex > 0
+        nextButton.isEnabled = pageIndex < document.pageCount - 1
+    }
+}
+
+private struct FilePreviewImageView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> FilePreviewImageContainerView {
+        let view = FilePreviewImageContainerView()
+        view.setURL(url)
+        return view
+    }
+
+    func updateNSView(_ nsView: FilePreviewImageContainerView, context: Context) {
+        nsView.setURL(url)
+    }
+}
+
+private final class FilePreviewImageContainerView: NSView {
+    private let scrollView = NSScrollView()
+    private let documentView = FilePreviewImageDocumentView()
+    private let zoomLabel = NSTextField(labelWithString: "")
+    private var currentURL: URL?
+    private var imageSize = CGSize(width: 1, height: 1)
+    private var scale: CGFloat = 1
+    private var isFitMode = true
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        if isFitMode {
+            scale = fitScale()
+        }
+        applyScale()
+    }
+
+    func setURL(_ url: URL) {
+        guard currentURL != url else { return }
+        currentURL = url
+        let image = NSImage(contentsOf: url)
+        documentView.imageView.image = image
+        imageSize = normalizedSize(image?.size ?? .zero)
+        isFitMode = true
+        scale = fitScale()
+        applyScale()
+    }
+
+    private func setupView() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let zoomOutButton = makeToolbarButton(
+            systemSymbolName: "minus.magnifyingglass",
+            fallbackTitle: "-",
+            label: String(localized: "filePreview.image.zoomOut", defaultValue: "Zoom Out"),
+            action: #selector(zoomOut)
+        )
+        let zoomInButton = makeToolbarButton(
+            systemSymbolName: "plus.magnifyingglass",
+            fallbackTitle: "+",
+            label: String(localized: "filePreview.image.zoomIn", defaultValue: "Zoom In"),
+            action: #selector(zoomIn)
+        )
+        let fitButton = makeToolbarButton(
+            systemSymbolName: "arrow.up.left.and.arrow.down.right",
+            fallbackTitle: "Fit",
+            label: String(localized: "filePreview.image.zoomToFit", defaultValue: "Zoom to Fit"),
+            action: #selector(zoomToFit)
+        )
+        let actualSizeButton = makeToolbarButton(
+            systemSymbolName: "1.magnifyingglass",
+            fallbackTitle: "1x",
+            label: String(localized: "filePreview.image.actualSize", defaultValue: "Actual Size"),
+            action: #selector(actualSize)
+        )
+
+        zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        zoomLabel.textColor = .secondaryLabelColor
+        zoomLabel.alignment = .right
+        zoomLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
+
+        let toolbar = NSStackView(views: [
+            zoomOutButton,
+            zoomInButton,
+            fitButton,
+            actualSizeButton,
+            zoomLabel,
+        ])
+        toolbar.orientation = .horizontal
+        toolbar.alignment = .centerY
+        toolbar.spacing = 6
+        toolbar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = .textBackgroundColor
+        scrollView.documentView = documentView
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(toolbar)
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            toolbar.topAnchor.constraint(equalTo: topAnchor),
+            toolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            toolbar.heightAnchor.constraint(equalToConstant: 34),
+            scrollView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    private func makeToolbarButton(
+        systemSymbolName: String,
+        fallbackTitle: String,
+        label: String,
+        action: Selector
+    ) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        if let image = NSImage(systemSymbolName: systemSymbolName, accessibilityDescription: label) {
+            button.image = image
+            button.imagePosition = .imageOnly
+        } else {
+            button.title = fallbackTitle
+        }
+        button.bezelStyle = .texturedRounded
+        button.controlSize = .small
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 28),
+            button.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        return button
+    }
+
+    @objc private func zoomOut() {
+        isFitMode = false
+        scale = max(0.05, scale / 1.25)
+        applyScale()
+    }
+
+    @objc private func zoomIn() {
+        isFitMode = false
+        scale = min(16.0, scale * 1.25)
+        applyScale()
+    }
+
+    @objc private func zoomToFit() {
+        isFitMode = true
+        scale = fitScale()
+        applyScale()
+    }
+
+    @objc private func actualSize() {
+        isFitMode = false
+        scale = 1.0
+        applyScale()
+    }
+
+    private func fitScale() -> CGFloat {
+        let clipSize = scrollView.contentView.bounds.size
+        guard clipSize.width > 1, clipSize.height > 1 else { return scale }
+        let widthScale = clipSize.width / max(imageSize.width, 1)
+        let heightScale = clipSize.height / max(imageSize.height, 1)
+        return min(max(min(widthScale, heightScale), 0.05), 16.0)
+    }
+
+    private func applyScale() {
+        let scaledSize = CGSize(
+            width: max(1, imageSize.width * scale),
+            height: max(1, imageSize.height * scale)
+        )
+        let clipSize = scrollView.contentView.bounds.size
+        documentView.frame = CGRect(
+            origin: .zero,
+            size: CGSize(
+                width: max(clipSize.width, scaledSize.width),
+                height: max(clipSize.height, scaledSize.height)
+            )
+        )
+        documentView.scaledImageSize = scaledSize
+        documentView.needsLayout = true
+        zoomLabel.stringValue = "\(Int((scale * 100).rounded()))%"
+    }
+
+    private func normalizedSize(_ size: CGSize) -> CGSize {
+        CGSize(width: max(1, size.width), height: max(1, size.height))
+    }
+}
+
+private final class FilePreviewImageDocumentView: NSView {
+    let imageView = NSImageView()
+    var scaledImageSize = CGSize(width: 1, height: 1)
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        imageView.imageAlignment = .alignCenter
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        imageView.frame = CGRect(
+            x: max(0, (bounds.width - scaledImageSize.width) * 0.5),
+            y: max(0, (bounds.height - scaledImageSize.height) * 0.5),
+            width: scaledImageSize.width,
+            height: scaledImageSize.height
+        )
+    }
+}
+
+private struct FilePreviewMediaView: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let playerView = AVPlayerView()
+        playerView.controlsStyle = .floating
+        playerView.showsFullScreenToggleButton = true
+        playerView.videoGravity = .resizeAspect
+        context.coordinator.update(playerView: playerView, url: url)
+        return playerView
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        context.coordinator.update(playerView: nsView, url: url)
+    }
+
+    final class Coordinator {
+        private var currentURL: URL?
+        private var player: AVPlayer?
+
+        deinit {
+            player?.pause()
+        }
+
+        func update(playerView: AVPlayerView, url: URL) {
+            guard currentURL != url else { return }
+            player?.pause()
+            currentURL = url
+            let player = AVPlayer(url: url)
+            self.player = player
+            playerView.player = player
+        }
     }
 }
 

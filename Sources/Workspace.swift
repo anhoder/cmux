@@ -7135,6 +7135,9 @@ final class Workspace: Identifiable, ObservableObject {
         bonsplitController.onExternalTabDrop = { [weak self] request in
             self?.handleExternalTabDrop(request) ?? false
         }
+        bonsplitController.onExternalFileDrop = { [weak self] request in
+            self?.handleExternalFileDrop(request) ?? false
+        }
         bonsplitController.onTabCloseRequest = { [weak self] tabId, _ in
             self?.markExplicitClose(surfaceId: tabId)
         }
@@ -11633,6 +11636,63 @@ final class Workspace: Identifiable, ObservableObject {
                 insertFirst: insertFirst,
                 filePath: entry.filePath
             ) != nil
+        }
+    }
+
+    private func handleExternalFileDrop(_ request: BonsplitController.ExternalFileDropRequest) -> Bool {
+        let entries = request.urls
+            .filter(\.isFileURL)
+            .map {
+                FilePreviewDragEntry(
+                    filePath: $0.path,
+                    displayTitle: $0.lastPathComponent
+                )
+            }
+        guard !entries.isEmpty else { return false }
+
+        switch request.destination {
+        case .insert(let paneId, let index):
+            var nextIndex = index
+            var openedAny = false
+            for entry in entries {
+                guard newFilePreviewSurface(
+                    inPane: paneId,
+                    filePath: entry.filePath,
+                    focus: true,
+                    targetIndex: nextIndex
+                ) != nil else {
+                    continue
+                }
+                openedAny = true
+                if let index = nextIndex {
+                    nextIndex = index + 1
+                }
+            }
+            return openedAny
+
+        case .split(let sourcePaneId, let orientation, let insertFirst):
+            guard let first = entries.first,
+                  let firstPanel = splitPaneWithFilePreview(
+                    targetPane: sourcePaneId,
+                    orientation: orientation,
+                    insertFirst: insertFirst,
+                    filePath: first.filePath
+                  ) else {
+                return false
+            }
+
+            let targetPane = paneId(forPanelId: firstPanel.id) ?? sourcePaneId
+            var openedAny = true
+            for entry in entries.dropFirst() {
+                if newFilePreviewSurface(
+                    inPane: targetPane,
+                    filePath: entry.filePath,
+                    focus: true
+                ) != nil {
+                    openedAny = true
+                }
+            }
+            return openedAny
         }
     }
 

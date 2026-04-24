@@ -1209,7 +1209,7 @@ final class FileDropOverlayViewTests: XCTestCase {
         )
     }
 
-    func testOverlayForwardsFullDragLifecycleToPortalHostedBrowserWebView() {
+    func testOverlayDoesNotCaptureFileDragLifecycleWhenPanePreviewDropsAreEnabled() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 280),
             styleMask: [.titled, .closable],
@@ -1257,15 +1257,15 @@ final class FileDropOverlayViewTests: XCTestCase {
             pasteboard: pasteboard
         )
 
-        XCTAssertEqual(overlay.draggingEntered(dragInfo), .copy)
-        XCTAssertTrue(overlay.prepareForDragOperation(dragInfo))
-        XCTAssertTrue(overlay.performDragOperation(dragInfo))
+        XCTAssertEqual(overlay.draggingEntered(dragInfo), [])
+        XCTAssertFalse(overlay.prepareForDragOperation(dragInfo))
+        XCTAssertFalse(overlay.performDragOperation(dragInfo))
         overlay.concludeDragOperation(dragInfo)
 
         XCTAssertEqual(
             webView.dragCalls,
-            ["entered", "prepare", "perform", "conclude"],
-            "Finder file drops need the full AppKit drag lifecycle forwarded into the portal-hosted WKWebView"
+            [],
+            "Finder file drops should reach pane-level Bonsplit preview targets instead of the root overlay"
         )
     }
 }
