@@ -8,6 +8,22 @@ import Quartz
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum FilePreviewInteraction {
+    static let zoomStep: CGFloat = 1.25
+
+    static func hasCommandModifier(_ event: NSEvent) -> Bool {
+        event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+    }
+
+    static func zoomFactor(forScroll event: NSEvent) -> CGFloat {
+        let rawDelta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+        let normalizedDelta = event.hasPreciseScrollingDeltas ? rawDelta : rawDelta * 8
+        let factor = pow(1.0025, normalizedDelta)
+        guard factor.isFinite else { return 1 }
+        return min(max(factor, 0.2), 5.0)
+    }
+}
+
 struct FilePreviewDragEntry {
     let filePath: String
     let displayTitle: String
@@ -564,7 +580,12 @@ private struct FilePreviewTextEditor: NSViewRepresentable {
 }
 
 private final class SavingTextView: NSTextView {
+    private static let defaultPreviewFontSize: CGFloat = 13
+    private static let minimumPreviewFontSize: CGFloat = 8
+    private static let maximumPreviewFontSize: CGFloat = 36
+
     weak var panel: FilePreviewPanel?
+    private var previewFontSize: CGFloat = 13
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
@@ -573,6 +594,41 @@ private final class SavingTextView: NSTextView {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        let factor = 1.0 + event.magnification
+        guard factor.isFinite, factor > 0 else { return }
+        adjustPreviewFontSize(by: factor)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard FilePreviewInteraction.hasCommandModifier(event) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        adjustPreviewFontSize(by: FilePreviewInteraction.zoomFactor(forScroll: event))
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if previewFontSize == Self.defaultPreviewFontSize {
+            setPreviewFontSize(18)
+        } else {
+            setPreviewFontSize(Self.defaultPreviewFontSize)
+        }
+    }
+
+    private func adjustPreviewFontSize(by factor: CGFloat) {
+        setPreviewFontSize(previewFontSize * factor)
+    }
+
+    private func setPreviewFontSize(_ nextFontSize: CGFloat) {
+        let clamped = min(max(nextFontSize, Self.minimumPreviewFontSize), Self.maximumPreviewFontSize)
+        guard clamped.isFinite else { return }
+        previewFontSize = clamped
+        let nextFont = NSFont.monospacedSystemFont(ofSize: clamped, weight: .regular)
+        font = nextFont
+        typingAttributes[.font] = nextFont
     }
 }
 
@@ -596,6 +652,7 @@ private final class FilePreviewPDFContainerView: NSView {
     private var currentURL: URL?
     private var previousButton: NSButton!
     private var nextButton: NSButton!
+    private var rotationAccumulator: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -657,6 +714,18 @@ private final class FilePreviewPDFContainerView: NSView {
             label: String(localized: "filePreview.pdf.actualSize", defaultValue: "Actual Size"),
             action: #selector(actualSize)
         )
+        let rotateLeftButton = makeToolbarButton(
+            systemSymbolName: "rotate.left",
+            fallbackTitle: "L",
+            label: String(localized: "filePreview.pdf.rotateLeft", defaultValue: "Rotate Left"),
+            action: #selector(rotateLeft)
+        )
+        let rotateRightButton = makeToolbarButton(
+            systemSymbolName: "rotate.right",
+            fallbackTitle: "R",
+            label: String(localized: "filePreview.pdf.rotateRight", defaultValue: "Rotate Right"),
+            action: #selector(rotateRight)
+        )
 
         pageLabel.font = .systemFont(ofSize: 11)
         pageLabel.textColor = .secondaryLabelColor
@@ -671,6 +740,8 @@ private final class FilePreviewPDFContainerView: NSView {
             zoomInButton,
             fitButton,
             actualSizeButton,
+            rotateLeftButton,
+            rotateRightButton,
         ])
         toolbar.orientation = .horizontal
         toolbar.alignment = .centerY
@@ -685,7 +756,20 @@ private final class FilePreviewPDFContainerView: NSView {
         pdfView.minScaleFactor = 0.1
         pdfView.maxScaleFactor = 8.0
         pdfView.onMagnify = { [weak self] event in
-            self?.magnifyPDF(with: event)
+            let factor = 1.0 + event.magnification
+            self?.zoomPDF(with: event, factor: factor)
+        }
+        pdfView.onScrollZoom = { [weak self] event in
+            self?.zoomPDF(with: event, factor: FilePreviewInteraction.zoomFactor(forScroll: event))
+        }
+        pdfView.onSmartMagnify = { [weak self] in
+            self?.togglePDFSmartZoom()
+        }
+        pdfView.onRotate = { [weak self] event in
+            self?.rotatePDF(with: event)
+        }
+        pdfView.onSwipe = { [weak self] event in
+            self?.swipePDF(with: event)
         }
         pdfView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -747,12 +831,12 @@ private final class FilePreviewPDFContainerView: NSView {
 
     @objc private func zoomOut() {
         pdfView.autoScales = false
-        setPDFScaleFactor(pdfView.scaleFactor / 1.25)
+        setPDFScaleFactor(pdfView.scaleFactor / FilePreviewInteraction.zoomStep)
     }
 
     @objc private func zoomIn() {
         pdfView.autoScales = false
-        setPDFScaleFactor(pdfView.scaleFactor * 1.25)
+        setPDFScaleFactor(pdfView.scaleFactor * FilePreviewInteraction.zoomStep)
     }
 
     @objc private func zoomToFit() {
@@ -762,6 +846,14 @@ private final class FilePreviewPDFContainerView: NSView {
     @objc private func actualSize() {
         pdfView.autoScales = false
         setPDFScaleFactor(1.0)
+    }
+
+    @objc private func rotateLeft() {
+        rotateCurrentPDFPage(by: -90)
+    }
+
+    @objc private func rotateRight() {
+        rotateCurrentPDFPage(by: 90)
     }
 
     @objc private func pdfPageChanged() {
@@ -788,12 +880,45 @@ private final class FilePreviewPDFContainerView: NSView {
         nextButton.isEnabled = pageIndex < document.pageCount - 1
     }
 
-    private func magnifyPDF(with event: NSEvent) {
+    private func zoomPDF(with event: NSEvent, factor: CGFloat) {
         guard pdfView.document != nil else { return }
-        let factor = 1.0 + event.magnification
         guard factor.isFinite, factor > 0 else { return }
         pdfView.autoScales = false
         setPDFScaleFactor(pdfView.scaleFactor * factor)
+    }
+
+    private func togglePDFSmartZoom() {
+        if pdfView.autoScales {
+            actualSize()
+        } else {
+            zoomToFit()
+        }
+    }
+
+    private func rotatePDF(with event: NSEvent) {
+        rotationAccumulator += CGFloat(event.rotation)
+        if rotationAccumulator >= 45 {
+            rotateCurrentPDFPage(by: -90)
+            rotationAccumulator = 0
+        } else if rotationAccumulator <= -45 {
+            rotateCurrentPDFPage(by: 90)
+            rotationAccumulator = 0
+        }
+    }
+
+    private func swipePDF(with event: NSEvent) {
+        if event.deltaX < 0 {
+            nextPage()
+        } else if event.deltaX > 0 {
+            previousPage()
+        }
+    }
+
+    private func rotateCurrentPDFPage(by degrees: Int) {
+        guard let page = pdfView.currentPage else { return }
+        page.rotation = normalizedRotation(page.rotation + degrees)
+        pdfView.layoutDocumentView()
+        pdfView.setNeedsDisplay(pdfView.bounds)
     }
 
     private func setPDFScaleFactor(_ nextScale: CGFloat) {
@@ -801,16 +926,58 @@ private final class FilePreviewPDFContainerView: NSView {
         guard clamped.isFinite else { return }
         pdfView.scaleFactor = clamped
     }
+
+    private func normalizedRotation(_ degrees: Int) -> Int {
+        ((degrees % 360) + 360) % 360
+    }
 }
 
 private final class FilePreviewMagnifyingPDFView: PDFView {
     var onMagnify: ((NSEvent) -> Void)?
+    var onScrollZoom: ((NSEvent) -> Void)?
+    var onSmartMagnify: (() -> Void)?
+    var onRotate: ((NSEvent) -> Void)?
+    var onSwipe: ((NSEvent) -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
 
     override func magnify(with event: NSEvent) {
         if let onMagnify {
             onMagnify(event)
         } else {
             super.magnify(with: event)
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        if FilePreviewInteraction.hasCommandModifier(event), let onScrollZoom {
+            onScrollZoom(event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if let onSmartMagnify {
+            onSmartMagnify()
+        } else {
+            super.smartMagnify(with: event)
+        }
+    }
+
+    override func rotate(with event: NSEvent) {
+        if let onRotate {
+            onRotate(event)
+        } else {
+            super.rotate(with: event)
+        }
+    }
+
+    override func swipe(with event: NSEvent) {
+        if let onSwipe {
+            onSwipe(event)
+        } else {
+            super.swipe(with: event)
         }
     }
 }
@@ -837,6 +1004,8 @@ private final class FilePreviewImageContainerView: NSView {
     private var imageSize = CGSize(width: 1, height: 1)
     private var scale: CGFloat = 1
     private var isFitMode = true
+    private var rotationDegrees = 0
+    private var rotationAccumulator: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -862,6 +1031,8 @@ private final class FilePreviewImageContainerView: NSView {
         documentView.imageView.image = image
         imageSize = normalizedSize(image?.size ?? .zero)
         isFitMode = true
+        rotationDegrees = 0
+        rotationAccumulator = 0
         scale = fitScale()
         applyScale()
     }
@@ -893,6 +1064,18 @@ private final class FilePreviewImageContainerView: NSView {
             label: String(localized: "filePreview.image.actualSize", defaultValue: "Actual Size"),
             action: #selector(actualSize)
         )
+        let rotateLeftButton = makeToolbarButton(
+            systemSymbolName: "rotate.left",
+            fallbackTitle: "L",
+            label: String(localized: "filePreview.image.rotateLeft", defaultValue: "Rotate Left"),
+            action: #selector(rotateLeft)
+        )
+        let rotateRightButton = makeToolbarButton(
+            systemSymbolName: "rotate.right",
+            fallbackTitle: "R",
+            label: String(localized: "filePreview.image.rotateRight", defaultValue: "Rotate Right"),
+            action: #selector(rotateRight)
+        )
 
         zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         zoomLabel.textColor = .secondaryLabelColor
@@ -904,6 +1087,8 @@ private final class FilePreviewImageContainerView: NSView {
             zoomInButton,
             fitButton,
             actualSizeButton,
+            rotateLeftButton,
+            rotateRightButton,
             zoomLabel,
         ])
         toolbar.orientation = .horizontal
@@ -920,10 +1105,27 @@ private final class FilePreviewImageContainerView: NSView {
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.documentView = documentView
         scrollView.onMagnify = { [weak self] event in
-            self?.magnifyImage(with: event)
+            let factor = 1.0 + event.magnification
+            self?.zoomImage(with: event, factor: factor)
+        }
+        scrollView.onScrollZoom = { [weak self] event in
+            self?.zoomImage(with: event, factor: FilePreviewInteraction.zoomFactor(forScroll: event))
+        }
+        scrollView.onSmartMagnify = { [weak self] event in
+            self?.toggleImageSmartZoom(with: event)
+        }
+        scrollView.onRotate = { [weak self] event in
+            self?.rotateImage(with: event)
         }
         documentView.onMagnify = { [weak self] event in
-            self?.magnifyImage(with: event)
+            let factor = 1.0 + event.magnification
+            self?.zoomImage(with: event, factor: factor)
+        }
+        documentView.onSmartMagnify = { [weak self] event in
+            self?.toggleImageSmartZoom(with: event)
+        }
+        documentView.onRotate = { [weak self] event in
+            self?.rotateImage(with: event)
         }
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -968,13 +1170,13 @@ private final class FilePreviewImageContainerView: NSView {
 
     @objc private func zoomOut() {
         isFitMode = false
-        scale = clampedImageScale(scale / 1.25)
+        scale = clampedImageScale(scale / FilePreviewInteraction.zoomStep)
         applyScale()
     }
 
     @objc private func zoomIn() {
         isFitMode = false
-        scale = clampedImageScale(scale * 1.25)
+        scale = clampedImageScale(scale * FilePreviewInteraction.zoomStep)
         applyScale()
     }
 
@@ -990,15 +1192,25 @@ private final class FilePreviewImageContainerView: NSView {
         applyScale()
     }
 
+    @objc private func rotateLeft() {
+        rotateImage(by: -90)
+    }
+
+    @objc private func rotateRight() {
+        rotateImage(by: 90)
+    }
+
     private func fitScale() -> CGFloat {
         let clipSize = scrollView.contentView.bounds.size
         guard clipSize.width > 1, clipSize.height > 1 else { return scale }
+        let imageSize = displayedImageSize()
         let widthScale = clipSize.width / max(imageSize.width, 1)
         let heightScale = clipSize.height / max(imageSize.height, 1)
         return clampedImageScale(min(widthScale, heightScale))
     }
 
     private func applyScale() {
+        let imageSize = displayedImageSize()
         let scaledSize = CGSize(
             width: max(1, imageSize.width * scale),
             height: max(1, imageSize.height * scale)
@@ -1012,13 +1224,13 @@ private final class FilePreviewImageContainerView: NSView {
             )
         )
         documentView.scaledImageSize = scaledSize
+        documentView.rotationDegrees = rotationDegrees
         documentView.needsLayout = true
         zoomLabel.stringValue = "\(Int((scale * 100).rounded()))%"
     }
 
-    private func magnifyImage(with event: NSEvent) {
+    private func zoomImage(with event: NSEvent, factor: CGFloat) {
         guard documentView.imageView.image != nil else { return }
-        let factor = 1.0 + event.magnification
         guard factor.isFinite, factor > 0 else { return }
 
         let anchorInClip = scrollView.contentView.convert(event.locationInWindow, from: nil)
@@ -1048,6 +1260,40 @@ private final class FilePreviewImageContainerView: NSView {
         scrollDocumentPoint(anchoredDocumentPoint, toClipPoint: anchorInClip)
     }
 
+    private func toggleImageSmartZoom(with event: NSEvent) {
+        guard documentView.imageView.image != nil else { return }
+        if isFitMode {
+            isFitMode = false
+            scale = 1.0
+            applyScale()
+            documentView.layoutSubtreeIfNeeded()
+            let anchorInClip = scrollView.contentView.convert(event.locationInWindow, from: nil)
+            let anchorInDocument = documentView.convert(event.locationInWindow, from: nil)
+            scrollDocumentPoint(anchorInDocument, toClipPoint: anchorInClip)
+        } else {
+            zoomToFit()
+        }
+    }
+
+    private func rotateImage(with event: NSEvent) {
+        rotationAccumulator += CGFloat(event.rotation)
+        if rotationAccumulator >= 45 {
+            rotateImage(by: -90)
+            rotationAccumulator = 0
+        } else if rotationAccumulator <= -45 {
+            rotateImage(by: 90)
+            rotationAccumulator = 0
+        }
+    }
+
+    private func rotateImage(by degrees: Int) {
+        rotationDegrees = normalizedRotation(rotationDegrees + degrees)
+        if isFitMode {
+            scale = fitScale()
+        }
+        applyScale()
+    }
+
     private func scrollDocumentPoint(_ documentPoint: CGPoint, toClipPoint clipPoint: CGPoint) {
         let clipSize = scrollView.contentView.bounds.size
         let documentSize = documentView.bounds.size
@@ -1072,6 +1318,17 @@ private final class FilePreviewImageContainerView: NSView {
         min(max(nextScale, 0.05), 16.0)
     }
 
+    private func displayedImageSize() -> CGSize {
+        if abs(rotationDegrees) % 180 == 90 {
+            return CGSize(width: imageSize.height, height: imageSize.width)
+        }
+        return imageSize
+    }
+
+    private func normalizedRotation(_ degrees: Int) -> Int {
+        ((degrees % 360) + 360) % 360
+    }
+
     private func normalizedSize(_ size: CGSize) -> CGSize {
         CGSize(width: max(1, size.width), height: max(1, size.height))
     }
@@ -1079,6 +1336,14 @@ private final class FilePreviewImageContainerView: NSView {
 
 private final class FilePreviewImageScrollView: NSScrollView {
     var onMagnify: ((NSEvent) -> Void)?
+    var onScrollZoom: ((NSEvent) -> Void)?
+    var onSmartMagnify: ((NSEvent) -> Void)?
+    var onRotate: ((NSEvent) -> Void)?
+    private var panStartClipPoint: CGPoint?
+    private var panStartDocumentOrigin: CGPoint?
+    private var hasPushedPanCursor = false
+
+    override var acceptsFirstResponder: Bool { true }
 
     override func magnify(with event: NSEvent) {
         if let onMagnify {
@@ -1087,14 +1352,120 @@ private final class FilePreviewImageScrollView: NSScrollView {
             super.magnify(with: event)
         }
     }
+
+    override func scrollWheel(with event: NSEvent) {
+        if FilePreviewInteraction.hasCommandModifier(event), let onScrollZoom {
+            onScrollZoom(event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if let onSmartMagnify {
+            onSmartMagnify(event)
+        } else {
+            super.smartMagnify(with: event)
+        }
+    }
+
+    override func rotate(with event: NSEvent) {
+        if let onRotate {
+            onRotate(event)
+        } else {
+            super.rotate(with: event)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        if event.clickCount == 2, let onSmartMagnify {
+            onSmartMagnify(event)
+            return
+        }
+        panStartClipPoint = contentView.convert(event.locationInWindow, from: nil)
+        panStartDocumentOrigin = contentView.bounds.origin
+        NSCursor.closedHand.push()
+        hasPushedPanCursor = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let panStartClipPoint, let panStartDocumentOrigin else {
+            super.mouseDragged(with: event)
+            return
+        }
+        let currentClipPoint = contentView.convert(event.locationInWindow, from: nil)
+        let delta = CGPoint(
+            x: currentClipPoint.x - panStartClipPoint.x,
+            y: currentClipPoint.y - panStartClipPoint.y
+        )
+        scroll(toDocumentOrigin: CGPoint(
+            x: panStartDocumentOrigin.x - delta.x,
+            y: panStartDocumentOrigin.y - delta.y
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        endPan()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        endPan()
+        super.mouseExited(with: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    private func scroll(toDocumentOrigin origin: CGPoint) {
+        guard let documentView else { return }
+        let clipSize = contentView.bounds.size
+        let documentSize = documentView.bounds.size
+        let maxOrigin = CGPoint(
+            x: max(0, documentSize.width - clipSize.width),
+            y: max(0, documentSize.height - clipSize.height)
+        )
+        let nextOrigin = CGPoint(
+            x: min(max(0, origin.x), maxOrigin.x),
+            y: min(max(0, origin.y), maxOrigin.y)
+        )
+        contentView.scroll(to: nextOrigin)
+        reflectScrolledClipView(contentView)
+    }
+
+    private func endPan() {
+        panStartClipPoint = nil
+        panStartDocumentOrigin = nil
+        if hasPushedPanCursor {
+            NSCursor.pop()
+            hasPushedPanCursor = false
+        }
+    }
 }
 
 private final class FilePreviewImageDocumentView: NSView {
     let imageView = FilePreviewMagnifyingImageView()
     var scaledImageSize = CGSize(width: 1, height: 1)
+    var rotationDegrees = 0 {
+        didSet {
+            imageView.rotationDegrees = rotationDegrees
+        }
+    }
     var onMagnify: ((NSEvent) -> Void)? {
         didSet {
             imageView.onMagnify = onMagnify
+        }
+    }
+    var onSmartMagnify: ((NSEvent) -> Void)? {
+        didSet {
+            imageView.onSmartMagnify = onSmartMagnify
+        }
+    }
+    var onRotate: ((NSEvent) -> Void)? {
+        didSet {
+            imageView.onRotate = onRotate
         }
     }
 
@@ -1128,10 +1499,33 @@ private final class FilePreviewImageDocumentView: NSView {
             super.magnify(with: event)
         }
     }
+
+    override func smartMagnify(with event: NSEvent) {
+        if let onSmartMagnify {
+            onSmartMagnify(event)
+        } else {
+            super.smartMagnify(with: event)
+        }
+    }
+
+    override func rotate(with event: NSEvent) {
+        if let onRotate {
+            onRotate(event)
+        } else {
+            super.rotate(with: event)
+        }
+    }
 }
 
 private final class FilePreviewMagnifyingImageView: NSImageView {
     var onMagnify: ((NSEvent) -> Void)?
+    var onSmartMagnify: ((NSEvent) -> Void)?
+    var onRotate: ((NSEvent) -> Void)?
+    var rotationDegrees = 0 {
+        didSet {
+            needsDisplay = true
+        }
+    }
 
     override func magnify(with event: NSEvent) {
         if let onMagnify {
@@ -1139,6 +1533,62 @@ private final class FilePreviewMagnifyingImageView: NSImageView {
         } else {
             super.magnify(with: event)
         }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if let onSmartMagnify {
+            onSmartMagnify(event)
+        } else {
+            super.smartMagnify(with: event)
+        }
+    }
+
+    override func rotate(with event: NSEvent) {
+        if let onRotate {
+            onRotate(event)
+        } else {
+            super.rotate(with: event)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image, rotationDegrees != 0 else {
+            super.draw(dirtyRect)
+            return
+        }
+
+        NSGraphicsContext.saveGraphicsState()
+        let transform = NSAffineTransform()
+        transform.translateX(by: bounds.midX, yBy: bounds.midY)
+        transform.rotate(byDegrees: CGFloat(rotationDegrees))
+        transform.concat()
+
+        let drawSize = rotatedDrawSize(for: image.size)
+        let drawRect = CGRect(
+            x: -drawSize.width * 0.5,
+            y: -drawSize.height * 0.5,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+        image.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func rotatedDrawSize(for imageSize: CGSize) -> CGSize {
+        let availableSize: CGSize
+        if abs(rotationDegrees) % 180 == 90 {
+            availableSize = CGSize(width: bounds.height, height: bounds.width)
+        } else {
+            availableSize = bounds.size
+        }
+        let scale = min(
+            availableSize.width / max(imageSize.width, 1),
+            availableSize.height / max(imageSize.height, 1)
+        )
+        return CGSize(
+            width: max(1, imageSize.width * scale),
+            height: max(1, imageSize.height * scale)
+        )
     }
 }
 
