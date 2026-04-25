@@ -33,29 +33,11 @@ private struct MouseClick {
     let y: Float
 }
 
-private struct MouseWheel {
-    let x: Float
-    let y: Float
-    let deltaX: Float
-    let deltaY: Float
-}
-
-private struct ResizeAction {
-    let width: UInt32
-    let height: UInt32
-}
-
-private struct KeyStroke {
-    let keyCode: UInt32
-    let text: String
-    let modifiers: UInt32
-}
-
 private enum InputAction {
     case mouseClick(MouseClick)
-    case mouseWheel(MouseWheel)
-    case key(KeyStroke)
-    case resize(ResizeAction)
+    case mouseWheel(OwlFreshMouseEvent)
+    case key(OwlFreshKeyEvent)
+    case resize(OwlFreshHostResizeRequest)
     case text(String)
 }
 
@@ -122,6 +104,8 @@ private struct Summary: Codable {
     let displayPath: String
     let contextSource: String
     let controlTransport: String
+    let mojoBindingSourceChecksum: String
+    let mojoBindingDeclarationCount: Int
     let devToolsActivePortFound: Bool
     let remoteDebuggingArgumentFound: Bool
     let captures: [CaptureResult]
@@ -271,7 +255,6 @@ private let owlFreshEventCallback: OwlFreshEventCallback = { eventPointer, userD
     events.record(eventPointer.assumingMemoryBound(to: OwlFreshEvent.self).pointee)
 }
 
-@main
 struct OwlLayerHostVerifier {
     static func main() {
         do {
@@ -363,6 +346,8 @@ struct OwlLayerHostVerifier {
         )
     }
 }
+
+OwlLayerHostVerifier.main()
 
 private final class LayerHostRunner {
     private let options: Options
@@ -460,7 +445,7 @@ private final class LayerHostRunner {
                     preInputExpected: [.red, .dark],
                     inputActions: [
                         .mouseClick(MouseClick(x: 170, y: 180)),
-                        .key(KeyStroke(keyCode: 88, text: "x", modifiers: 0)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: 88, text: "x", modifiers: 0)),
                     ],
                     postInputDiagnosticScript: "({className: document.body.className, status: document.getElementById('status')?.textContent || ''})",
                     postInputExpectations: [
@@ -510,10 +495,10 @@ private final class LayerHostRunner {
                     inputActions: [
                         .mouseClick(MouseClick(x: 180, y: 152)),
                         .text("plain"),
-                        .key(KeyStroke(keyCode: 77, text: "", modifiers: KeyModifiers.command)),
-                        .key(KeyStroke(keyCode: 79, text: "", modifiers: KeyModifiers.option)),
-                        .key(KeyStroke(keyCode: 67, text: "", modifiers: KeyModifiers.control)),
-                        .key(KeyStroke(keyCode: 83, text: "S", modifiers: KeyModifiers.shift)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: 77, text: "", modifiers: KeyModifiers.command)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: 79, text: "", modifiers: KeyModifiers.option)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: 67, text: "", modifiers: KeyModifiers.control)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: 83, text: "S", modifiers: KeyModifiers.shift)),
                     ],
                     postInputDiagnosticScript: """
                     ({
@@ -544,7 +529,7 @@ private final class LayerHostRunner {
                     preInputScreenshotName: "resize-small-before.png",
                     preInputExpected: [.blue, .dark, .light],
                     inputActions: [
-                        .resize(ResizeAction(width: 720, height: 480)),
+                        .resize(OwlFreshHostResizeRequest(width: 720, height: 480, scale: 1.0)),
                     ],
                     postInputDiagnosticScript: """
                     ({
@@ -567,8 +552,8 @@ private final class LayerHostRunner {
                     preInputScreenshotName: "resize-roundtrip-before.png",
                     preInputExpected: [.blue, .dark, .light],
                     inputActions: [
-                        .resize(ResizeAction(width: 720, height: 480)),
-                        .resize(ResizeAction(width: 960, height: 640)),
+                        .resize(OwlFreshHostResizeRequest(width: 720, height: 480, scale: 1.0)),
+                        .resize(OwlFreshHostResizeRequest(width: 960, height: 640, scale: 1.0)),
                     ],
                     postInputDiagnosticScript: """
                     ({
@@ -591,7 +576,16 @@ private final class LayerHostRunner {
                     preInputScreenshotName: "scroll-fixture-before.png",
                     preInputExpected: [.blue, .dark, .light],
                     inputActions: [
-                        .mouseWheel(MouseWheel(x: 520, y: 520, deltaX: 0, deltaY: -900)),
+                        .mouseWheel(OwlFreshMouseEvent(
+                            kind: .wheel,
+                            x: 520,
+                            y: 520,
+                            button: 0,
+                            clickCount: 0,
+                            deltaX: 0,
+                            deltaY: -900,
+                            modifiers: 0
+                        )),
                     ],
                     postInputDiagnosticScript: """
                     ({
@@ -618,17 +612,17 @@ private final class LayerHostRunner {
                     inputActions: [
                         .mouseClick(MouseClick(x: 170, y: 152)),
                         .text("abcdef"),
-                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: 0)),
-                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: 0)),
-                        .key(KeyStroke(keyCode: KeyCodes.backspace, text: "", modifiers: 0)),
-                        .key(KeyStroke(keyCode: KeyCodes.delete, text: "", modifiers: 0)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.leftArrow, text: "", modifiers: 0)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.leftArrow, text: "", modifiers: 0)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.backspace, text: "", modifiers: 0)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.delete, text: "", modifiers: 0)),
                         .text("Z"),
                         .text("final"),
                         .mouseClick(MouseClick(x: 170, y: 356)),
                         .text("selection"),
-                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
-                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
-                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .key(OwlFreshKeyEvent(keyDown: true, keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
                         .text("XYZ"),
                     ],
                     postInputDiagnosticScript: """
@@ -678,6 +672,8 @@ private final class LayerHostRunner {
                 ? "chromium-compositor-ca-context"
                 : "chromium-layer-fixture-ca-context",
             controlTransport: "mojo",
+            mojoBindingSourceChecksum: OwlFreshMojoSchema.sourceChecksum,
+            mojoBindingDeclarationCount: OwlFreshMojoSchema.declarations.count,
             devToolsActivePortFound: captures.contains(where: \.profileHadDevToolsActivePort),
             remoteDebuggingArgumentFound: captures.contains { containsRemoteDebuggingArgument($0.hostCommand) },
             captures: captures
@@ -734,7 +730,14 @@ private final class LayerHostRunner {
             bridge.destroy(session)
         }
 
-        bridge.resize(session, width: UInt32(contentSize.width), height: UInt32(contentSize.height), scale: 1.0)
+        bridge.resize(
+            session,
+            request: OwlFreshHostResizeRequest(
+                width: UInt32(contentSize.width),
+                height: UInt32(contentSize.height),
+                scale: 1.0
+            )
+        )
         bridge.setFocus(session, focused: true)
 
         let hostPID = bridge.hostPID(session)
@@ -976,36 +979,54 @@ private final class LayerHostRunner {
                 if ProcessInfo.processInfo.environment["OWL_LAYER_HOST_KEY_ONLY"] == "1" {
                     continue
                 }
-                bridge.sendMouse(session, kind: 2, x: click.x, y: click.y, button: 0, clickCount: 0)
-                bridge.pollEvents(milliseconds: 10)
-                bridge.sendMouse(session, kind: 0, x: click.x, y: click.y, button: 0, clickCount: 1)
-                bridge.pollEvents(milliseconds: 10)
-                bridge.sendMouse(session, kind: 1, x: click.x, y: click.y, button: 0, clickCount: 1)
-                bridge.pollEvents(milliseconds: 10)
-            case .mouseWheel(let wheel):
-                bridge.sendMouse(
-                    session,
-                    kind: 3,
-                    x: wheel.x,
-                    y: wheel.y,
+                bridge.sendMouse(session, event: OwlFreshMouseEvent(
+                    kind: .move,
+                    x: click.x,
+                    y: click.y,
                     button: 0,
                     clickCount: 0,
-                    deltaX: wheel.deltaX,
-                    deltaY: wheel.deltaY
-                )
+                    deltaX: 0,
+                    deltaY: 0,
+                    modifiers: 0
+                ))
+                bridge.pollEvents(milliseconds: 10)
+                bridge.sendMouse(session, event: OwlFreshMouseEvent(
+                    kind: .down,
+                    x: click.x,
+                    y: click.y,
+                    button: 0,
+                    clickCount: 1,
+                    deltaX: 0,
+                    deltaY: 0,
+                    modifiers: 0
+                ))
+                bridge.pollEvents(milliseconds: 10)
+                bridge.sendMouse(session, event: OwlFreshMouseEvent(
+                    kind: .up,
+                    x: click.x,
+                    y: click.y,
+                    button: 0,
+                    clickCount: 1,
+                    deltaX: 0,
+                    deltaY: 0,
+                    modifiers: 0
+                ))
+                bridge.pollEvents(milliseconds: 10)
+            case .mouseWheel(let wheel):
+                bridge.sendMouse(session, event: wheel)
                 bridge.pollEvents(milliseconds: 20)
             case .key(let stroke):
                 sendKeyStroke(stroke, bridge: bridge, session: session)
             case .resize(let resize):
                 currentSize = CGSize(width: CGFloat(resize.width), height: CGFloat(resize.height))
-                bridge.resize(session, width: resize.width, height: resize.height, scale: 1.0)
+                bridge.resize(session, request: resize)
                 window.resize(to: currentSize)
                 pumpApp(app, for: 0.2)
                 bridge.pollEvents(milliseconds: 50)
                 window.flushHostedLayer()
             case .text(let text):
                 for character in text {
-                    guard let stroke = KeyStroke.typing(character) else {
+                    guard let stroke = OwlFreshKeyEvent.typing(character) else {
                         throw VerifierError.input("unsupported typed character for \(character)")
                     }
                     sendKeyStroke(stroke, bridge: bridge, session: session)
@@ -1015,25 +1036,18 @@ private final class LayerHostRunner {
     }
 
     private func sendKeyStroke(
-        _ stroke: KeyStroke,
+        _ stroke: OwlFreshKeyEvent,
         bridge: OwlFreshBridge,
         session: OpaquePointer
     ) {
-        bridge.sendKey(
-            session,
-            keyDown: true,
-            keyCode: stroke.keyCode,
-            text: stroke.text,
-            modifiers: stroke.modifiers
-        )
+        bridge.sendKey(session, event: stroke)
         bridge.pollEvents(milliseconds: 10)
-        bridge.sendKey(
-            session,
+        bridge.sendKey(session, event: OwlFreshKeyEvent(
             keyDown: false,
             keyCode: stroke.keyCode,
             text: "",
             modifiers: stroke.modifiers
-        )
+        ))
         bridge.pollEvents(milliseconds: 10)
     }
 
@@ -1109,21 +1123,21 @@ private final class LayerHostRunner {
     }
 }
 
-private extension KeyStroke {
-    static func typing(_ character: Character) -> KeyStroke? {
+private extension OwlFreshKeyEvent {
+    static func typing(_ character: Character) -> OwlFreshKeyEvent? {
         let scalars = String(character).unicodeScalars
         guard scalars.count == 1, let scalar = scalars.first else {
             return nil
         }
         switch scalar.value {
         case 32:
-            return KeyStroke(keyCode: 32, text: " ", modifiers: 0)
+            return OwlFreshKeyEvent(keyDown: true, keyCode: 32, text: " ", modifiers: 0)
         case 48...57, 65...90:
-            return KeyStroke(keyCode: scalar.value, text: String(character), modifiers: 0)
+            return OwlFreshKeyEvent(keyDown: true, keyCode: scalar.value, text: String(character), modifiers: 0)
         case 97...122:
-            return KeyStroke(keyCode: scalar.value - 32, text: String(character), modifiers: 0)
+            return OwlFreshKeyEvent(keyDown: true, keyCode: scalar.value - 32, text: String(character), modifiers: 0)
         default:
-            return KeyStroke(keyCode: scalar.value, text: String(character), modifiers: 0)
+            return OwlFreshKeyEvent(keyDown: true, keyCode: scalar.value, text: String(character), modifiers: 0)
         }
     }
 }
@@ -1401,37 +1415,31 @@ private final class OwlFreshBridge {
         }
     }
 
-    func resize(_ session: OpaquePointer?, width: UInt32, height: UInt32, scale: Float) {
-        sessionResize(session, width, height, scale)
+    func resize(_ session: OpaquePointer?, request: OwlFreshHostResizeRequest) {
+        sessionResize(session, request.width, request.height, request.scale)
     }
 
     func setFocus(_ session: OpaquePointer?, focused: Bool) {
         sessionSetFocus(session, focused)
     }
 
-    func sendMouse(
-        _ session: OpaquePointer?,
-        kind: UInt32,
-        x: Float,
-        y: Float,
-        button: UInt32,
-        clickCount: UInt32,
-        deltaX: Float = 0,
-        deltaY: Float = 0,
-        modifiers: UInt32 = 0
-    ) {
-        sessionSendMouse(session, kind, x, y, button, clickCount, deltaX, deltaY, modifiers)
+    func sendMouse(_ session: OpaquePointer?, event: OwlFreshMouseEvent) {
+        sessionSendMouse(
+            session,
+            event.kind.rawValue,
+            event.x,
+            event.y,
+            event.button,
+            event.clickCount,
+            event.deltaX,
+            event.deltaY,
+            event.modifiers
+        )
     }
 
-    func sendKey(
-        _ session: OpaquePointer?,
-        keyDown: Bool,
-        keyCode: UInt32,
-        text: String,
-        modifiers: UInt32 = 0
-    ) {
-        text.withCString { textPointer in
-            sessionSendKey(session, keyDown, keyCode, textPointer, modifiers)
+    func sendKey(_ session: OpaquePointer?, event: OwlFreshKeyEvent) {
+        event.text.withCString { textPointer in
+            sessionSendKey(session, event.keyDown, event.keyCode, textPointer, event.modifiers)
         }
     }
 

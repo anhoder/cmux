@@ -25,6 +25,12 @@ blank Swift `CALayerHost` windows. The passing path publishes a browser-process
 portal context id, hosts Chromium's compositor `CAContext` inside that portal,
 then Swift hosts the portal id in `CALayerHost`.
 
+`Mojo/OwlFresh.mojom` is the Swift-side source of truth for the current
+`OwlFreshHost` and `OwlFreshClient` surface. `OwlMojoBindingsGenerator` emits
+`Sources/OwlLayerHostVerifier/OwlFresh.generated.swift`, and the verifier uses
+those generated Swift request/event types before passing through the temporary C
+ABI transport adapter.
+
 The verified gate now includes input. `run-layer-host-verifier-gui.sh` can run
 the real Chromium compositor input fixtures with `OWL_LAYER_HOST_INPUT_CHECK=1`;
 the passing output shows `OWL_INPUT_READY` turning into `OWL_INPUT_CLICKED`,

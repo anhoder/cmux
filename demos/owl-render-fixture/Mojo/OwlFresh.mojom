@@ -1,0 +1,55 @@
+module content.mojom;
+
+enum OwlFreshMouseKind {
+  kDown = 0,
+  kUp = 1,
+  kMove = 2,
+  kWheel = 3,
+};
+
+struct OwlFreshMouseEvent {
+  OwlFreshMouseKind kind;
+  float x;
+  float y;
+  uint32 button;
+  uint32 click_count;
+  float delta_x;
+  float delta_y;
+  uint32 modifiers;
+};
+
+struct OwlFreshKeyEvent {
+  bool key_down;
+  uint32 key_code;
+  string text;
+  uint32 modifiers;
+};
+
+struct OwlFreshCompositorInfo {
+  uint32 context_id;
+};
+
+struct OwlFreshCaptureResult {
+  array<uint8> png;
+  uint32 width;
+  uint32 height;
+  string capture_mode;
+  string error;
+};
+
+interface OwlFreshClient {
+  OnReady(int32 host_pid, OwlFreshCompositorInfo compositor);
+  OnCompositorChanged(OwlFreshCompositorInfo compositor);
+  OnNavigationChanged(string url, string title, bool loading);
+  OnHostLog(string message);
+};
+
+interface OwlFreshHost {
+  SetClient(pending_remote<OwlFreshClient> client);
+  Navigate(string url);
+  Resize(uint32 width, uint32 height, float scale);
+  SetFocus(bool focused);
+  SendMouse(OwlFreshMouseEvent event);
+  SendKey(OwlFreshKeyEvent event);
+  CaptureSurface() => (OwlFreshCaptureResult result);
+};

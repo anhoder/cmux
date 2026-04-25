@@ -12,11 +12,24 @@ let package = Package(
             targets: ["OwlLayerHostVerifier"]
         ),
         .executable(
+            name: "OwlMojoBindingsGenerator",
+            targets: ["OwlMojoBindingsGenerator"]
+        ),
+        .executable(
             name: "OwlLayerHostSelfTest",
             targets: ["OwlLayerHostSelfTest"]
         )
     ],
     targets: [
+        .target(
+            name: "OwlMojoBindingsGeneratorCore",
+            path: "Sources/OwlMojoBindingsGeneratorCore"
+        ),
+        .executableTarget(
+            name: "OwlMojoBindingsGenerator",
+            dependencies: ["OwlMojoBindingsGeneratorCore"],
+            path: "Sources/OwlMojoBindingsGenerator"
+        ),
         .executableTarget(
             name: "OwlLayerHostVerifier",
             path: "Sources/OwlLayerHostVerifier"
@@ -24,6 +37,11 @@ let package = Package(
         .executableTarget(
             name: "OwlLayerHostSelfTest",
             path: "Sources/OwlLayerHostSelfTest"
+        ),
+        .testTarget(
+            name: "OwlMojoBindingsGeneratorTests",
+            dependencies: ["OwlMojoBindingsGeneratorCore"],
+            path: "Tests/OwlMojoBindingsGeneratorTests"
         )
     ]
 )

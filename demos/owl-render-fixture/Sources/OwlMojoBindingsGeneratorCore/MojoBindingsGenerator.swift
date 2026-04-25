@@ -1,0 +1,718 @@
+import Foundation
+
+public struct MojoFile: Equatable {
+    public let module: String
+    public let declarations: [MojoDeclaration]
+
+    public init(module: String, declarations: [MojoDeclaration]) {
+        self.module = module
+        self.declarations = declarations
+    }
+}
+
+public enum MojoDeclaration: Equatable {
+    case enumeration(MojoEnum)
+    case structure(MojoStruct)
+    case interface(MojoInterface)
+
+    public var name: String {
+        switch self {
+        case .enumeration(let declaration):
+            return declaration.name
+        case .structure(let declaration):
+            return declaration.name
+        case .interface(let declaration):
+            return declaration.name
+        }
+    }
+
+    public var kind: String {
+        switch self {
+        case .enumeration:
+            return "enum"
+        case .structure:
+            return "struct"
+        case .interface:
+            return "interface"
+        }
+    }
+}
+
+public struct MojoEnum: Equatable {
+    public let name: String
+    public let cases: [MojoEnumCase]
+}
+
+public struct MojoEnumCase: Equatable {
+    public let name: String
+    public let rawValue: Int
+}
+
+public struct MojoStruct: Equatable {
+    public let name: String
+    public let fields: [MojoField]
+}
+
+public struct MojoField: Equatable {
+    public let name: String
+    public let type: MojoType
+}
+
+public struct MojoInterface: Equatable {
+    public let name: String
+    public let methods: [MojoMethod]
+}
+
+public struct MojoMethod: Equatable {
+    public let name: String
+    public let parameters: [MojoField]
+    public let responseParameters: [MojoField]
+}
+
+public indirect enum MojoType: Equatable {
+    case primitive(String)
+    case named(String)
+    case array(MojoType)
+    case pendingRemote(String)
+
+    public var mojoName: String {
+        switch self {
+        case .primitive(let name), .named(let name):
+            return name
+        case .array(let element):
+            return "array<\(element.mojoName)>"
+        case .pendingRemote(let name):
+            return "pending_remote<\(name)>"
+        }
+    }
+
+    public var swiftName: String {
+        switch self {
+        case .primitive("bool"):
+            return "Bool"
+        case .primitive("float"):
+            return "Float"
+        case .primitive("int32"):
+            return "Int32"
+        case .primitive("uint8"):
+            return "UInt8"
+        case .primitive("uint32"):
+            return "UInt32"
+        case .primitive("string"):
+            return "String"
+        case .primitive(let name), .named(let name):
+            return name
+        case .array(let element):
+            return "[\(element.swiftName)]"
+        case .pendingRemote(let name):
+            return "\(name)Remote"
+        }
+    }
+}
+
+public enum MojoParserError: Error, CustomStringConvertible {
+    case expected(String, got: String?)
+    case invalidTopLevel(String)
+    case invalidType(String)
+    case trailingTokens([String])
+
+    public var description: String {
+        switch self {
+        case .expected(let expected, let got):
+            return "expected \(expected), got \(got ?? "end of file")"
+        case .invalidTopLevel(let token):
+            return "invalid top-level token: \(token)"
+        case .invalidType(let token):
+            return "invalid type token: \(token)"
+        case .trailingTokens(let tokens):
+            return "unexpected trailing tokens: \(tokens.joined(separator: " "))"
+        }
+    }
+}
+
+public enum MojoParser {
+    public static func parse(source: String) throws -> MojoFile {
+        let tokens = tokenize(source)
+        var parser = Parser(tokens: tokens)
+        return try parser.parseFile()
+    }
+
+    static func tokenize(_ source: String) -> [String] {
+        let stripped = source
+            .components(separatedBy: .newlines)
+            .map { line in
+                guard let range = line.range(of: "//") else {
+                    return line
+                }
+                return String(line[..<range.lowerBound])
+            }
+            .joined(separator: "\n")
+
+        var tokens: [String] = []
+        var current = ""
+        var index = stripped.startIndex
+        let symbols = Set("{}();,=<>")
+
+        func flushCurrent() {
+            guard !current.isEmpty else {
+                return
+            }
+            tokens.append(current)
+            current.removeAll()
+        }
+
+        while index < stripped.endIndex {
+            let character = stripped[index]
+            if character.isWhitespace {
+                flushCurrent()
+                index = stripped.index(after: index)
+                continue
+            }
+            if symbols.contains(character) {
+                flushCurrent()
+                if character == "=" {
+                    let next = stripped.index(after: index)
+                    if next < stripped.endIndex, stripped[next] == ">" {
+                        tokens.append("=>")
+                        index = stripped.index(after: next)
+                        continue
+                    }
+                }
+                tokens.append(String(character))
+                index = stripped.index(after: index)
+                continue
+            }
+            current.append(character)
+            index = stripped.index(after: index)
+        }
+
+        flushCurrent()
+        return tokens
+    }
+}
+
+private struct Parser {
+    var tokens: [String]
+    var index = 0
+
+    mutating func parseFile() throws -> MojoFile {
+        var module = ""
+        var declarations: [MojoDeclaration] = []
+
+        while let token = peek() {
+            switch token {
+            case "module":
+                advance()
+                module = try consumeIdentifier()
+                try consume(";")
+            case "import":
+                try skipImport()
+            case "enum":
+                declarations.append(.enumeration(try parseEnum()))
+            case "struct":
+                declarations.append(.structure(try parseStruct()))
+            case "interface":
+                declarations.append(.interface(try parseInterface()))
+            default:
+                throw MojoParserError.invalidTopLevel(token)
+            }
+        }
+
+        return MojoFile(module: module, declarations: declarations)
+    }
+
+    mutating func parseEnum() throws -> MojoEnum {
+        try consume("enum")
+        let name = try consumeIdentifier()
+        try consume("{")
+        var cases: [MojoEnumCase] = []
+
+        while peek() != "}" {
+            let caseName = try consumeIdentifier()
+            try consume("=")
+            guard let rawValue = Int(try consumeIdentifier()) else {
+                throw MojoParserError.expected("integer", got: previous())
+            }
+            try consumeOptional(",")
+            cases.append(MojoEnumCase(name: caseName, rawValue: rawValue))
+        }
+
+        try consume("}")
+        try consume(";")
+        return MojoEnum(name: name, cases: cases)
+    }
+
+    mutating func parseStruct() throws -> MojoStruct {
+        try consume("struct")
+        let name = try consumeIdentifier()
+        try consume("{")
+        var fields: [MojoField] = []
+
+        while peek() != "}" {
+            let type = try parseType()
+            let name = try consumeIdentifier()
+            try consume(";")
+            fields.append(MojoField(name: name, type: type))
+        }
+
+        try consume("}")
+        try consume(";")
+        return MojoStruct(name: name, fields: fields)
+    }
+
+    mutating func parseInterface() throws -> MojoInterface {
+        try consume("interface")
+        let name = try consumeIdentifier()
+        try consume("{")
+        var methods: [MojoMethod] = []
+
+        while peek() != "}" {
+            let methodName = try consumeIdentifier()
+            let parameters = try parseParameterList()
+            var responseParameters: [MojoField] = []
+            if peek() == "=>" {
+                advance()
+                responseParameters = try parseParameterList()
+            }
+            try consume(";")
+            methods.append(MojoMethod(
+                name: methodName,
+                parameters: parameters,
+                responseParameters: responseParameters
+            ))
+        }
+
+        try consume("}")
+        try consume(";")
+        return MojoInterface(name: name, methods: methods)
+    }
+
+    mutating func parseParameterList() throws -> [MojoField] {
+        try consume("(")
+        var fields: [MojoField] = []
+        while peek() != ")" {
+            let type = try parseType()
+            let name = try consumeIdentifier()
+            fields.append(MojoField(name: name, type: type))
+            try consumeOptional(",")
+        }
+        try consume(")")
+        return fields
+    }
+
+    mutating func parseType() throws -> MojoType {
+        let token = try consumeIdentifier()
+        switch token {
+        case "array":
+            try consume("<")
+            let element = try parseType()
+            try consume(">")
+            return .array(element)
+        case "pending_remote":
+            try consume("<")
+            let name = try consumeIdentifier()
+            try consume(">")
+            return .pendingRemote(name)
+        case "bool", "float", "int32", "uint8", "uint32", "string":
+            return .primitive(token)
+        default:
+            guard token.first?.isLetter == true else {
+                throw MojoParserError.invalidType(token)
+            }
+            return .named(token)
+        }
+    }
+
+    mutating func skipImport() throws {
+        try consume("import")
+        while peek() != ";" {
+            guard peek() != nil else {
+                throw MojoParserError.expected(";", got: nil)
+            }
+            advance()
+        }
+        try consume(";")
+    }
+
+    func peek() -> String? {
+        guard index < tokens.count else {
+            return nil
+        }
+        return tokens[index]
+    }
+
+    func previous() -> String? {
+        guard index > 0 else {
+            return nil
+        }
+        return tokens[index - 1]
+    }
+
+    mutating func advance() {
+        index += 1
+    }
+
+    mutating func consume(_ token: String) throws {
+        guard peek() == token else {
+            throw MojoParserError.expected(token, got: peek())
+        }
+        advance()
+    }
+
+    mutating func consumeOptional(_ token: String) throws {
+        if peek() == token {
+            advance()
+        }
+    }
+
+    mutating func consumeIdentifier() throws -> String {
+        guard let token = peek() else {
+            throw MojoParserError.expected("identifier", got: nil)
+        }
+        let symbols = Set(["{", "}", "(", ")", ";", ",", "=", "<", ">", "=>"])
+        guard !symbols.contains(token) else {
+            throw MojoParserError.expected("identifier", got: token)
+        }
+        advance()
+        return token
+    }
+}
+
+public enum MojoChecksum {
+    public static func fnv1a64Hex(_ source: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in source.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+        return String(format: "fnv1a64:%016llx", hash)
+    }
+}
+
+public struct SwiftGenerationResult {
+    public let swift: String
+    public let checksum: String
+}
+
+public enum MojoSwiftGenerator {
+    public static func generate(file: MojoFile, source: String) -> SwiftGenerationResult {
+        let checksum = MojoChecksum.fnv1a64Hex(source)
+        var output: [String] = [
+            "// Generated from Mojo/OwlFresh.mojom by OwlMojoBindingsGenerator.",
+            "// Do not edit by hand.",
+            "import Foundation",
+            "",
+            "public struct MojoPendingRemote<Interface>: Equatable, Codable {",
+            "    public let handle: UInt64",
+            "",
+            "    public init(handle: UInt64) {",
+            "        self.handle = handle",
+            "    }",
+            "}",
+            "",
+        ]
+
+        for declaration in file.declarations {
+            switch declaration {
+            case .enumeration(let enumeration):
+                output.append(generateEnum(enumeration))
+            case .structure(let structure):
+                output.append(generateStruct(structure.name, fields: structure.fields))
+            case .interface(let interface):
+                output.append(generateInterface(interface))
+            }
+            output.append("")
+        }
+
+        output.append(generateSchema(file: file, checksum: checksum))
+        output.append("")
+        return SwiftGenerationResult(swift: output.joined(separator: "\n"), checksum: checksum)
+    }
+
+    private static func generateEnum(_ enumeration: MojoEnum) -> String {
+        var lines: [String] = [
+            "public enum \(enumeration.name): UInt32, Codable, CaseIterable {",
+        ]
+        for enumCase in enumeration.cases {
+            lines.append("    case \(swiftEnumCaseName(enumCase.name)) = \(enumCase.rawValue)")
+        }
+        lines.append("}")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func generateStruct(_ name: String, fields: [MojoField]) -> String {
+        var lines: [String] = [
+            "public struct \(name): Equatable, Codable {",
+        ]
+        for field in fields {
+            lines.append("    public let \(swiftPropertyName(field.name)): \(field.type.swiftName)")
+        }
+        lines.append("")
+        let arguments = fields
+            .map { field in "\(swiftPropertyName(field.name)): \(field.type.swiftName)" }
+            .joined(separator: ", ")
+        lines.append("    public init(\(arguments)) {")
+        for field in fields {
+            let property = swiftPropertyName(field.name)
+            lines.append("        self.\(property) = \(property)")
+        }
+        lines.append("    }")
+        lines.append("}")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func generateInterface(_ interface: MojoInterface) -> String {
+        var lines: [String] = [
+            "public enum \(interface.name)MojoInterfaceMarker {}",
+            "public typealias \(interface.name)Remote = MojoPendingRemote<\(interface.name)MojoInterfaceMarker>",
+            "",
+            "public protocol \(interface.name)MojoInterface {",
+        ]
+
+        for method in interface.methods {
+            let signature = swiftMethodSignature(interface: interface, method: method)
+            lines.append("    \(signature)")
+        }
+        lines.append("}")
+
+        for method in interface.methods where shouldGenerateRequestStruct(method) {
+            lines.append("")
+            lines.append(generateStruct(requestStructName(interface: interface, method: method), fields: method.parameters))
+        }
+
+        for method in interface.methods where method.responseParameters.count > 1 {
+            lines.append("")
+            lines.append(generateStruct(responseStructName(interface: interface, method: method), fields: method.responseParameters))
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func generateSchema(file: MojoFile, checksum: String) -> String {
+        let declarationRows = file.declarations
+            .map { declaration in
+                "        MojoSchemaDeclaration(kind: \"\(declaration.kind)\", name: \"\(declaration.name)\")"
+            }
+            .joined(separator: ",\n")
+        return """
+        public struct MojoSchemaDeclaration: Equatable, Codable {
+            public let kind: String
+            public let name: String
+        }
+
+        public enum OwlFreshMojoSchema {
+            public static let module = "\(file.module)"
+            public static let sourceChecksum = "\(checksum)"
+            public static let declarations: [MojoSchemaDeclaration] = [
+        \(declarationRows)
+            ]
+        }
+        """
+    }
+
+    private static func swiftMethodSignature(interface: MojoInterface, method: MojoMethod) -> String {
+        let methodName = lowerCamel(method.name)
+        let response = responseType(method)
+        if shouldGenerateRequestStruct(method) {
+            let requestName = requestStructName(interface: interface, method: method)
+            return "func \(methodName)(_ request: \(requestName))\(response)"
+        }
+        if let parameter = method.parameters.first {
+            return "func \(methodName)(_ \(swiftPropertyName(parameter.name)): \(parameter.type.swiftName))\(response)"
+        }
+        return "func \(methodName)()\(response)"
+    }
+
+    private static func responseType(_ method: MojoMethod) -> String {
+        guard !method.responseParameters.isEmpty else {
+            return ""
+        }
+        if method.responseParameters.count == 1, let response = method.responseParameters.first {
+            return " async throws -> \(response.type.swiftName)"
+        }
+        return " async throws -> \(responseStructName(methodName: method.name))"
+    }
+
+    private static func shouldGenerateRequestStruct(_ method: MojoMethod) -> Bool {
+        method.parameters.count > 1
+    }
+
+    private static func requestStructName(interface: MojoInterface, method: MojoMethod) -> String {
+        "\(interface.name)\(method.name)Request"
+    }
+
+    private static func responseStructName(interface: MojoInterface, method: MojoMethod) -> String {
+        "\(interface.name)\(method.name)Response"
+    }
+
+    private static func responseStructName(methodName: String) -> String {
+        "\(methodName)Response"
+    }
+
+    static func swiftEnumCaseName(_ name: String) -> String {
+        let trimmed = name.hasPrefix("k") ? String(name.dropFirst()) : name
+        return lowerCamel(trimmed)
+    }
+
+    static func swiftPropertyName(_ name: String) -> String {
+        lowerCamelFromSnake(name)
+    }
+
+    static func lowerCamel(_ name: String) -> String {
+        guard let first = name.first else {
+            return name
+        }
+        return first.lowercased() + name.dropFirst()
+    }
+
+    static func lowerCamelFromSnake(_ name: String) -> String {
+        let parts = name.split(separator: "_").map(String.init)
+        guard let first = parts.first else {
+            return name
+        }
+        return ([first.lowercased()] + parts.dropFirst().map { part in
+            guard let first = part.first else {
+                return part
+            }
+            return first.uppercased() + part.dropFirst()
+        }).joined()
+    }
+}
+
+public enum BindingsReportStatus: Equatable {
+    case generated
+    case passed
+    case failed(String)
+
+    var title: String {
+        switch self {
+        case .generated:
+            return "GENERATED"
+        case .passed:
+            return "PASS"
+        case .failed:
+            return "FAIL"
+        }
+    }
+
+    var cssClass: String {
+        switch self {
+        case .generated:
+            return "generated"
+        case .passed:
+            return "passed"
+        case .failed:
+            return "failed"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .generated:
+            return "Generated Swift bindings and report from the Mojo source."
+        case .passed:
+            return "Generated Swift bindings are up to date with the Mojo source."
+        case .failed(let message):
+            return message
+        }
+    }
+}
+
+public enum BindingsReportRenderer {
+    public static func render(
+        file: MojoFile,
+        result: SwiftGenerationResult,
+        status: BindingsReportStatus,
+        mojomPath: String,
+        swiftPath: String
+    ) -> String {
+        let declarations = file.declarations.map { declaration in
+            declarationSection(declaration)
+        }.joined(separator: "\n")
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>OWL Mojo Binding Report</title>
+          <style>
+            html, body { margin: 0; background: #f7f7f7; color: #141414; font: 16px -apple-system, BlinkMacSystemFont, sans-serif; }
+            main { width: 1120px; margin: 0 auto; padding: 32px 0 48px; }
+            h1 { margin: 0 0 12px; font-size: 34px; letter-spacing: 0; }
+            h2 { margin: 28px 0 10px; font-size: 22px; letter-spacing: 0; }
+            .status { border: 4px solid #141414; padding: 18px 22px; font-weight: 900; font-size: 30px; }
+            .passed { background: rgb(0, 204, 82); }
+            .generated { background: rgb(255, 210, 0); }
+            .failed { background: rgb(255, 82, 82); }
+            .grid { display: grid; grid-template-columns: 180px 1fr; gap: 8px 18px; margin: 18px 0 26px; }
+            .label { font-weight: 800; }
+            table { width: 100%; border-collapse: collapse; background: white; border: 4px solid #141414; margin-bottom: 18px; }
+            th, td { border: 2px solid #141414; padding: 10px 12px; text-align: left; vertical-align: top; }
+            th { background: #0059ff; color: white; font-weight: 900; }
+            code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+            .kind { width: 120px; font-weight: 900; }
+          </style>
+        </head>
+        <body>
+        <main>
+          <h1>OWL Mojo Binding Report</h1>
+          <div class="status \(status.cssClass)">\(escapeHTML(status.title)): \(escapeHTML(status.detail))</div>
+          <div class="grid">
+            <div class="label">Mojo source</div><div><code>\(escapeHTML(mojomPath))</code></div>
+            <div class="label">Swift output</div><div><code>\(escapeHTML(swiftPath))</code></div>
+            <div class="label">Module</div><div><code>\(escapeHTML(file.module))</code></div>
+            <div class="label">Checksum</div><div><code>\(escapeHTML(result.checksum))</code></div>
+          </div>
+          <h2>Generated Declarations</h2>
+          <table>
+            <thead><tr><th class="kind">Mojo</th><th>Name</th><th>Generated Swift surface</th></tr></thead>
+            <tbody>
+        \(declarations)
+            </tbody>
+          </table>
+        </main>
+        </body>
+        </html>
+        """
+    }
+
+    private static func declarationSection(_ declaration: MojoDeclaration) -> String {
+        switch declaration {
+        case .enumeration(let enumeration):
+            let lines = ["enum \(enumeration.name): UInt32"] + enumeration.cases
+                .map { enumCase in "\(enumCase.name)=\(enumCase.rawValue) -> .\(MojoSwiftGenerator.swiftEnumCaseName(enumCase.name))" }
+            return row(kind: "enum", name: enumeration.name, swiftLines: lines)
+        case .structure(let structure):
+            let lines = ["struct \(structure.name)"] + structure.fields
+                .map { field in "\(field.type.mojoName) \(field.name) -> \(field.type.swiftName) \(MojoSwiftGenerator.swiftPropertyName(field.name))" }
+            return row(kind: "struct", name: structure.name, swiftLines: lines)
+        case .interface(let interface):
+            let lines = ["protocol \(interface.name)MojoInterface"] + interface.methods.map { method in
+                let params = method.parameters
+                    .map { "\($0.type.swiftName) \(MojoSwiftGenerator.swiftPropertyName($0.name))" }
+                    .joined(separator: ", ")
+                let response = method.responseParameters.isEmpty
+                    ? ""
+                    : " -> " + method.responseParameters.map { $0.type.swiftName }.joined(separator: ", ")
+                return "\(MojoSwiftGenerator.lowerCamel(method.name))(\(params))\(response)"
+            }
+            return row(kind: "interface", name: interface.name, swiftLines: lines)
+        }
+    }
+
+    private static func row(kind: String, name: String, swiftLines: [String]) -> String {
+        let swift = swiftLines.map(escapeHTML).joined(separator: "<br>")
+        return """
+              <tr><td class="kind">\(escapeHTML(kind))</td><td><code>\(escapeHTML(name))</code></td><td><code>\(swift)</code></td></tr>
+        """
+    }
+
+    private static func escapeHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+}
