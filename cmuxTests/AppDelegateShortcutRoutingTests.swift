@@ -771,6 +771,50 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         XCTAssertEqual(secondManager.tabs.count, secondCount + 1, "Workspace creation should target key/main window context")
     }
 
+    func testToggleSidebarInActiveMainWindowIgnoresStaleTabManagerPointer() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let firstWindowId = appDelegate.createMainWindow()
+        let secondWindowId = appDelegate.createMainWindow()
+
+        defer {
+            closeWindow(withId: firstWindowId)
+            closeWindow(withId: secondWindowId)
+        }
+
+        guard let firstManager = appDelegate.tabManagerFor(windowId: firstWindowId),
+              let secondWindow = window(withId: secondWindowId),
+              let firstVisibleBefore = appDelegate.sidebarVisibility(windowId: firstWindowId),
+              let secondVisibleBefore = appDelegate.sidebarVisibility(windowId: secondWindowId) else {
+            XCTFail("Expected both window contexts to exist")
+            return
+        }
+
+        secondWindow.makeKeyAndOrderFront(nil)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        // Force a stale app-level pointer to another manager. Window-local UI
+        // controls should still target the key/main window, not this stale pointer.
+        appDelegate.tabManager = firstManager
+        XCTAssertTrue(appDelegate.tabManager === firstManager)
+
+        XCTAssertTrue(appDelegate.toggleSidebarInActiveMainWindow())
+
+        XCTAssertEqual(
+            appDelegate.sidebarVisibility(windowId: firstWindowId),
+            firstVisibleBefore,
+            "Stale active-manager pointer must not receive sidebar toggles"
+        )
+        XCTAssertEqual(
+            appDelegate.sidebarVisibility(windowId: secondWindowId),
+            !secondVisibleBefore,
+            "Sidebar toggle should target the key/main window context"
+        )
+    }
+
     func testCmdNResolvesEventWindowWhenObjectKeyLookupIsMismatched() {
         guard let appDelegate = AppDelegate.shared else {
             XCTFail("Expected AppDelegate.shared")
