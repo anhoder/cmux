@@ -6664,7 +6664,7 @@ struct SettingsView: View {
         } catch {
             return
         }
-        appDelegate.requestApplicationTermination(
+        AppDelegate.shared?.requestApplicationTermination(
             source: "app.relaunch",
             details: ["reason": "settings_reset"]
         )
