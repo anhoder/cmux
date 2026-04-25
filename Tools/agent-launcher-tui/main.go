@@ -103,28 +103,20 @@ var placementOptions = []placementOption{
 }
 
 var (
-	cyan      = lipgloss.Color("#00D4FF")
-	sky       = lipgloss.Color("#18B5FA")
-	blue      = lipgloss.Color("#3096F5")
-	indigo    = lipgloss.Color("#4877F1")
-	violet    = lipgloss.Color("#6058EF")
-	purple    = lipgloss.Color("#7C3AED")
-	text      = lipgloss.Color("#E5E7EB")
-	muted     = lipgloss.Color("#8A8F98")
-	dim       = lipgloss.Color("#4B5563")
-	amber     = lipgloss.Color("#F59E0B")
-	red       = lipgloss.Color("#FB7185")
-	screenBG  = lipgloss.Color("#080A0F")
-	panelBG   = lipgloss.Color("#0D1117")
-	frame     = lipgloss.NewStyle().Foreground(text).Background(screenBG).Border(lipgloss.NormalBorder()).BorderForeground(indigo).Padding(1, 3)
-	title     = lipgloss.NewStyle().Foreground(text).Bold(true).Align(lipgloss.Center)
+	blue      = lipgloss.Color("#7AA7FF")
+	text      = lipgloss.Color("#D7DCE5")
+	muted     = lipgloss.Color("#8B93A3")
+	dim       = lipgloss.Color("#5D6572")
+	red       = lipgloss.Color("#F87171")
+	screenBG  = lipgloss.Color("#090B10")
+	inputBG   = lipgloss.Color("#20242C")
+	configBG  = lipgloss.Color("#11151D")
+	rowBG     = lipgloss.Color("#1A2130")
 	subtle    = lipgloss.NewStyle().Foreground(muted)
 	dimText   = lipgloss.NewStyle().Foreground(dim)
-	hot       = lipgloss.NewStyle().Foreground(cyan).Bold(true)
-	purpleHot = lipgloss.NewStyle().Foreground(purple).Bold(true)
+	hot       = lipgloss.NewStyle().Foreground(blue)
 	errorText = lipgloss.NewStyle().Foreground(red)
-	panel     = lipgloss.NewStyle().Background(panelBG).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#273244")).Padding(0, 2)
-	selected  = lipgloss.NewStyle().Foreground(text).Background(lipgloss.Color("#172033")).Bold(true)
+	selected  = lipgloss.NewStyle().Foreground(text).Background(rowBG)
 )
 
 func main() {
@@ -183,17 +175,17 @@ func (l *stringList) Set(value string) error {
 
 func initialModel(cfg config) model {
 	ta := textarea.New()
-	ta.Placeholder = "Drop a screenshot, paste context, then press ctrl+r"
+	ta.Placeholder = "What should the agents work on?"
 	ta.Prompt = "  "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 20000
 	ta.SetWidth(68)
 	ta.SetHeight(8)
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
-	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(cyan)
-	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(text)
-	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(muted)
-	ta.FocusedStyle.Base = lipgloss.NewStyle().Foreground(text)
+	ta.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(blue).Background(inputBG)
+	ta.FocusedStyle.Text = lipgloss.NewStyle().Foreground(text).Background(inputBG)
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(dim).Background(inputBG)
+	ta.FocusedStyle.Base = lipgloss.NewStyle().Foreground(text).Background(inputBG)
 	ta.BlurredStyle = ta.FocusedStyle
 	ta.Focus()
 
@@ -311,9 +303,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) resize(width, height int) {
 	m.width = width
 	m.height = height
-	boxWidth := clampInt(width-6, 78, 118)
-	textWidth := clampInt(boxWidth-18, 52, 94)
-	textHeight := clampInt(height/4, 5, 9)
+	boxWidth := clampInt(width-8, 68, 104)
+	textWidth := clampInt(boxWidth-12, 50, 88)
+	textHeight := clampInt(height/5, 5, 8)
 	m.textarea.SetWidth(textWidth)
 	m.textarea.SetHeight(textHeight)
 }
@@ -417,22 +409,25 @@ func (m model) View() string {
 		return ""
 	}
 
-	boxWidth := clampInt(m.width-6, 78, 118)
-	innerWidth := boxWidth - 8
-	promptWidth := clampInt(innerWidth-8, 58, 100)
-	header := m.header(innerWidth)
-	inputTitle := m.sectionTitle("Launch prompt", m.focus == focusPrompt, promptWidth+4)
-	inputBox := panel.Width(promptWidth + 4).Render(m.textarea.View())
+	boxWidth := clampInt(m.width-8, 68, 104)
+	promptWidth := clampInt(boxWidth-10, 54, 90)
+	label := subtle.Width(promptWidth + 4).Align(lipgloss.Left).Render("cmux agent launcher")
+	if m.focus == focusPrompt {
+		label = hot.Width(promptWidth + 4).Align(lipgloss.Left).Render("cmux agent launcher")
+	}
+	inputBox := lipgloss.NewStyle().
+		Width(promptWidth+4).
+		Background(inputBG).
+		Padding(1, 2).
+		Render(m.textarea.View())
 	config := m.configPanel(promptWidth + 4)
-	images := m.imageLine(boxWidth - 8)
-	status := m.statusLine(boxWidth - 8)
-	help := subtle.Width(boxWidth - 8).Align(lipgloss.Center).Render("ctrl+r launch   tab config   arrows adjust   space choose   ctrl+c quit")
+	images := m.imageLine(promptWidth + 4)
+	status := m.statusLine(promptWidth + 4)
+	help := dimText.Width(promptWidth + 4).Align(lipgloss.Center).Render("ctrl+r launch   tab config   arrows adjust   space choose   ctrl+c quit")
 
 	body := lipgloss.JoinVertical(
 		lipgloss.Center,
-		header,
-		"",
-		inputTitle,
+		label,
 		inputBox,
 		"",
 		config,
@@ -441,56 +436,11 @@ func (m model) View() string {
 		status,
 		help,
 	)
-	rendered := frame.Width(boxWidth).Render(body)
+	rendered := lipgloss.NewStyle().
+		Foreground(text).
+		Background(screenBG).
+		Render(body)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, rendered)
-}
-
-func (m model) header(width int) string {
-	logo := cmuxLogo()
-	welcome := welcomePanel(maxInt(32, width-lipgloss.Width(logo)-4))
-	if width >= 84 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, logo, strings.Repeat(" ", 4), welcome)
-	}
-	return lipgloss.JoinVertical(lipgloss.Center, logo, welcome)
-}
-
-func cmuxLogo() string {
-	c1 := lipgloss.NewStyle().Foreground(cyan)
-	c2 := lipgloss.NewStyle().Foreground(sky)
-	c3 := lipgloss.NewStyle().Foreground(blue)
-	c4 := lipgloss.NewStyle().Foreground(indigo)
-	c5 := lipgloss.NewStyle().Foreground(violet)
-	c7 := lipgloss.NewStyle().Foreground(purple)
-	return strings.Join([]string{
-		c1.Render("  ::"),
-		c2.Render("    ::::") + "              " + c1.Render("c") + c2.Render("m") + c3.Render("u") + c7.Render("x"),
-		c3.Render("      ::::::"),
-		c4.Render("        ::::::") + "        " + subtle.Render("the open source terminal"),
-		c5.Render("      ::::::") + "          " + subtle.Render("built for coding agents"),
-		c7.Render("    ::::"),
-		c7.Render("  ::"),
-	}, "\n")
-}
-
-func welcomePanel(width int) string {
-	lines := []string{
-		hot.Render("Shortcuts"),
-		shortcutLine("cmd+N", "New workspace"),
-		shortcutLine("cmd+T", "New tab"),
-		shortcutLine("cmd+P", "Go to workspace"),
-		shortcutLine("cmd+D", "Split right"),
-		shortcutLine("cmd+shift+D", "Split down"),
-		shortcutLine("cmd+shift+P", "Command palette"),
-		"",
-		hot.Render("Links"),
-		subtle.Render("Docs     https://cmux.com/docs"),
-		subtle.Render("Feedback cmux feedback"),
-	}
-	return lipgloss.NewStyle().Width(width).Render(strings.Join(lines, "\n"))
-}
-
-func shortcutLine(key, label string) string {
-	return fmt.Sprintf("%-12s %s", purpleHot.Render(key), subtle.Render(label))
 }
 
 func (m model) sectionTitle(label string, active bool, width int) string {
@@ -503,17 +453,21 @@ func (m model) sectionTitle(label string, active bool, width int) string {
 
 func (m model) configPanel(width int) string {
 	lines := []string{
-		m.sectionTitle("Agents", m.focus == focusConfig && m.selectedConfig < 3, width-4),
+		m.sectionTitle("Agents", m.focus == focusConfig && m.selectedConfig < 3, width),
 		m.agentRow(0, "Claude Code", m.cfg.claudeCount),
 		m.agentRow(1, "Codex", m.cfg.codexCount),
 		m.agentRow(2, "OpenCode Kimi", m.cfg.openCount),
 		"",
-		m.sectionTitle("Placement", m.focus == focusConfig && m.selectedConfig >= 3, width-4),
+		m.sectionTitle("Placement", m.focus == focusConfig && m.selectedConfig >= 3, width),
 	}
 	for index, option := range placementOptions {
 		lines = append(lines, m.placementRow(index, option))
 	}
-	return panel.Width(width).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().
+		Width(width).
+		Background(configBG).
+		Padding(1, 2).
+		Render(strings.Join(lines, "\n"))
 }
 
 func (m model) agentRow(index int, label string, count int) string {
@@ -800,13 +754,6 @@ func clampInt(value, minValue, maxValue int) int {
 		return maxValue
 	}
 	return value
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func normalizePlacement(value string) string {
