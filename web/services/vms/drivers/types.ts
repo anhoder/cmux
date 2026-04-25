@@ -29,7 +29,7 @@ export type SSHEndpoint = {
   /**
    * Opaque identity/token handle the driver needs later to revoke these credentials.
    * Freestyle uses its identity id; E2B returns an empty string (no identities there yet).
-   * `vmActor` stashes this in state and calls `revokeSSHIdentity` on destroy and before
+   * The VM workflow stores this in Postgres and calls `revokeSSHIdentity` on destroy and before
    * minting a replacement identity, so unreferenced tokens don't pile up on the provider side.
    */
   identityHandle: string;
@@ -97,7 +97,7 @@ export interface VMProvider {
 
   // Best-effort revocation of an identity handle that `openSSH` previously returned. No-op
   // if the driver doesn't mint revocable credentials (e.g. E2B), must not throw on unknown
-  // or already-revoked handles — vmActor cleanup paths rely on it being safe to call.
+  // or already-revoked handles. Cleanup paths rely on it being safe to call.
   revokeSSHIdentity(identityHandle: string): Promise<void>;
 }
 

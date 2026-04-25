@@ -1,28 +1,34 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
 const getUser = mock(async () => null);
-const createClient = mock(() => {
-  throw new Error("unauthenticated VM routes must not create a Rivet client");
+const runVmWorkflow = mock(async () => {
+  throw new Error("unauthenticated VM routes must not reach the VM workflow");
 });
+const createVm = mock(() => ({ workflow: "create" }));
+const listUserVms = mock(() => ({ workflow: "list" }));
 
 mock.module("../app/lib/stack", () => ({
   stackServerApp: { getUser },
 }));
 
-mock.module("rivetkit/client", () => ({
-  createClient,
+mock.module("../services/vms/workflows", () => ({
+  createVm,
+  listUserVms,
+  runVmWorkflow,
 }));
 
-const { POST } = await import("../app/api/vm/route");
+const { GET, POST } = await import("../app/api/vm/route");
 
 beforeEach(() => {
   getUser.mockClear();
   getUser.mockResolvedValue(null);
-  createClient.mockClear();
+  runVmWorkflow.mockClear();
+  createVm.mockClear();
+  listUserVms.mockClear();
 });
 
 describe("VM REST auth", () => {
-  test("rejects unauthenticated provisioning before reaching Rivet or providers", async () => {
+  test("rejects unauthenticated provisioning before reaching Postgres or providers", async () => {
     const response = await POST(
       new Request("https://cmux.test/api/vm", {
         method: "POST",
@@ -33,25 +39,51 @@ describe("VM REST auth", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "unauthorized" });
     expect(getUser).toHaveBeenCalled();
-    expect(createClient).not.toHaveBeenCalled();
+    expect(runVmWorkflow).not.toHaveBeenCalled();
   });
 
-  test("requires forwarded Stack credentials before opening a Rivet actor handle", async () => {
+  test("rejects unauthenticated VM listing before reaching Postgres", async () => {
+    const response = await GET(new Request("https://cmux.test/api/vm"));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(runVmWorkflow).not.toHaveBeenCalled();
+  });
+
+  test("authenticated provisioning runs the Effect VM workflow", async () => {
     getUser.mockResolvedValue({
       id: "user-1",
       displayName: null,
       primaryEmail: "user@example.com",
     });
+    runVmWorkflow.mockResolvedValue({
+      providerVmId: "provider-vm-1",
+      provider: "freestyle",
+      image: "snapshot-test",
+      createdAt: 1_777_000_000_000,
+    });
 
     const response = await POST(
       new Request("https://cmux.test/api/vm", {
         method: "POST",
-        body: JSON.stringify({ provider: "freestyle" }),
+        headers: { "idempotency-key": "idem-1" },
+        body: JSON.stringify({ provider: "freestyle", image: "snapshot-test" }),
       }),
     );
 
-    expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "unauthorized" });
-    expect(createClient).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      id: "provider-vm-1",
+      provider: "freestyle",
+      image: "snapshot-test",
+      createdAt: 1_777_000_000_000,
+    });
+    expect(createVm).toHaveBeenCalledWith({
+      userId: "user-1",
+      provider: "freestyle",
+      image: "snapshot-test",
+      idempotencyKey: "idem-1",
+    });
+    expect(runVmWorkflow).toHaveBeenCalled();
   });
 });

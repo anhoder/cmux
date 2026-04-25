@@ -1,12 +1,11 @@
 import {
-  isActorMissingError,
   jsonResponse,
   notFoundVm,
-  userOwnsVm,
-  vmHandle,
   withAuthedVmApiRoute,
 } from "../../../../../services/vms/routeHelpers";
 import { setSpanAttributes } from "../../../../../services/telemetry";
+import { isVmNotFoundError } from "../../../../../services/vms/errors";
+import { execVm, runVmWorkflow } from "../../../../../services/vms/workflows";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +18,7 @@ export async function POST(
     "/api/vm/[id]/exec",
     { "cmux.vm.operation": "exec" },
     "/api/vm/[id]/exec POST failed",
-    async ({ user, client, span }) => {
+    async ({ user, span }) => {
       let rawBody: unknown;
       try {
         rawBody = await request.json();
@@ -48,20 +47,17 @@ export async function POST(
         "cmux.command_length": body.command.length,
         "cmux.timeout_ms": timeoutMs,
       });
-      if (!(await userOwnsVm(client, user.id, id))) return notFoundVm(id);
-      // `get` (not `getOrCreate`) so a coordinator entry without a live actor — e.g. after
-      // a partial cleanup failure where userVmsActor kept the id but vmActor.state is gone —
-      // 404s instead of implicit-creating an uninitialised actor that 500s on every action
-      // (Codex P2).
       try {
-        const result = await vmHandle(client, user.id, id).exec(body.command, timeoutMs);
+        const result = await runVmWorkflow(execVm({
+          userId: user.id,
+          providerVmId: id,
+          command: body.command,
+          timeoutMs,
+        }));
         setSpanAttributes(span, { "cmux.exec.exit_code": result.exitCode });
         return jsonResponse(result);
       } catch (err) {
-        if (isActorMissingError(err)) {
-          setSpanAttributes(span, { "cmux.rivet.actor_missing": true });
-          return notFoundVm(id);
-        }
+        if (isVmNotFoundError(err)) return notFoundVm(id);
         throw err;
       }
     },

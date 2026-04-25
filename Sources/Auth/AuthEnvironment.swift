@@ -53,7 +53,7 @@ enum AuthEnvironment {
         )
     }
 
-    /// Base URL for the cmux-owned cloud VM backend (`/api/vm`, `/api/rivet`).
+    /// Base URL for the cmux-owned cloud VM backend (`/api/vm`).
     ///
     /// Resolution order (first hit wins):
     ///   1. process env `CMUX_VM_API_BASE_URL` — works when the app is launched from a shell.

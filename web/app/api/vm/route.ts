@@ -1,5 +1,5 @@
-// Authenticated REST facade over the VM actors. Native clients use this surface so raw Rivet
-// actor keys and provider credentials stay behind server-side ownership checks.
+// Authenticated REST facade over the VM control plane. Native clients use this surface so
+// provider credentials stay behind server-side ownership checks.
 
 import {
   DEFAULT_E2B_WS_TEMPLATE,
@@ -8,10 +8,18 @@ import {
   type ProviderId,
 } from "../../../services/vms/drivers";
 import {
+  isVmCreateFailedError,
+  isVmCreateInProgressError,
+} from "../../../services/vms/errors";
+import {
   jsonResponse,
-  userVmsHandle,
   withAuthedVmApiRoute,
 } from "../../../services/vms/routeHelpers";
+import {
+  createVm,
+  listUserVms,
+  runVmWorkflow,
+} from "../../../services/vms/workflows";
 import { setSpanAttributes } from "../../../services/telemetry";
 
 export const dynamic = "force-dynamic";
@@ -22,8 +30,8 @@ export async function GET(request: Request): Promise<Response> {
     "/api/vm",
     { "cmux.vm.operation": "list" },
     "/api/vm GET failed",
-    async ({ user, client, span }) => {
-      const entries = await userVmsHandle(client, user.id).list();
+    async ({ user, span }) => {
+      const entries = await runVmWorkflow(listUserVms(user.id));
       setSpanAttributes(span, { "cmux.vm.count": entries.length });
       // REST adapter: expose `id` at the top level so existing CLI + curl users don't need to
       // learn the new `providerVmId` field name. Swift CLI reads `vm["id"]`.
@@ -44,7 +52,7 @@ export async function POST(request: Request): Promise<Response> {
     "/api/vm",
     { "cmux.vm.operation": "create" },
     "/api/vm POST failed",
-    async ({ user, client, span }) => {
+    async ({ user, span }) => {
       // Runtime-validate the payload before we call a paid provider. An invalid `provider`
       // (client sending `"aws"` or `"docker"`) previously slipped past the type cast and
       // surfaced as a 500 from the driver after provisioning had already half-succeeded.
@@ -92,7 +100,7 @@ export async function POST(request: Request): Promise<Response> {
       const image = body.image ?? defaultImageFor(provider);
       // Idempotency-Key is standard HTTP; we also accept x-cmux-idempotency-key for CLI
       // callers that don't know about RFC-style keys. Trim + clamp to a reasonable length
-      // so we don't blow up actor state with garbage.
+      // so we don't store unbounded idempotency metadata.
       const rawKey = (
         request.headers.get("idempotency-key") ||
         request.headers.get("x-cmux-idempotency-key") ||
@@ -105,7 +113,18 @@ export async function POST(request: Request): Promise<Response> {
         "cmux.idempotency_key_set": !!idempotencyKey,
       });
 
-      const created = await userVmsHandle(client, user.id).create({ image, provider, idempotencyKey });
+      let created;
+      try {
+        created = await runVmWorkflow(createVm({ userId: user.id, image, provider, idempotencyKey }));
+      } catch (err) {
+        if (isVmCreateInProgressError(err)) {
+          return jsonResponse({ error: "vm create already in progress" }, 409);
+        }
+        if (isVmCreateFailedError(err)) {
+          return jsonResponse({ error: err.message }, 500);
+        }
+        throw err;
+      }
       setSpanAttributes(span, { "cmux.vm.id": created.providerVmId });
       return jsonResponse({
         id: created.providerVmId,

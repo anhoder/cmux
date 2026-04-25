@@ -111,7 +111,7 @@ Before launching a new tagged run, clean up any older tags you started in this s
 
 ## Cloud VM secrets
 
-Cloud VM build and test scripts use local secrets from `~/.secrets/cmux.env`.
+Cloud VM build, test, and local dev scripts use provider secrets from `~/.secrets/cmux.env`.
 
 - `E2B_API_KEY`
 - `FREESTYLE_API_KEY`
@@ -126,7 +126,9 @@ set +a
 ```
 
 `~/.secret/cmuxterm.env` is for Stack/web env and does not contain the provider build keys.
-The web dev loader also accepts the legacy `~/.secrets/cmuxterm.env` path while machines migrate.
+`bun dev` sources `~/.secrets/cmux.env` first when present, then `~/.secret/cmuxterm.env` so
+cmuxterm-specific Stack settings override broader cmux secrets. The web dev loader also accepts
+the legacy `~/.secrets/cmuxterm.env` path while machines migrate.
 
 ## Backend TypeScript
 
@@ -138,6 +140,10 @@ boundary, map typed errors to HTTP responses, and treat unexpected defects separ
 
 Use plain TypeScript only for trivial data shapes, constants, config files, frontend React code, or
 small glue where Effect would add ceremony without improving failure handling.
+
+Cloud VM backend logic must stay in Vercel route handlers and Effect services backed by Postgres.
+Do not reintroduce Rivet or a raw actor protocol for this feature unless a later architecture doc
+explicitly changes the control plane.
 
 ## Debug event log
 

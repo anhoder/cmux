@@ -417,7 +417,7 @@ export class FreestyleProvider implements VMProvider {
       },
       async (span) => {
         const fs = client();
-        // A fresh identity per attach session. `vmActor` persists the identityId so it can
+        // A fresh identity per attach session. The VM workflow persists the identityId so it can
         // call `revokeSSHIdentity` on VM destroy / before minting a replacement, otherwise
         // every `cmux vm shell` invocation would leak a live credential under the Freestyle
         // account indefinitely.

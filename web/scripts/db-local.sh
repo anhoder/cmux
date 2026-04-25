@@ -129,6 +129,7 @@ case "$command" in
     bun test tests/db-schema.test.ts
     bun test tests/drizzle-effect.test.ts
     bun test tests/vm-db-read-model.test.ts
+    bun test tests/vm-workflows.test.ts
     ;;
   url)
     printf '%s\n' "$DATABASE_URL"

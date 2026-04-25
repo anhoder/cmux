@@ -27,23 +27,3 @@ export async function withVmSpan<T>(
     fn,
   );
 }
-
-export async function withRivetActorSpan<T>(
-  actorName: string,
-  actionName: string,
-  attributes: MaybeAttributes,
-  fn: SpanCallback<T>,
-): Promise<T> {
-  return withSpan(
-    "cmux-rivet",
-    `cmux.rivet.${actorName}.${actionName}`,
-    {
-      "cmux.subsystem": VM_SUBSYSTEM,
-      "cmux.runtime": "rivetkit",
-      "rivet.actor": actorName,
-      "rivet.action": actionName,
-      ...attributes,
-    },
-    fn,
-  );
-}

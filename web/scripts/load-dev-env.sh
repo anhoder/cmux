@@ -21,6 +21,11 @@ cmux_existing_db_password="${CMUX_DB_PASSWORD-}"
 cmux_existing_db_name_set="${CMUX_DB_NAME+x}"
 cmux_existing_db_name="${CMUX_DB_NAME-}"
 
+cmux_extra_secret_file="${CMUXTERM_EXTRA_ENV_FILE:-${CMUX_WEB_EXTRA_ENV_FILE:-}}"
+if [[ -z "$cmux_extra_secret_file" && -f "$HOME/.secrets/cmux.env" ]]; then
+  cmux_extra_secret_file="$HOME/.secrets/cmux.env"
+fi
+
 cmux_secret_file="${CMUXTERM_ENV_FILE:-${CMUX_WEB_ENV_FILE:-}}"
 if [[ -z "$cmux_secret_file" ]]; then
   if [[ -f "$HOME/.secret/cmuxterm.env" ]]; then
@@ -39,6 +44,10 @@ case "$-" in
 esac
 set +u
 set -a
+if [[ -n "$cmux_extra_secret_file" ]]; then
+  # shellcheck disable=SC1090
+  source "$cmux_extra_secret_file"
+fi
 # shellcheck disable=SC1090
 source "$cmux_secret_file"
 set +a
@@ -85,4 +94,5 @@ if [[ "${CMUX_DEV_USE_EXTERNAL_VM_API_BASE_URL:-0}" != "1" ]]; then
 fi
 
 export CMUX_WEB_SECRET_ENV_FILE="$cmux_secret_file"
+export CMUX_WEB_EXTRA_SECRET_ENV_FILE="$cmux_extra_secret_file"
 export PATH="$cmux_web_dir/node_modules/.bin:$PATH"

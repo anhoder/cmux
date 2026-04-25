@@ -10,7 +10,8 @@ bun install
 bun dev
 ```
 
-`bun dev` sources `~/.secret/cmuxterm.env`, derives local database URLs from `CMUX_PORT`,
+`bun dev` sources provider secrets from `~/.secrets/cmux.env` when present, then sources
+Stack/web secrets from `~/.secret/cmuxterm.env`. It derives local database URLs from `CMUX_PORT`,
 starts this worktree's Docker Postgres, applies Drizzle migrations, then starts Next.js.
 It listens on `CMUX_PORT` when it is set, otherwise `PORT`, otherwise `3777`.
 When `bun dev` exits or is interrupted, it stops the matching Docker Postgres container and
@@ -19,8 +20,9 @@ network. The database volume is preserved so local state survives restarts.
 The committed `.envrc` uses the same loader for direnv. Run `direnv allow` once in `web/` if you
 want shells opened there to automatically get the same local dev environment.
 
-`web/.env.local` is not used for local development. Keep runtime secrets in
-`~/.secret/cmuxterm.env`. `~/.secrets/cmuxterm.env` is accepted as a legacy fallback.
+`web/.env.local` is not used for local development. Keep Stack/web runtime secrets in
+`~/.secret/cmuxterm.env` and Cloud VM provider secrets in `~/.secrets/cmux.env`.
+`~/.secrets/cmuxterm.env` is accepted as a legacy fallback for the Stack/web file.
 
 To start Next without Docker Postgres, use:
 
@@ -87,6 +89,5 @@ CI applies migrations twice against a real Postgres service and runs the DB beha
 verify the runtime behavior we rely on, including per-user create idempotency and internal
 read-model access to the database.
 
-The first DB-backed VM read model is `services/vms/dbReadModel.ts`. It is intentionally not exposed
-as an API route; it exists as a narrow migration checkpoint while the production VM
-create/list/attach routes still use the Rivet-backed control plane.
+The Cloud VM REST routes now run through Effect workflows backed by Postgres. The supporting
+read model is `services/vms/dbReadModel.ts`; it is intentionally not exposed as an API route.

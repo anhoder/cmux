@@ -1,12 +1,11 @@
 import {
-  isActorMissingError,
   jsonResponse,
   notFoundVm,
-  userOwnsVm,
-  vmHandle,
   withAuthedVmApiRoute,
 } from "../../../../../services/vms/routeHelpers";
 import { setSpanAttributes } from "../../../../../services/telemetry";
+import { isVmNotFoundError } from "../../../../../services/vms/errors";
+import { openSshEndpoint, runVmWorkflow } from "../../../../../services/vms/workflows";
 
 export const dynamic = "force-dynamic";
 
@@ -19,8 +18,8 @@ export const dynamic = "force-dynamic";
  *
  * E2B returns 501-ish (provider throws) because E2B sandboxes don't expose raw TCP.
  *
- * Short-lived: each call mints a fresh identity + token. vmActor.remove revokes the identity
- * alongside the VM on destroy, so idle sessions don't accumulate zombie credentials.
+ * Short-lived: each call mints a fresh identity + token. The Postgres-backed VM workflow revokes
+ * the identity alongside the VM on destroy, so idle sessions don't accumulate zombie credentials.
  */
 export async function POST(
   request: Request,
@@ -31,20 +30,15 @@ export async function POST(
     "/api/vm/[id]/ssh-endpoint",
     { "cmux.vm.operation": "open_ssh" },
     "/api/vm/[id]/ssh-endpoint failed",
-    async ({ user, client, span }) => {
+    async ({ user, span }) => {
       const { id } = await params;
       setSpanAttributes(span, { "cmux.vm.id": id });
-      if (!(await userOwnsVm(client, user.id, id))) return notFoundVm(id);
-      // `get` not `getOrCreate` — see the exec route for the rationale.
       try {
-        const endpoint = await vmHandle(client, user.id, id).openSSH();
+        const endpoint = await runVmWorkflow(openSshEndpoint({ userId: user.id, providerVmId: id }));
         setSpanAttributes(span, { "cmux.ssh.credential_kind": endpoint.credential.kind });
         return jsonResponse(endpoint);
       } catch (err) {
-        if (isActorMissingError(err)) {
-          setSpanAttributes(span, { "cmux.rivet.actor_missing": true });
-          return notFoundVm(id);
-        }
+        if (isVmNotFoundError(err)) return notFoundVm(id);
         throw err;
       }
     },
