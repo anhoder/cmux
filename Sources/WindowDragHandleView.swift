@@ -90,6 +90,21 @@ enum StandardTitlebarDoubleClickAction: Equatable {
     case none
 }
 
+enum TitlebarDoubleClickBehavior: Equatable {
+    case standardAction
+    case suppress
+}
+
+enum TitlebarDoubleClickHandlingResult: Equatable {
+    case ignored
+    case suppressed
+    case performed(StandardTitlebarDoubleClickAction)
+
+    var consumesEvent: Bool {
+        self != .ignored
+    }
+}
+
 func resolvedStandardTitlebarDoubleClickAction(globalDefaults: [String: Any]) -> StandardTitlebarDoubleClickAction {
     if let action = (globalDefaults["AppleActionOnDoubleClick"] as? String)?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -131,6 +146,22 @@ func performStandardTitlebarDoubleClick(window: NSWindow?) -> StandardTitlebarDo
         break
     }
     return action
+}
+
+@discardableResult
+func handleTitlebarDoubleClick(
+    window: NSWindow?,
+    behavior: TitlebarDoubleClickBehavior
+) -> TitlebarDoubleClickHandlingResult {
+    switch behavior {
+    case .standardAction:
+        guard let action = performStandardTitlebarDoubleClick(window: window) else {
+            return .ignored
+        }
+        return .performed(action)
+    case .suppress:
+        return .suppressed
+    }
 }
 
 private enum WindowDragHandleAssociatedObjectKeys {
@@ -383,15 +414,29 @@ func windowDragHandleShouldCaptureHit(
 /// This lets us keep `window.isMovableByWindowBackground = false` so drags in the app content
 /// (e.g. sidebar tab reordering) don't move the whole window.
 struct WindowDragHandleView: NSViewRepresentable {
+    var doubleClickBehavior: TitlebarDoubleClickBehavior = .standardAction
+
     func makeNSView(context: Context) -> NSView {
-        DraggableView()
+        DraggableView(doubleClickBehavior: doubleClickBehavior)
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        // No-op
+        (nsView as? DraggableView)?.doubleClickBehavior = doubleClickBehavior
     }
 
     private final class DraggableView: NSView {
+        var doubleClickBehavior: TitlebarDoubleClickBehavior
+
+        init(doubleClickBehavior: TitlebarDoubleClickBehavior) {
+            self.doubleClickBehavior = doubleClickBehavior
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) {
+            self.doubleClickBehavior = .standardAction
+            super.init(coder: coder)
+        }
+
         override var mouseDownCanMoveWindow: Bool { false }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -427,11 +472,14 @@ struct WindowDragHandleView: NSViewRepresentable {
             #endif
 
             if event.clickCount >= 2 {
-                let action = performStandardTitlebarDoubleClick(window: window)
+                let result = handleTitlebarDoubleClick(
+                    window: window,
+                    behavior: doubleClickBehavior
+                )
                 #if DEBUG
-                cmuxDebugLog("titlebar.dragHandle.mouseDownDoubleClick action=\(String(describing: action))")
+                cmuxDebugLog("titlebar.dragHandle.mouseDownDoubleClick result=\(String(describing: result))")
                 #endif
-                if action != nil {
+                if result.consumesEvent {
                     return
                 }
             }
@@ -462,9 +510,12 @@ struct WindowDragHandleView: NSViewRepresentable {
 /// the standard macOS titlebar action even when the visible strip is hosted by
 /// higher-level SwiftUI/AppKit container views.
 struct TitlebarDoubleClickMonitorView: NSViewRepresentable {
+    var doubleClickBehavior: TitlebarDoubleClickBehavior = .standardAction
+
     final class Coordinator {
         weak var view: NSView?
         var monitor: Any?
+        var doubleClickBehavior: TitlebarDoubleClickBehavior = .standardAction
 
         deinit {
             if let monitor {
@@ -481,6 +532,7 @@ struct TitlebarDoubleClickMonitorView: NSViewRepresentable {
         view.layer?.backgroundColor = NSColor.clear.cgColor
 
         context.coordinator.view = view
+        context.coordinator.doubleClickBehavior = doubleClickBehavior
 
         let coordinator = context.coordinator
         coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak coordinator] event in
@@ -491,8 +543,11 @@ struct TitlebarDoubleClickMonitorView: NSViewRepresentable {
             let point = view.convert(event.locationInWindow, from: nil)
             guard view.bounds.contains(point) else { return event }
 
-            let action = performStandardTitlebarDoubleClick(window: window)
-            return action == nil ? event : nil
+            let result = handleTitlebarDoubleClick(
+                window: window,
+                behavior: coordinator.doubleClickBehavior
+            )
+            return result.consumesEvent ? nil : event
         }
 
         return view
@@ -500,5 +555,92 @@ struct TitlebarDoubleClickMonitorView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.view = nsView
+        context.coordinator.doubleClickBehavior = doubleClickBehavior
+    }
+}
+
+func shouldSuppressMinimalModeTitlebarDoubleClick(
+    isEnabled: Bool,
+    clickCount: Int,
+    point: NSPoint,
+    bounds: NSRect,
+    topStripHeight: CGFloat
+) -> Bool {
+    guard isEnabled, clickCount >= 2, topStripHeight > 0, bounds.contains(point) else {
+        return false
+    }
+
+    let clampedHeight = min(max(0, topStripHeight), bounds.height)
+    return point.y >= bounds.maxY - clampedHeight
+}
+
+struct MinimalModeTitlebarDoubleClickGuardView: NSViewRepresentable {
+    var isEnabled: Bool
+    var topStripHeight: CGFloat
+
+    final class Coordinator {
+        weak var view: NSView?
+        var isEnabled = false
+        var topStripHeight: CGFloat = 0
+        var monitor: Any?
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+
+    private final class PassthroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = PassthroughView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+
+        context.coordinator.view = view
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.topStripHeight = topStripHeight
+
+        let coordinator = context.coordinator
+        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak coordinator] event in
+            guard let coordinator,
+                  coordinator.isEnabled,
+                  let view = coordinator.view,
+                  let window = view.window,
+                  event.window === window else {
+                return event
+            }
+
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard shouldSuppressMinimalModeTitlebarDoubleClick(
+                isEnabled: coordinator.isEnabled,
+                clickCount: event.clickCount,
+                point: point,
+                bounds: view.bounds,
+                topStripHeight: coordinator.topStripHeight
+            ) else {
+                return event
+            }
+
+            #if DEBUG
+            cmuxDebugLog(
+                "titlebar.minimalDoubleClickGuard.suppressed point=\(windowDragHandleFormatPoint(point)) height=\(String(format: "%.1f", coordinator.topStripHeight))"
+            )
+            #endif
+            return nil
+        }
+
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.view = nsView
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.topStripHeight = topStripHeight
     }
 }

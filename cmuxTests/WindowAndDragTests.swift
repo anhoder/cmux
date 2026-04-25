@@ -650,6 +650,60 @@ final class WindowDragHandleHitTests: XCTestCase {
         XCTAssertFalse(windowDragHandleShouldTreatTopHitAsPassiveHost(NSButton(frame: .zero)))
     }
 
+    func testSuppressedTitlebarDoubleClickConsumesWithoutWindowAction() {
+        XCTAssertEqual(
+            handleTitlebarDoubleClick(window: nil, behavior: .suppress),
+            .suppressed
+        )
+        XCTAssertEqual(
+            handleTitlebarDoubleClick(window: nil, behavior: .standardAction),
+            .ignored
+        )
+        XCTAssertTrue(TitlebarDoubleClickHandlingResult.suppressed.consumesEvent)
+        XCTAssertFalse(TitlebarDoubleClickHandlingResult.ignored.consumesEvent)
+    }
+
+    func testMinimalModeDoubleClickGuardOnlyConsumesTopStripDoubleClicks() {
+        let bounds = NSRect(x: 0, y: 0, width: 400, height: 300)
+
+        XCTAssertTrue(
+            shouldSuppressMinimalModeTitlebarDoubleClick(
+                isEnabled: true,
+                clickCount: 2,
+                point: NSPoint(x: 200, y: 292),
+                bounds: bounds,
+                topStripHeight: 30
+            )
+        )
+        XCTAssertFalse(
+            shouldSuppressMinimalModeTitlebarDoubleClick(
+                isEnabled: true,
+                clickCount: 2,
+                point: NSPoint(x: 200, y: 240),
+                bounds: bounds,
+                topStripHeight: 30
+            )
+        )
+        XCTAssertFalse(
+            shouldSuppressMinimalModeTitlebarDoubleClick(
+                isEnabled: false,
+                clickCount: 2,
+                point: NSPoint(x: 200, y: 292),
+                bounds: bounds,
+                topStripHeight: 30
+            )
+        )
+        XCTAssertFalse(
+            shouldSuppressMinimalModeTitlebarDoubleClick(
+                isEnabled: true,
+                clickCount: 1,
+                point: NSPoint(x: 200, y: 292),
+                bounds: bounds,
+                topStripHeight: 30
+            )
+        )
+    }
+
     func testDragHandleIgnoresPassiveHostSiblingHit() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 36))
         let dragHandle = NSView(frame: container.bounds)

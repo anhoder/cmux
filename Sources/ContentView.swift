@@ -2985,6 +2985,12 @@ struct ContentView: View {
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
                 .background(Color.clear)
+                .background(
+                    MinimalModeTitlebarDoubleClickGuardView(
+                        isEnabled: isMinimalMode && !isFullScreen,
+                        topStripHeight: max(30, hostingSafeAreaTop)
+                    )
+                )
         )
 
         view = AnyView(view.onAppear {
@@ -9183,6 +9189,10 @@ struct VerticalTabsSidebar: View {
         WorkspacePresentationModeSettings.mode(for: workspacePresentationMode) == .minimal
     }
 
+    private var titlebarDoubleClickBehavior: TitlebarDoubleClickBehavior {
+        isMinimalMode ? .suppress : .standardAction
+    }
+
     private var showsSidebarNotificationMessage: Bool {
         tabItemSettingsStore.snapshot.showsNotificationMessage
     }
@@ -9326,11 +9336,11 @@ struct VerticalTabsSidebar: View {
                         .allowsHitTesting(false)
                 }
                 .overlay(alignment: .top) {
-                    // Match native titlebar behavior in the sidebar top strip:
-                    // drag-to-move and double-click action (zoom/minimize).
-                    WindowDragHandleView()
+                    // The sidebar top strip remains draggable, but minimal mode
+                    // consumes titlebar double-clicks to avoid hidden zoom loops.
+                    WindowDragHandleView(doubleClickBehavior: titlebarDoubleClickBehavior)
                         .frame(height: trafficLightPadding)
-                        .background(TitlebarDoubleClickMonitorView())
+                        .background(TitlebarDoubleClickMonitorView(doubleClickBehavior: titlebarDoubleClickBehavior))
                 }
                 .overlay(alignment: .topLeading) {
                     if isMinimalMode {
