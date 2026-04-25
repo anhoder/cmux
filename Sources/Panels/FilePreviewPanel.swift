@@ -691,6 +691,49 @@ private enum FilePreviewPDFDisplayMode {
     case twoPages
 }
 
+enum FilePreviewPDFChromeStyleVariant: String, CaseIterable, Identifiable {
+    case liquidGlass
+    case materialCapsule
+    case borderedCapsule
+    case thinOutline
+    case plainToolbar
+
+    static let defaultsKey = "filePreviewPDFChromeStyleVariant"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .liquidGlass:
+            String(localized: "filePreview.pdf.chromeStyle.liquidGlass", defaultValue: "A: Liquid Glass")
+        case .materialCapsule:
+            String(localized: "filePreview.pdf.chromeStyle.materialCapsule", defaultValue: "B: Material Pill")
+        case .borderedCapsule:
+            String(localized: "filePreview.pdf.chromeStyle.borderedCapsule", defaultValue: "C: Bordered Controls")
+        case .thinOutline:
+            String(localized: "filePreview.pdf.chromeStyle.thinOutline", defaultValue: "D: Thin Outline")
+        case .plainToolbar:
+            String(localized: "filePreview.pdf.chromeStyle.plainToolbar", defaultValue: "E: Plain Toolbar")
+        }
+    }
+
+    static func current() -> FilePreviewPDFChromeStyleVariant {
+        #if DEBUG
+        if let rawValue = UserDefaults.standard.string(forKey: defaultsKey),
+           let variant = FilePreviewPDFChromeStyleVariant(rawValue: rawValue) {
+            return variant
+        }
+        #endif
+        return .liquidGlass
+    }
+
+    func persist() {
+        #if DEBUG
+        UserDefaults.standard.set(rawValue, forKey: Self.defaultsKey)
+        #endif
+    }
+}
+
 final class FilePreviewPDFChromeHostView: NSView {
     var interactiveOverlayViews: [NSView] = []
 
@@ -726,12 +769,14 @@ private struct FilePreviewPDFSidebarChromeView: View {
     let isSidebarVisible: Bool
     let sidebarMode: FilePreviewPDFSidebarMode
     let displayMode: FilePreviewPDFDisplayMode
+    let chromeStyleVariant: FilePreviewPDFChromeStyleVariant
     let toggleSidebar: () -> Void
     let selectThumbnails: () -> Void
     let selectTableOfContents: () -> Void
     let selectContinuousScroll: () -> Void
     let selectSinglePage: () -> Void
     let selectTwoPages: () -> Void
+    let selectChromeStyleVariant: (FilePreviewPDFChromeStyleVariant) -> Void
 
     var body: some View {
         Menu {
@@ -766,6 +811,20 @@ private struct FilePreviewPDFSidebarChromeView: View {
                 isSelected: displayMode == .twoPages,
                 action: selectTwoPages
             )
+            #if DEBUG
+            Divider()
+            Menu {
+                ForEach(FilePreviewPDFChromeStyleVariant.allCases) { variant in
+                    checkedMenuButton(
+                        title: variant.title,
+                        isSelected: chromeStyleVariant == variant,
+                        action: { selectChromeStyleVariant(variant) }
+                    )
+                }
+            } label: {
+                Text(String(localized: "filePreview.pdf.debugChromeStyle", defaultValue: "Debug Chrome Style"))
+            }
+            #endif
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "sidebar.left")
@@ -777,7 +836,7 @@ private struct FilePreviewPDFSidebarChromeView: View {
             .frame(width: 58, height: 36)
             .contentShape(Capsule())
         }
-        .modifier(FilePreviewPDFLiquidGlassButtonModifier())
+        .modifier(FilePreviewPDFChromeStyleModifier(variant: chromeStyleVariant))
         .accessibilityLabel(String(localized: "filePreview.pdf.sidebarOptions", defaultValue: "Sidebar Options"))
     }
 
@@ -798,6 +857,7 @@ private struct FilePreviewPDFSidebarChromeView: View {
 }
 
 private struct FilePreviewPDFZoomChromeView: View {
+    let chromeStyleVariant: FilePreviewPDFChromeStyleVariant
     let zoomOut: () -> Void
     let actualSize: () -> Void
     let zoomIn: () -> Void
@@ -825,7 +885,7 @@ private struct FilePreviewPDFZoomChromeView: View {
             )
         }
         .frame(height: 36)
-        .modifier(FilePreviewPDFLiquidGlassButtonModifier())
+        .modifier(FilePreviewPDFChromeStyleModifier(variant: chromeStyleVariant))
     }
 
     private func chromeButton(
@@ -844,9 +904,32 @@ private struct FilePreviewPDFZoomChromeView: View {
     }
 }
 
-private struct FilePreviewPDFLiquidGlassButtonModifier: ViewModifier {
+private struct FilePreviewPDFChromeStyleModifier: ViewModifier {
+    let variant: FilePreviewPDFChromeStyleVariant
+
     @ViewBuilder
     func body(content: Content) -> some View {
+        switch variant {
+        case .liquidGlass:
+            liquidGlassChrome(content: content)
+        case .materialCapsule:
+            materialChrome(content: content, material: .regularMaterial, strokeOpacity: 0.5)
+        case .borderedCapsule:
+            content
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .controlSize(.regular)
+        case .thinOutline:
+            materialChrome(content: content, material: .thinMaterial, strokeOpacity: 0.75)
+        case .plainToolbar:
+            content
+                .buttonStyle(.borderless)
+                .controlSize(.regular)
+        }
+    }
+
+    @ViewBuilder
+    private func liquidGlassChrome(content: Content) -> some View {
         #if compiler(>=6.3)
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 0) {
@@ -855,20 +938,25 @@ private struct FilePreviewPDFLiquidGlassButtonModifier: ViewModifier {
                     .controlSize(.regular)
             }
         } else {
-            fallbackChrome(content: content)
+            materialChrome(content: content, material: .ultraThinMaterial, strokeOpacity: 0.55)
         }
         #else
-        fallbackChrome(content: content)
+        materialChrome(content: content, material: .ultraThinMaterial, strokeOpacity: 0.55)
         #endif
     }
 
-    private func fallbackChrome(content: Content) -> some View {
+    private func materialChrome(
+        content: Content,
+        material: Material,
+        strokeOpacity: Double
+    ) -> some View {
         content
             .buttonStyle(.borderless)
-            .background(.ultraThinMaterial, in: Capsule())
+            .controlSize(.regular)
+            .background(material, in: Capsule())
             .overlay {
                 Capsule()
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.5)
+                    .stroke(Color(nsColor: .separatorColor).opacity(strokeOpacity), lineWidth: 0.5)
             }
     }
 }
@@ -1165,6 +1253,7 @@ final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NSOutlineV
     private var sidebarMode: FilePreviewPDFSidebarMode = .thumbnails
     private var displayMode: FilePreviewPDFDisplayMode = .continuousScroll
     private var isSidebarVisible = true
+    private var chromeStyleVariant = FilePreviewPDFChromeStyleVariant.current()
     private var didSetInitialSidebarWidth = false
     private var lastSidebarWidth = Metrics.defaultSidebarWidth
     private var rotationAccumulator: CGFloat = 0
@@ -1404,14 +1493,17 @@ final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NSOutlineV
             isSidebarVisible: isSidebarVisible,
             sidebarMode: sidebarMode,
             displayMode: displayMode,
+            chromeStyleVariant: chromeStyleVariant,
             toggleSidebar: { [weak self] in self?.toggleSidebar() },
             selectThumbnails: { [weak self] in self?.selectThumbnailSidebar() },
             selectTableOfContents: { [weak self] in self?.selectTableOfContentsSidebar() },
             selectContinuousScroll: { [weak self] in self?.selectContinuousScroll() },
             selectSinglePage: { [weak self] in self?.selectSinglePage() },
-            selectTwoPages: { [weak self] in self?.selectTwoPages() }
+            selectTwoPages: { [weak self] in self?.selectTwoPages() },
+            selectChromeStyleVariant: { [weak self] variant in self?.selectChromeStyleVariant(variant) }
         ))
         zoomChromeHost.rootView = AnyView(FilePreviewPDFZoomChromeView(
+            chromeStyleVariant: chromeStyleVariant,
             zoomOut: { [weak self] in self?.zoomOut() },
             actualSize: { [weak self] in self?.actualSize() },
             zoomIn: { [weak self] in self?.zoomIn() }
@@ -1474,6 +1566,12 @@ final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NSOutlineV
     @objc private func selectTwoPages() {
         displayMode = .twoPages
         applyDisplayMode()
+        updateChromeRootViews()
+    }
+
+    private func selectChromeStyleVariant(_ variant: FilePreviewPDFChromeStyleVariant) {
+        chromeStyleVariant = variant
+        variant.persist()
         updateChromeRootViews()
     }
 

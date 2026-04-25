@@ -1033,6 +1033,26 @@ final class FilePreviewPDFChromeTests: XCTestCase {
         XCTAssertTrue(host.acceptsFirstMouse(for: nil))
     }
 
+    #if DEBUG
+    func testPDFChromeStyleVariantPersistsForDogfoodPicker() {
+        let defaults = UserDefaults.standard
+        let previousValue = defaults.string(forKey: FilePreviewPDFChromeStyleVariant.defaultsKey)
+        defer {
+            if let previousValue {
+                defaults.set(previousValue, forKey: FilePreviewPDFChromeStyleVariant.defaultsKey)
+            } else {
+                defaults.removeObject(forKey: FilePreviewPDFChromeStyleVariant.defaultsKey)
+            }
+        }
+
+        defaults.removeObject(forKey: FilePreviewPDFChromeStyleVariant.defaultsKey)
+        XCTAssertEqual(FilePreviewPDFChromeStyleVariant.current(), .liquidGlass)
+
+        FilePreviewPDFChromeStyleVariant.thinOutline.persist()
+        XCTAssertEqual(FilePreviewPDFChromeStyleVariant.current(), .thinOutline)
+    }
+    #endif
+
     func testPDFChromeControlsUseSwiftUILiquidGlassHosts() throws {
         let container = FilePreviewPDFContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         let mirror = Mirror(reflecting: container)
