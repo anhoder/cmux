@@ -1056,12 +1056,48 @@ final class FilePreviewPanelTextSavingTests: XCTestCase {
         XCTAssertFalse(panel.isDirty)
     }
 
+    func testTextEditorInsetsReapplyWhenMovedBetweenWindows() {
+        _ = NSApplication.shared
+        let textView = SavingTextView()
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 5
+
+        let firstWindow = windowHosting(textView)
+        XCTAssertEqual(textView.textContainerInset.width, FilePreviewTextEditorLayout.textContainerInset.width)
+        XCTAssertEqual(textView.textContainerInset.height, FilePreviewTextEditorLayout.textContainerInset.height)
+        XCTAssertEqual(textView.textContainer?.lineFragmentPadding, FilePreviewTextEditorLayout.lineFragmentPadding)
+
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 5
+
+        let secondWindow = windowHosting(textView)
+        XCTAssertEqual(textView.textContainerInset.width, FilePreviewTextEditorLayout.textContainerInset.width)
+        XCTAssertEqual(textView.textContainerInset.height, FilePreviewTextEditorLayout.textContainerInset.height)
+        XCTAssertEqual(textView.textContainer?.lineFragmentPadding, FilePreviewTextEditorLayout.lineFragmentPadding)
+
+        withExtendedLifetime([firstWindow, secondWindow]) {}
+    }
+
     private func temporaryTextFile(contents: String, encoding: String.Encoding) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("txt")
         try contents.write(to: url, atomically: true, encoding: encoding)
         return url
+    }
+
+    private func windowHosting(_ textView: NSTextView) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        let scrollView = NSScrollView(frame: window.contentView?.bounds ?? .zero)
+        scrollView.autoresizingMask = [.width, .height]
+        window.contentView?.addSubview(scrollView)
+        scrollView.documentView = textView
+        return window
     }
 }
 

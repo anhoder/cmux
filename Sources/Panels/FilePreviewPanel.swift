@@ -555,6 +555,7 @@ private struct FilePreviewTextEditor: NSViewRepresentable {
             height: CGFloat.greatestFiniteMagnitude
         )
         textView.textContainer?.widthTracksTextView = false
+        textView.applyFilePreviewTextEditorInsets()
         textView.string = panel.textContent
         panel.attachTextView(textView)
 
@@ -566,6 +567,7 @@ private struct FilePreviewTextEditor: NSViewRepresentable {
         context.coordinator.panel = panel
         guard let textView = scrollView.documentView as? SavingTextView else { return }
         textView.panel = panel
+        textView.applyFilePreviewTextEditorInsets()
         panel.attachTextView(textView)
         guard textView.string != panel.textContent else { return }
         context.coordinator.isApplyingPanelUpdate = true
@@ -589,13 +591,35 @@ private struct FilePreviewTextEditor: NSViewRepresentable {
     }
 }
 
-private final class SavingTextView: NSTextView {
+enum FilePreviewTextEditorLayout {
+    static let textContainerInset = NSSize(width: 12, height: 10)
+    static let lineFragmentPadding: CGFloat = 0
+}
+
+extension NSTextView {
+    func applyFilePreviewTextEditorInsets() {
+        let targetInset = FilePreviewTextEditorLayout.textContainerInset
+        if textContainerInset.width != targetInset.width || textContainerInset.height != targetInset.height {
+            textContainerInset = targetInset
+        }
+        if textContainer?.lineFragmentPadding != FilePreviewTextEditorLayout.lineFragmentPadding {
+            textContainer?.lineFragmentPadding = FilePreviewTextEditorLayout.lineFragmentPadding
+        }
+    }
+}
+
+final class SavingTextView: NSTextView {
     private static let defaultPreviewFontSize: CGFloat = 13
     private static let minimumPreviewFontSize: CGFloat = 8
     private static let maximumPreviewFontSize: CGFloat = 36
 
     weak var panel: FilePreviewPanel?
     private var previewFontSize: CGFloat = 13
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyFilePreviewTextEditorInsets()
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
