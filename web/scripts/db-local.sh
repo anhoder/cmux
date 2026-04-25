@@ -105,6 +105,9 @@ case "$command" in
     "$0" up >/dev/null
     bunx drizzle-kit migrate --config "$ROOT_DIR/drizzle.config.ts"
     ;;
+  ready)
+    compose exec -T postgres pg_isready -U "$db_user" -d "$db_name" >/dev/null
+    ;;
   test)
     env \
       -u COMPOSE_PROJECT_NAME \
@@ -135,7 +138,7 @@ case "$command" in
     printf '%s\n' "$DATABASE_URL"
     ;;
   *)
-    echo "Usage: bun db:{up,down,reset,status,migrate,test}" >&2
+    echo "Usage: bun db:{up,down,reset,status,migrate,ready,test}" >&2
     exit 2
     ;;
 esac

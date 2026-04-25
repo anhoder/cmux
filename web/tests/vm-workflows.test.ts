@@ -7,6 +7,7 @@ import { VmProviderGateway, type VmProviderGatewayShape } from "../services/vms/
 import { VmRepositoryLive } from "../services/vms/repository";
 import {
   createVm,
+  openAttachEndpoint,
   openSshEndpoint,
 } from "../services/vms/workflows";
 
@@ -147,5 +148,67 @@ describe("VM Effect workflows", () => {
     expect(leases[0]).toMatchObject({ providerIdentityHandle: "identity-1" });
     expect(leases[0]?.revokedAt).toBeInstanceOf(Date);
     expect(leases[1]).toMatchObject({ providerIdentityHandle: "identity-2", revokedAt: null });
+  });
+
+  dbTest("records repeated attach RPC leases idempotently when provider returns a stable daemon token", async () => {
+    if (!sql) throw new Error("test database not initialized");
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+    const [vm] = await sql<{ id: string }[]>`
+      insert into cloud_vms (user_id, provider, provider_vm_id, image_id, status)
+      values ('user-workflow-attach', 'freestyle', 'provider-vm-attach-1', 'snapshot-test', 'running')
+      returning id
+    `;
+
+    let attachCount = 0;
+    const provider: VmProviderGatewayShape = {
+      create: () => Effect.fail(new Error("unused") as never),
+      destroy: () => Effect.void,
+      exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+      openAttach: () =>
+        Effect.sync(() => {
+          attachCount += 1;
+          return {
+            transport: "websocket" as const,
+            url: "wss://example.invalid/pty",
+            headers: {},
+            token: `pty-token-${attachCount}`,
+            sessionId: `pty-session-${attachCount}`,
+            expiresAtUnix: Math.floor(Date.now() / 1000) + 300,
+            daemon: {
+              url: "wss://example.invalid/rpc",
+              headers: {},
+              token: "stable-rpc-token",
+              sessionId: "stable-rpc-session",
+              expiresAtUnix: Math.floor(Date.now() / 1000) + 600,
+            },
+          };
+        }),
+      openSSH: () => Effect.fail(new Error("unused") as never),
+      revokeSSHIdentity: () => Effect.void,
+    };
+    const layer = providerLayer(provider);
+
+    await Effect.runPromise(
+      openAttachEndpoint({ userId: "user-workflow-attach", providerVmId: "provider-vm-attach-1" }).pipe(
+        Effect.provide(layer),
+      ),
+    );
+    await Effect.runPromise(
+      openAttachEndpoint({ userId: "user-workflow-attach", providerVmId: "provider-vm-attach-1" }).pipe(
+        Effect.provide(layer),
+      ),
+    );
+
+    const leases = await sql<{ kind: string; sessionId: string | null }[]>`
+      select kind, session_id as "sessionId"
+      from cloud_vm_leases
+      where vm_id = ${vm.id}
+      order by kind, session_id
+    `;
+    expect(leases).toEqual([
+      { kind: "pty", sessionId: "pty-session-1" },
+      { kind: "pty", sessionId: "pty-session-2" },
+      { kind: "rpc", sessionId: "stable-rpc-session" },
+    ]);
   });
 });

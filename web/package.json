@@ -10,6 +10,7 @@
     "db:down": "bash scripts/db-local.sh down",
     "db:generate": "bunx drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "bash scripts/db-local.sh migrate",
+    "db:ready": "bash scripts/db-local.sh ready",
     "db:reset": "bash scripts/db-local.sh reset",
     "db:status": "bash scripts/db-local.sh status",
     "db:test": "bash scripts/db-local.sh test",

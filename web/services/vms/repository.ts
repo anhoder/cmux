@@ -204,7 +204,7 @@ export const VmRepositoryLive = Layer.succeed(VmRepository, {
   recordLease: (input) =>
     dbEffect("recordLease", async () => {
       const db = cloudDb();
-      await db.insert(cloudVmLeases).values({
+      const values = {
         vmId: input.vmId,
         userId: input.userId,
         kind: input.kind,
@@ -214,7 +214,36 @@ export const VmRepositoryLive = Layer.succeed(VmRepository, {
         transport: input.transport,
         metadata: input.metadata ?? {},
         expiresAt: input.expiresAt,
-      });
+      };
+      try {
+        await db.insert(cloudVmLeases).values(values);
+      } catch (err) {
+        if (pgErrorCode(err) !== "23505") throw err;
+        const [existing] = await db
+          .select()
+          .from(cloudVmLeases)
+          .where(eq(cloudVmLeases.tokenHash, input.tokenHash))
+          .limit(1);
+        if (
+          !existing ||
+          existing.vmId !== input.vmId ||
+          existing.userId !== input.userId ||
+          existing.kind !== input.kind
+        ) {
+          throw err;
+        }
+        await db
+          .update(cloudVmLeases)
+          .set({
+            providerIdentityHandle: input.providerIdentityHandle,
+            sessionId: input.sessionId,
+            transport: input.transport,
+            metadata: input.metadata ?? {},
+            expiresAt: input.expiresAt,
+            revokedAt: null,
+          })
+          .where(eq(cloudVmLeases.tokenHash, input.tokenHash));
+      }
     }),
 
   activeIdentityLeases: (vmId) =>
