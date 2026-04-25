@@ -1027,19 +1027,71 @@ final class WindowMoveSuppressionHitPathTests: XCTestCase {
 
 @MainActor
 final class FilePreviewPDFChromeTests: XCTestCase {
-    func testContentHostRoutesHitsToOverlayControlsBeforePDFContent() {
-        let host = FilePreviewPDFContentHostView(frame: NSRect(x: 0, y: 0, width: 220, height: 160))
-        let pdfContentView = NSView(frame: host.bounds)
-        let overlayView = NSView(frame: NSRect(x: 80, y: 80, width: 100, height: 48))
-        let button = NSButton(frame: NSRect(x: 12, y: 10, width: 38, height: 28))
+    func testChromeButtonsAcceptFirstMouse() {
+        let button = FilePreviewPDFChromeButton(title: "", target: nil, action: nil)
 
-        host.addSubview(pdfContentView)
-        overlayView.addSubview(button)
-        host.addSubview(overlayView)
-        host.interactiveOverlayViews = [overlayView]
+        XCTAssertTrue(button.acceptsFirstMouse(for: nil))
+    }
 
-        XCTAssertTrue(host.hitTest(NSPoint(x: 100, y: 100)) === button)
-        XCTAssertTrue(host.hitTest(NSPoint(x: 20, y: 20)) === pdfContentView)
+    func testPDFChromeControlsAreHitTestedAbovePDFContent() throws {
+        let container = FilePreviewPDFContainerView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let hostView = NSView(frame: container.frame)
+        let window = NSWindow(
+            contentRect: container.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostView
+        hostView.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.topAnchor.constraint(equalTo: hostView.topAnchor),
+            container.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
+            container.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
+        ])
+        window.layoutIfNeeded()
+        hostView.needsLayout = true
+        hostView.layoutSubtreeIfNeeded()
+        container.needsLayout = true
+        container.layout()
+        container.layoutSubtreeIfNeeded()
+
+        let mirror = Mirror(reflecting: container)
+        let chromeHost = try XCTUnwrap(mirror.descendant("chromeHost") as? NSView)
+        let leftFloatingChrome = try XCTUnwrap(mirror.descendant("leftFloatingChrome") as? NSView)
+        let rightFloatingChrome = try XCTUnwrap(mirror.descendant("rightFloatingChrome") as? NSView)
+        let contentHost = mirror.descendant("contentHost") as? NSView
+        chromeHost.needsLayout = true
+        chromeHost.layoutSubtreeIfNeeded()
+        leftFloatingChrome.layoutSubtreeIfNeeded()
+        rightFloatingChrome.layoutSubtreeIfNeeded()
+
+        let leftProbe = chromeHost.convert(
+            NSPoint(x: leftFloatingChrome.frame.midX, y: leftFloatingChrome.frame.midY),
+            to: container
+        )
+        let rightProbe = chromeHost.convert(
+            NSPoint(x: rightFloatingChrome.frame.midX, y: rightFloatingChrome.frame.midY),
+            to: container
+        )
+        let leftChromeHit = container.hitTest(leftProbe)
+        let rightChromeHit = container.hitTest(rightProbe)
+        let debugFrames = "container=\(container.frame) content=\(String(describing: contentHost?.frame)) chromeHost=\(chromeHost.frame) left=\(leftFloatingChrome.frame) right=\(rightFloatingChrome.frame) leftProbe=\(leftProbe) rightProbe=\(rightProbe) leftHit=\(String(describing: leftChromeHit)) rightHit=\(String(describing: rightChromeHit))"
+
+        XCTAssertTrue(leftChromeHit is FilePreviewPDFChromeButton, debugFrames)
+        XCTAssertTrue(rightChromeHit is FilePreviewPDFChromeButton, debugFrames)
+    }
+
+    func testThumbnailSidebarUsesFullWidthSingleColumnLayout() throws {
+        let sidebar = FilePreviewPDFThumbnailSidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 480))
+
+        sidebar.layoutSubtreeIfNeeded()
+
+        let flowLayout = try XCTUnwrap(
+            Mirror(reflecting: sidebar).descendant("flowLayout") as? NSCollectionViewFlowLayout
+        )
+        XCTAssertGreaterThan(flowLayout.itemSize.width, sidebar.bounds.width / 2)
     }
 }
 

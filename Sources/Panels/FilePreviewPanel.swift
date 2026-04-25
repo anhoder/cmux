@@ -691,26 +691,42 @@ private enum FilePreviewPDFDisplayMode {
     case twoPages
 }
 
-final class FilePreviewPDFContentHostView: NSView {
+final class FilePreviewPDFChromeButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
+final class FilePreviewPDFChromeHostView: NSView {
     var interactiveOverlayViews: [NSView] = []
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         for overlayView in interactiveOverlayViews.reversed() where !overlayView.isHidden {
             let convertedPoint = convert(point, to: overlayView)
-            if let hitView = overlayView.hitTest(convertedPoint) {
+            if let hitView = interactiveHit(in: overlayView, at: convertedPoint) {
                 return hitView
             }
         }
-        return super.hitTest(point)
+        return nil
+    }
+
+    private func interactiveHit(in view: NSView, at point: NSPoint) -> NSView? {
+        guard !view.isHidden, view.bounds.contains(point) else { return nil }
+        for subview in view.subviews.reversed() {
+            let convertedPoint = view.convert(point, to: subview)
+            if let hitView = interactiveHit(in: subview, at: convertedPoint) {
+                return hitView
+            }
+        }
+        return view is NSControl ? view : nil
     }
 }
 
-private final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
+final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
     private enum Metrics {
         static let thumbnailHeight: CGFloat = 106
         static let labelHeight: CGFloat = 22
         static let itemSpacing: CGFloat = 12
-        static let horizontalInset: CGFloat = 18
         static let verticalInset: CGFloat = 24
     }
 
@@ -733,6 +749,16 @@ private final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionView
 
     override func layout() {
         super.layout()
+        updateItemSize()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        updateItemSize()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
         updateItemSize()
     }
 
@@ -760,6 +786,7 @@ private final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionView
     }
 
     private func setupView() {
+        flowLayout.scrollDirection = .vertical
         flowLayout.minimumLineSpacing = Metrics.itemSpacing
         flowLayout.minimumInteritemSpacing = 0
         flowLayout.sectionInset = NSEdgeInsets(
@@ -770,6 +797,7 @@ private final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionView
         )
 
         collectionView.collectionViewLayout = flowLayout
+        collectionView.autoresizingMask = [.width]
         collectionView.backgroundColors = [.clear]
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -797,11 +825,15 @@ private final class FilePreviewPDFThumbnailSidebarView: NSView, NSCollectionView
     }
 
     private func updateItemSize() {
-        let itemWidth = max(124, bounds.width - (Metrics.horizontalInset * 2))
+        let visibleWidth = scrollView.contentView.bounds.width > 0 ? scrollView.contentView.bounds.width : bounds.width
+        let itemWidth = max(124, visibleWidth)
         let nextSize = NSSize(
             width: itemWidth,
             height: Metrics.thumbnailHeight + Metrics.labelHeight + 10
         )
+        if collectionView.frame.width != itemWidth {
+            collectionView.setFrameSize(NSSize(width: itemWidth, height: collectionView.frame.height))
+        }
         guard flowLayout.itemSize != nextSize else { return }
         flowLayout.itemSize = nextSize
         flowLayout.invalidateLayout()
@@ -936,7 +968,7 @@ private final class FilePreviewPDFThumbnailItemView: NSView {
     }
 }
 
-private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
+final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private enum Metrics {
         static let defaultSidebarWidth: CGFloat = 220
         static let minimumSidebarWidth: CGFloat = 168
@@ -948,20 +980,21 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
 
     private let splitView = NSSplitView()
     private let sidebarHost = NSVisualEffectView()
-    private let contentHost = FilePreviewPDFContentHostView()
+    private let contentHost = NSView()
+    private let chromeHost = FilePreviewPDFChromeHostView()
     private let pdfView = FilePreviewMagnifyingPDFView()
     private let thumbnailView = FilePreviewPDFThumbnailSidebarView()
     private let outlineScrollView = NSScrollView()
     private let outlineView = NSOutlineView()
     private let outlinePlaceholder = NSTextField(wrappingLabelWithString: "")
-    private let sidebarMenuButton = NSButton(title: "", target: nil, action: nil)
+    private let sidebarMenuButton = FilePreviewPDFChromeButton(title: "", target: nil, action: nil)
     private let sidebarIconView = NSImageView()
     private let sidebarChevronView = NSImageView()
     private let leftFloatingChrome = NSVisualEffectView()
     private let rightFloatingChrome = NSVisualEffectView()
-    private let zoomOutButton = NSButton(title: "", target: nil, action: nil)
-    private let actualSizeButton = NSButton(title: "", target: nil, action: nil)
-    private let zoomInButton = NSButton(title: "", target: nil, action: nil)
+    private let zoomOutButton = FilePreviewPDFChromeButton(title: "", target: nil, action: nil)
+    private let actualSizeButton = FilePreviewPDFChromeButton(title: "", target: nil, action: nil)
+    private let zoomInButton = FilePreviewPDFChromeButton(title: "", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "")
     private let pageLabel = NSTextField(labelWithString: "")
     private var currentURL: URL?
@@ -988,9 +1021,20 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
 
     override func layout() {
         super.layout()
-        guard !didSetInitialSidebarWidth, bounds.width > 0 else { return }
-        didSetInitialSidebarWidth = true
-        splitView.setPosition(clampedSidebarWidth(lastSidebarWidth), ofDividerAt: 0)
+        if !didSetInitialSidebarWidth, bounds.width > 0 {
+            didSetInitialSidebarWidth = true
+            splitView.setPosition(clampedSidebarWidth(lastSidebarWidth), ofDividerAt: 0)
+            splitView.adjustSubviews()
+        }
+        layoutFloatingChrome()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let chromePoint = convert(point, to: chromeHost)
+        if let chromeHit = chromeHost.hitTest(chromePoint) {
+            return chromeHit
+        }
+        return super.hitTest(point)
     }
 
     func setURL(_ url: URL) {
@@ -1136,6 +1180,12 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
     }
 
     private func setupFloatingChrome() {
+        chromeHost.frame = bounds.width > 0 && bounds.height > 0
+            ? bounds
+            : NSRect(x: 0, y: 0, width: 480, height: 320)
+        chromeHost.autoresizingMask = []
+        addSubview(chromeHost, positioned: .above, relativeTo: splitView)
+
         configureFloatingChrome(leftFloatingChrome)
         configureFloatingChrome(rightFloatingChrome)
 
@@ -1164,7 +1214,7 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
         leftFloatingChrome.addSubview(sidebarIconView)
         leftFloatingChrome.addSubview(sidebarChevronView)
         leftFloatingChrome.addSubview(sidebarMenuButton)
-        contentHost.addSubview(leftFloatingChrome)
+        chromeHost.addSubview(leftFloatingChrome)
 
         configureFloatingIconButton(
             zoomOutButton,
@@ -1199,8 +1249,8 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
         zoomStack.translatesAutoresizingMaskIntoConstraints = false
 
         rightFloatingChrome.addSubview(zoomStack)
-        contentHost.addSubview(rightFloatingChrome)
-        contentHost.interactiveOverlayViews = [leftFloatingChrome, rightFloatingChrome]
+        chromeHost.addSubview(rightFloatingChrome)
+        chromeHost.interactiveOverlayViews = [leftFloatingChrome, rightFloatingChrome]
 
         titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
         titleLabel.textColor = .labelColor
@@ -1216,18 +1266,18 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
         titleStack.alignment = .leading
         titleStack.spacing = 1
         titleStack.translatesAutoresizingMaskIntoConstraints = false
-        contentHost.addSubview(titleStack)
+        chromeHost.addSubview(titleStack)
 
         NSLayoutConstraint.activate([
-            leftFloatingChrome.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 10),
-            leftFloatingChrome.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor, constant: 10),
+            leftFloatingChrome.topAnchor.constraint(equalTo: chromeHost.topAnchor, constant: 10),
+            leftFloatingChrome.leadingAnchor.constraint(equalTo: chromeHost.leadingAnchor, constant: 10),
             leftFloatingChrome.widthAnchor.constraint(equalToConstant: 58),
             leftFloatingChrome.heightAnchor.constraint(equalToConstant: Metrics.floatingChromeHeight),
             sidebarIconView.leadingAnchor.constraint(equalTo: leftFloatingChrome.leadingAnchor, constant: 12),
             sidebarIconView.centerYAnchor.constraint(equalTo: leftFloatingChrome.centerYAnchor),
             sidebarIconView.widthAnchor.constraint(equalToConstant: 18),
             sidebarIconView.heightAnchor.constraint(equalToConstant: 18),
-            sidebarChevronView.leadingAnchor.constraint(equalTo: sidebarIconView.trailingAnchor, constant: 7),
+            sidebarChevronView.leadingAnchor.constraint(equalTo: sidebarIconView.trailingAnchor, constant: 8),
             sidebarChevronView.trailingAnchor.constraint(equalTo: leftFloatingChrome.trailingAnchor, constant: -10),
             sidebarChevronView.centerYAnchor.constraint(equalTo: leftFloatingChrome.centerYAnchor),
             sidebarChevronView.widthAnchor.constraint(equalToConstant: 10),
@@ -1237,8 +1287,8 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
             sidebarMenuButton.trailingAnchor.constraint(equalTo: leftFloatingChrome.trailingAnchor),
             sidebarMenuButton.bottomAnchor.constraint(equalTo: leftFloatingChrome.bottomAnchor),
 
-            rightFloatingChrome.topAnchor.constraint(equalTo: contentHost.topAnchor, constant: 10),
-            rightFloatingChrome.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor, constant: -10),
+            rightFloatingChrome.topAnchor.constraint(equalTo: chromeHost.topAnchor, constant: 10),
+            rightFloatingChrome.trailingAnchor.constraint(equalTo: chromeHost.trailingAnchor, constant: -10),
             rightFloatingChrome.heightAnchor.constraint(equalToConstant: Metrics.floatingChromeHeight),
             zoomStack.topAnchor.constraint(equalTo: rightFloatingChrome.topAnchor),
             zoomStack.leadingAnchor.constraint(equalTo: rightFloatingChrome.leadingAnchor),
@@ -1249,6 +1299,15 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
             titleStack.centerYAnchor.constraint(equalTo: leftFloatingChrome.centerYAnchor),
             titleStack.trailingAnchor.constraint(lessThanOrEqualTo: rightFloatingChrome.leadingAnchor, constant: -12),
         ])
+    }
+
+    private func layoutFloatingChrome() {
+        let contentFrame = contentHost.convert(contentHost.bounds, to: self)
+        guard contentFrame.width > 0, contentFrame.height > 0 else { return }
+        if chromeHost.frame != contentFrame {
+            chromeHost.frame = contentFrame
+        }
+        chromeHost.needsLayout = true
     }
 
     private func configureFloatingChrome(_ effectView: NSVisualEffectView) {
@@ -1476,6 +1535,7 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
             sidebarHost.isHidden = true
         }
         splitView.adjustSubviews()
+        layoutFloatingChrome()
     }
 
     private func clampedSidebarWidth(_ proposedWidth: CGFloat) -> CGFloat {
@@ -1491,6 +1551,7 @@ private final class FilePreviewPDFContainerView: NSView, NSSplitViewDelegate, NS
         let sidebarWidth = sidebarHost.frame.width
         guard sidebarWidth >= Metrics.minimumSidebarWidth else { return }
         lastSidebarWidth = sidebarWidth
+        layoutFloatingChrome()
     }
 
     func splitView(
