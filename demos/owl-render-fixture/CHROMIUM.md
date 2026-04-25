@@ -33,6 +33,9 @@ submit, and asserting the post-input DOM state through Mojo. It also verifies
 Command, Option, Control, and Shift modifier delivery while a text input is
 focused. Mouse events use Chromium's routed input path so controls activate
 normally. The gate still rejects DevTools and remote debugging paths.
+The scroll fixture now requires Chromium to land on a specific numbered content
+row, and the text fixture verifies caret editing plus Shift-Arrow selection
+replacement in one rendered page.
 
 The AWS build used for the current screenshots was rebuilt with:
 

@@ -596,12 +596,14 @@ private final class LayerHostRunner {
                     postInputDiagnosticScript: """
                     ({
                       ok: window.owlScrollState?.ok === true,
+                      firstVisibleLine: window.owlScrollState?.firstVisibleLine || "",
                       status: document.getElementById("status")?.textContent || ""
                     })
                     """,
                     postInputExpectations: [
                         JavaScriptExpectation(key: "ok", value: .bool(true)),
-                        JavaScriptExpectation(key: "status", value: .string("OWL_SCROLL_OK")),
+                        JavaScriptExpectation(key: "firstVisibleLine", value: .string("LINE_06")),
+                        JavaScriptExpectation(key: "status", value: .string("OWL_SCROLL_LINE_OK")),
                     ]
                 )
             )
@@ -622,17 +624,33 @@ private final class LayerHostRunner {
                         .key(KeyStroke(keyCode: KeyCodes.delete, text: "", modifiers: 0)),
                         .text("Z"),
                         .text("final"),
+                        .mouseClick(MouseClick(x: 170, y: 356)),
+                        .text("selection"),
+                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .key(KeyStroke(keyCode: KeyCodes.leftArrow, text: "", modifiers: KeyModifiers.shift)),
+                        .text("XYZ"),
                     ],
                     postInputDiagnosticScript: """
                     ({
+                      editTyped: document.getElementById("editInput")?.value || "",
+                      sawEditIntermediate: window.owlTextEditState?.sawIntermediate === true,
+                      sawSelection: window.owlTextEditState?.sawSelection === true,
+                      sawSelectionReplacement: window.owlTextEditState?.sawSelectionReplacement === true,
+                      selectionTyped: document.getElementById("selectionInput")?.value || "",
                       sawIntermediate: window.owlTextEditState?.sawIntermediate === true,
                       status: document.getElementById("status")?.textContent || "",
                       typed: document.getElementById("editInput")?.value || ""
                     })
                     """,
                     postInputExpectations: [
+                        JavaScriptExpectation(key: "editTyped", value: .string("abcZfinalf")),
+                        JavaScriptExpectation(key: "sawEditIntermediate", value: .bool(true)),
                         JavaScriptExpectation(key: "sawIntermediate", value: .bool(true)),
-                        JavaScriptExpectation(key: "status", value: .string("OWL_TEXT_EDIT_OK")),
+                        JavaScriptExpectation(key: "sawSelection", value: .bool(true)),
+                        JavaScriptExpectation(key: "sawSelectionReplacement", value: .bool(true)),
+                        JavaScriptExpectation(key: "selectionTyped", value: .string("selectXYZ")),
+                        JavaScriptExpectation(key: "status", value: .string("OWL_TEXT_SELECTION_OK")),
                         JavaScriptExpectation(key: "typed", value: .string("abcZfinalf")),
                     ]
                 )
@@ -2333,12 +2351,14 @@ private enum Fixtures {
       <meta charset="utf-8">
       <title>OWL LayerHost scroll fixture</title>
       <style>
-        html, body { margin: 0; width: 100%; min-height: 1700px; background: rgb(248,248,248); }
+        html, body { margin: 0; width: 100%; min-height: 2500px; background: rgb(248,248,248); }
         body { font: 30px -apple-system, BlinkMacSystemFont, sans-serif; color: rgb(20,20,20); }
         #header {
-          position: fixed;
+          position: sticky;
           left: 48px;
-          top: 40px;
+          top: 0;
+          margin-left: 48px;
+          margin-top: 0;
           width: 864px;
           height: 82px;
           border: 4px solid rgb(20,20,20);
@@ -2353,9 +2373,10 @@ private enum Fixtures {
           z-index: 3;
         }
         #status {
-          position: fixed;
+          position: sticky;
           left: 48px;
-          top: 146px;
+          top: 82px;
+          margin-left: 48px;
           width: 864px;
           height: 84px;
           border: 4px solid rgb(20,20,20);
@@ -2369,9 +2390,10 @@ private enum Fixtures {
           z-index: 3;
         }
         #after {
-          position: fixed;
+          position: sticky;
           left: 48px;
-          top: 256px;
+          top: 166px;
+          margin-left: 48px;
           width: 864px;
           height: 94px;
           border: 4px solid rgb(20,20,20);
@@ -2383,23 +2405,28 @@ private enum Fixtures {
           font-weight: 900;
           z-index: 3;
         }
-        .stripe {
-          position: absolute;
-          left: 48px;
+        #lines {
+          margin-left: 48px;
+          margin-top: 170px;
           width: 864px;
-          height: 180px;
+        }
+        .line {
+          height: 144px;
           border: 4px solid rgb(20,20,20);
           background: white;
           box-sizing: border-box;
           display: flex;
           align-items: center;
           padding-left: 24px;
+          margin-bottom: 16px;
           font-weight: 900;
         }
-        #stripe1 { top: 420px; background: white; }
-        #stripe2 { top: 680px; background: rgb(238,238,238); }
-        #stripe3 { top: 940px; background: white; }
-        #stripe4 { top: 1200px; background: rgb(238,238,238); }
+        .line:nth-child(even) {
+          background: rgb(238,238,238);
+        }
+        .line.current {
+          background: rgb(255, 210, 0);
+        }
         body.scrolled #header,
         body.scrolled #status {
           background: rgb(0, 204, 82);
@@ -2411,25 +2438,38 @@ private enum Fixtures {
       </style>
     </head>
     <body>
-      <div id="header">OWL_SCROLL_READY</div>
+      <div id="header">OWL_SCROLL_LINE_READY</div>
       <div id="status">OWL_SCROLL_TOP</div>
       <div id="after">scroll delta not seen</div>
-      <div id="stripe1" class="stripe">scroll lane 1</div>
-      <div id="stripe2" class="stripe">scroll lane 2</div>
-      <div id="stripe3" class="stripe">scroll lane 3</div>
-      <div id="stripe4" class="stripe">scroll lane 4</div>
+      <div id="lines"></div>
       <script>
         const header = document.getElementById("header");
         const status = document.getElementById("status");
         const after = document.getElementById("after");
+        const lines = document.getElementById("lines");
+        const lineCount = 14;
+        for (let index = 1; index <= lineCount; index++) {
+          const line = document.createElement("div");
+          const label = `LINE_${String(index).padStart(2, "0")}`;
+          line.id = label;
+          line.className = "line";
+          line.textContent = `${label} content row ${index}: distinct scroll payload`;
+          lines.appendChild(line);
+        }
+
         const update = () => {
           const y = Math.round(window.scrollY);
-          const ok = y > 300;
+          const firstVisibleIndex = Math.max(1, Math.min(lineCount, Math.floor(y / 160) + 1));
+          const firstVisibleLine = `LINE_${String(firstVisibleIndex).padStart(2, "0")}`;
+          const ok = y >= 850 && firstVisibleLine === "LINE_06";
+          for (const line of document.querySelectorAll(".line")) {
+            line.classList.toggle("current", line.id === firstVisibleLine);
+          }
           document.body.classList.toggle("scrolled", ok);
-          header.textContent = ok ? "OWL_SCROLL_OK" : "OWL_SCROLL_READY";
-          status.textContent = ok ? "OWL_SCROLL_OK" : "OWL_SCROLL_TOP";
-          after.textContent = `scrollY: ${y}`;
-          window.owlScrollState = { y, ok };
+          header.textContent = ok ? "OWL_SCROLL_LINE_OK" : "OWL_SCROLL_LINE_READY";
+          status.textContent = ok ? "OWL_SCROLL_LINE_OK" : "OWL_SCROLL_TOP";
+          after.textContent = `scrollY: ${y} first visible: ${firstVisibleLine}`;
+          window.owlScrollState = { y, firstVisibleLine, ok };
         };
 
         window.addEventListener("scroll", update);
@@ -2444,57 +2484,60 @@ private enum Fixtures {
     <html>
     <head>
       <meta charset="utf-8">
-      <title>OWL LayerHost text editing fixture</title>
+      <title>OWL LayerHost text and selection fixture</title>
       <style>
         html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: rgb(248,248,248); }
-        body { font: 30px -apple-system, BlinkMacSystemFont, sans-serif; color: rgb(20,20,20); }
+        body { font: 26px -apple-system, BlinkMacSystemFont, sans-serif; color: rgb(20,20,20); }
         #banner {
           position: absolute;
           left: 48px;
-          top: 40px;
+          top: 32px;
           width: 864px;
-          height: 58px;
+          height: 54px;
           background: rgb(0, 89, 255);
           color: white;
           display: flex;
           align-items: center;
           padding-left: 22px;
           box-sizing: border-box;
-          font-weight: 700;
+          font-weight: 800;
         }
-        #editInput {
+        input {
           position: absolute;
           left: 48px;
-          top: 116px;
           width: 500px;
-          height: 68px;
+          height: 58px;
           box-sizing: border-box;
           border: 4px solid rgb(20,20,20);
           border-radius: 0;
-          font: 34px -apple-system, BlinkMacSystemFont, sans-serif;
+          font: 30px -apple-system, BlinkMacSystemFont, sans-serif;
           padding: 0 16px;
           color: rgb(20,20,20);
           background: white;
         }
-        #value {
+        #editInput { top: 122px; }
+        #selectionInput { top: 342px; }
+        .value {
           position: absolute;
           left: 576px;
-          top: 127px;
           width: 336px;
-          height: 48px;
+          height: 42px;
           font-weight: 900;
         }
-        #steps {
+        #value { top: 132px; }
+        #range { top: 352px; }
+        .steps {
           position: absolute;
           left: 48px;
-          top: 224px;
           width: 864px;
           display: grid;
           grid-template-columns: repeat(3, 1fr);
           gap: 12px;
         }
+        #editSteps { top: 198px; }
+        #selectionSteps { top: 418px; }
         .step {
-          height: 78px;
+          height: 62px;
           box-sizing: border-box;
           border: 4px solid rgb(20,20,20);
           background: rgb(238,238,238);
@@ -2506,34 +2549,44 @@ private enum Fixtures {
         .step.ok {
           background: rgb(255, 210, 0);
         }
+        .sectionLabel {
+          position: absolute;
+          left: 48px;
+          width: 864px;
+          height: 24px;
+          font-size: 22px;
+          font-weight: 900;
+        }
+        #editLabel { top: 94px; }
+        #selectionLabel { top: 310px; }
         #status {
           position: absolute;
           left: 48px;
-          top: 342px;
+          top: 488px;
           width: 864px;
-          height: 86px;
+          height: 62px;
           border: 4px solid rgb(20,20,20);
           background: rgb(238,238,238);
           display: flex;
           align-items: center;
           padding-left: 24px;
           box-sizing: border-box;
-          font-size: 42px;
+          font-size: 36px;
           font-weight: 900;
         }
         #result {
           position: absolute;
           left: 48px;
-          top: 464px;
+          top: 560px;
           width: 864px;
-          height: 86px;
+          height: 44px;
           border: 4px solid rgb(20,20,20);
           background: white;
           display: flex;
           align-items: center;
           padding-left: 24px;
           box-sizing: border-box;
-          font-size: 42px;
+          font-size: 26px;
           font-weight: 900;
         }
         body.done #status,
@@ -2543,25 +2596,39 @@ private enum Fixtures {
       </style>
     </head>
     <body class="ready">
-      <div id="banner">OWL_TEXT_EDIT_READY</div>
+      <div id="banner">OWL_TEXT_SELECTION_READY</div>
+      <div id="editLabel" class="sectionLabel">caret editing</div>
       <input id="editInput" aria-label="OWL text editing input" autocomplete="off" spellcheck="false" autofocus>
-      <div id="value">value: EMPTY</div>
-        <div id="steps">
+      <div id="value" class="value">edit: EMPTY</div>
+      <div id="editSteps" class="steps">
         <div id="step-type" class="step">TYPE</div>
         <div id="step-edit" class="step">EDIT</div>
-        <div id="step-select" class="step">INSERT</div>
+        <div id="step-insert" class="step">INSERT</div>
       </div>
-      <div id="status">OWL_TEXT_EDIT_WAITING</div>
-      <div id="result">final value pending</div>
+      <div id="selectionLabel" class="sectionLabel">selection replacement</div>
+      <input id="selectionInput" aria-label="OWL selection input" autocomplete="off" spellcheck="false">
+      <div id="range" class="value">range: 0-0</div>
+      <div id="selectionSteps" class="steps">
+        <div id="step-selection-type" class="step">TYPE</div>
+        <div id="step-selection-range" class="step">RANGE</div>
+        <div id="step-selection-replace" class="step">REPLACE</div>
+      </div>
+      <div id="status">OWL_TEXT_SELECTION_WAITING</div>
+      <div id="result">values pending</div>
       <script>
-        const input = document.getElementById("editInput");
+        const editInput = document.getElementById("editInput");
+        const selectionInput = document.getElementById("selectionInput");
         const value = document.getElementById("value");
+        const range = document.getElementById("range");
         const status = document.getElementById("status");
         const result = document.getElementById("result");
         const state = {
           sawTyped: false,
           sawIntermediate: false,
-          sawFinal: false
+          sawFinal: false,
+          sawSelectionTyped: false,
+          sawSelection: false,
+          sawSelectionReplacement: false
         };
         window.owlTextEditState = state;
 
@@ -2569,28 +2636,49 @@ private enum Fixtures {
           document.getElementById(id).classList.toggle("ok", ok);
         };
         const render = () => {
-          if (input.value === "abcdef") {
+          if (editInput.value === "abcdef") {
             state.sawTyped = true;
           }
-          if (input.value === "abcZf") {
+          if (editInput.value === "abcZf") {
             state.sawIntermediate = true;
           }
-          if (state.sawIntermediate && input.value === "abcZfinalf") {
+          if (state.sawIntermediate && editInput.value === "abcZfinalf") {
             state.sawFinal = true;
           }
-          value.textContent = "value: " + (input.value || "EMPTY");
-          result.textContent = "final value: " + (input.value || "EMPTY");
+
+          const selectionStart = selectionInput.selectionStart ?? 0;
+          const selectionEnd = selectionInput.selectionEnd ?? 0;
+          if (selectionInput.value === "selection") {
+            state.sawSelectionTyped = true;
+          }
+          if (selectionInput.value === "selection" && selectionStart === 6 && selectionEnd === 9) {
+            state.sawSelection = true;
+          }
+          if (state.sawSelection && selectionInput.value === "selectXYZ") {
+            state.sawSelectionReplacement = true;
+          }
+
+          value.textContent = "edit: " + (editInput.value || "EMPTY");
+          range.textContent = `range: ${selectionStart}-${selectionEnd}`;
+          result.textContent = `edit=${editInput.value || "EMPTY"} selection=${selectionInput.value || "EMPTY"}`;
           mark("step-type", state.sawTyped);
           mark("step-edit", state.sawIntermediate);
-          mark("step-select", state.sawFinal);
-          if (state.sawFinal) {
+          mark("step-insert", state.sawFinal);
+          mark("step-selection-type", state.sawSelectionTyped);
+          mark("step-selection-range", state.sawSelection);
+          mark("step-selection-replace", state.sawSelectionReplacement);
+          if (state.sawFinal && state.sawSelectionReplacement) {
             document.body.classList.add("done");
-            status.textContent = "OWL_TEXT_EDIT_OK";
+            status.textContent = "OWL_TEXT_SELECTION_OK";
           }
         };
 
-        input.addEventListener("input", render);
-        input.focus();
+        editInput.addEventListener("input", render);
+        selectionInput.addEventListener("input", render);
+        selectionInput.addEventListener("keyup", render);
+        selectionInput.addEventListener("select", render);
+        document.addEventListener("selectionchange", render);
+        editInput.focus();
         render();
       </script>
     </body>
