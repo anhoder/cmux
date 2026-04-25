@@ -60,6 +60,7 @@ for env_name in \
   OWL_FRESH_NO_EMBED \
   OWL_FRESH_NO_IN_PROCESS_GPU \
   OWL_FRESH_WINDOW_SNAPSHOT \
+  OWL_LAYER_HOST_ONLY_TARGETS \
   OWL_LAYER_HOST_KEY_ONLY; do
   env_value="${!env_name:-}"
   if [ -n "$env_value" ]; then

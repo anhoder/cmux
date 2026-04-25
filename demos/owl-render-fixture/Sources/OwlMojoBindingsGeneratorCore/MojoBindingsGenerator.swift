@@ -410,6 +410,24 @@ public enum MojoSwiftGenerator {
             "    }",
             "}",
             "",
+            "public struct OwlFreshMojoTransportCall: Equatable, Codable {",
+            "    public let interface: String",
+            "    public let method: String",
+            "    public let payloadType: String",
+            "    public let payloadSummary: String",
+            "",
+            "    public init(interface: String, method: String, payloadType: String, payloadSummary: String) {",
+            "        self.interface = interface",
+            "        self.method = method",
+            "        self.payloadType = payloadType",
+            "        self.payloadSummary = payloadSummary",
+            "    }",
+            "}",
+            "",
+            "public enum OwlFreshGeneratedMojoTransport {",
+            "    public static let name = \"GeneratedOwlFreshMojoTransport\"",
+            "}",
+            "",
         ]
 
         for declaration in file.declarations {
@@ -485,7 +503,98 @@ public enum MojoSwiftGenerator {
             lines.append(generateStruct(responseStructName(interface: interface, method: method), fields: method.responseParameters))
         }
 
+        lines.append("")
+        lines.append(generateSinkProtocol(interface))
+        lines.append("")
+        lines.append(generateTransportClass(interface))
+
         return lines.joined(separator: "\n")
+    }
+
+    private static func generateSinkProtocol(_ interface: MojoInterface) -> String {
+        var lines: [String] = [
+            "public protocol \(interface.name)MojoSink: AnyObject {",
+        ]
+        for method in interface.methods {
+            let signature = swiftMethodSignature(interface: interface, method: method)
+            lines.append("    \(signature)")
+        }
+        lines.append("}")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func generateTransportClass(_ interface: MojoInterface) -> String {
+        var lines: [String] = [
+            "public final class Generated\(interface.name)MojoTransport: \(interface.name)MojoInterface {",
+            "    public private(set) var recordedCalls: [OwlFreshMojoTransportCall] = []",
+            "    private let sink: \(interface.name)MojoSink",
+            "",
+            "    public init(sink: \(interface.name)MojoSink) {",
+            "        self.sink = sink",
+            "    }",
+            "",
+            "    public func resetRecordedCalls() {",
+            "        recordedCalls.removeAll()",
+            "    }",
+            "",
+            "    private func record(method: String, payloadType: String, payloadSummary: String) {",
+            "        recordedCalls.append(OwlFreshMojoTransportCall(",
+            "            interface: \"\(interface.name)\",",
+            "            method: method,",
+            "            payloadType: payloadType,",
+            "            payloadSummary: payloadSummary",
+            "        ))",
+            "    }",
+        ]
+
+        for method in interface.methods {
+            lines.append("")
+            lines.append(generateTransportMethod(interface: interface, method: method))
+        }
+
+        lines.append("}")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func generateTransportMethod(interface: MojoInterface, method: MojoMethod) -> String {
+        let signature = swiftMethodSignature(interface: interface, method: method)
+        let methodName = lowerCamel(method.name)
+        let payload = payloadExpression(interface: interface, method: method)
+        var lines = [
+            "    public \(signature) {",
+            "        record(method: \"\(methodName)\", payloadType: \"\(payload.type)\", payloadSummary: \(payload.summary))",
+        ]
+
+        let call = sinkCall(interface: interface, method: method)
+        if !method.responseParameters.isEmpty {
+            lines.append("        return try await \(call)")
+        } else {
+            lines.append("        \(call)")
+        }
+        lines.append("    }")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func payloadExpression(interface: MojoInterface, method: MojoMethod) -> (type: String, summary: String) {
+        if shouldGenerateRequestStruct(method) {
+            return (requestStructName(interface: interface, method: method), "String(describing: request)")
+        }
+        if let parameter = method.parameters.first {
+            let name = swiftPropertyName(parameter.name)
+            return (parameter.type.swiftName, "String(describing: \(name))")
+        }
+        return ("Void", "\"\"")
+    }
+
+    private static func sinkCall(interface: MojoInterface, method: MojoMethod) -> String {
+        let methodName = lowerCamel(method.name)
+        if shouldGenerateRequestStruct(method) {
+            return "sink.\(methodName)(request)"
+        }
+        if let parameter = method.parameters.first {
+            return "sink.\(methodName)(\(swiftPropertyName(parameter.name)))"
+        }
+        return "sink.\(methodName)()"
     }
 
     private static func generateSchema(file: MojoFile, checksum: String) -> String {

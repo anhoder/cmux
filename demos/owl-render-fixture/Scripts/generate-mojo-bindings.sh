@@ -7,7 +7,7 @@ REPORT_OUT="${2:-$ROOT/artifacts/generated-bindings/bindings-report.html}"
 
 ARGS=(
     --mojom "$ROOT/Mojo/OwlFresh.mojom"
-    --swift-out "$ROOT/Sources/OwlLayerHostVerifier/OwlFresh.generated.swift"
+    --swift-out "$ROOT/Sources/OwlMojoBindingsGenerated/OwlFresh.generated.swift"
     --report-out "$REPORT_OUT"
 )
 

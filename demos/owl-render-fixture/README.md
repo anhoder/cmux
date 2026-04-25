@@ -2,7 +2,7 @@
 
 This verifier is the first visual gate for the OWL effort. It launches a Chromium host executable on macOS, renders deterministic HTML fixtures, writes PNG artifacts, and checks pixel colors in the captured images.
 
-`OwlLayerHostVerifier` is the current first architecture gate. Swift loads the OWL bridge dylib, launches Content Shell through Mojo, waits for Chromium to publish a browser-process portal `CAContext` id over Mojo, hosts that id in a native `CALayerHost`, screenshots the Swift-owned host window, and checks the pixels. Swift input requests now use generated types from `Mojo/OwlFresh.mojom`; the C ABI bridge is only the current transport adapter. `Scripts/run-layer-host-fixture-verifier-gui.sh` uses a Chromium-owned layer fixture context to prove the Mojo plus native display plumbing. `Scripts/run-layer-host-verifier-gui.sh` uses the real Chromium compositor portal and runs a deterministic canvas fixture plus `https://example.com/` by default. Set `OWL_LAYER_HOST_INPUT_CHECK=1` to also verify real mouse/key input changes web content from `OWL_INPUT_READY` to `OWL_INPUT_CLICKED`, type into a form field, check a checkbox, click submit, verify Command, Option, Control, and Shift modifier key delivery, resize the hosted browser surface, scroll to a specific numbered content row with a Mojo wheel event, and exercise text editing plus selection replacement semantics.
+`OwlLayerHostVerifier` is the current first architecture gate. Swift loads the OWL bridge dylib, launches Content Shell through Mojo, waits for Chromium to publish a browser-process portal `CAContext` id over Mojo, hosts that id in a native `CALayerHost`, screenshots the Swift-owned host window, and checks the pixels. Swift host requests now go through generated transport types from `Mojo/OwlFresh.mojom`; the C ABI bridge is only the current low-level shim. `Scripts/run-layer-host-fixture-verifier-gui.sh` uses a Chromium-owned layer fixture context to prove the Mojo plus native display plumbing. `Scripts/run-layer-host-verifier-gui.sh` uses the real Chromium compositor portal and runs a deterministic canvas fixture plus `https://example.com/` by default. Set `OWL_LAYER_HOST_INPUT_CHECK=1` to also verify real mouse/key input changes web content from `OWL_INPUT_READY` to `OWL_INPUT_CLICKED`, type into a form field, check a checkbox, click submit, verify Command, Option, Control, and Shift modifier key delivery, resize the hosted browser surface, scroll to a specific numbered content row with a Mojo wheel event, and exercise text editing plus selection replacement semantics.
 
 `OwlLayerHostSelfTest` is the smallest local rendering gate. Direct mode draws deterministic red, green, blue, and text layers into a normal Swift layer-backed `NSWindow`, proving the window capture environment. Layer-host mode creates a private `CAContext` in Swift, draws the same layers into it, hosts that context in the same Swift `CALayerHost` window path, screenshots the window, and checks the pixels. This isolates whether `CAContext` plus `CALayerHost` plus screenshot capture works before involving Chromium.
 
@@ -47,7 +47,10 @@ OWL_LAYER_HOST_INPUT_CHECK=1 ./Scripts/run-layer-host-verifier-gui.sh
 The input run writes before/after PNG pairs for the click, form, modifier,
 resize-small, resize-roundtrip, scroll, and text-edit fixtures. With
 `OWL_LAYER_HOST_INPUT_DIAGNOSTIC_CAPTURE=1`, it also writes post-input Mojo
-surface captures and DOM-state JSON for each input fixture.
+surface captures and DOM-state JSON for each input fixture. Set
+`OWL_LAYER_HOST_ONLY_TARGETS=scroll-fixture,text-edit-fixture` to run a smaller
+visual batch; every run writes `generated-transport-report.html` plus
+per-capture generated transport trace JSON.
 
 Generate or check Swift bindings from the Mojo source:
 

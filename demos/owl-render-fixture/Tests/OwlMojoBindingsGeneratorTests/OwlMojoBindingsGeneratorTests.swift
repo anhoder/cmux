@@ -1,4 +1,5 @@
 import XCTest
+import OwlMojoBindingsGenerated
 @testable import OwlMojoBindingsGeneratorCore
 
 final class OwlMojoBindingsGeneratorTests: XCTestCase {
@@ -39,6 +40,8 @@ final class OwlMojoBindingsGeneratorTests: XCTestCase {
         XCTAssertTrue(result.swift.contains("public let deltaX: Float"))
         XCTAssertTrue(result.swift.contains("public struct OwlFreshHostResizeRequest"))
         XCTAssertTrue(result.swift.contains("func resize(_ request: OwlFreshHostResizeRequest)"))
+        XCTAssertTrue(result.swift.contains("public final class GeneratedOwlFreshHostMojoTransport"))
+        XCTAssertTrue(result.swift.contains("public private(set) var recordedCalls"))
         XCTAssertTrue(result.swift.contains("public static let sourceChecksum = \"\(result.checksum)\""))
     }
 
@@ -57,6 +60,32 @@ final class OwlMojoBindingsGeneratorTests: XCTestCase {
         XCTAssertTrue(report.contains("OwlFreshMouseKind"))
         XCTAssertTrue(report.contains(result.checksum))
         XCTAssertTrue(report.contains("protocol OwlFreshHostMojoInterface"))
+    }
+
+    func testGeneratedHostTransportRecordsAndForwardsCalls() throws {
+        let sink = FakeHostSink()
+        let transport = GeneratedOwlFreshHostMojoTransport(sink: sink)
+
+        transport.navigate("https://example.com/")
+        transport.resize(OwlFreshHostResizeRequest(width: 960, height: 640, scale: 1.0))
+        transport.sendMouse(OwlFreshMouseEvent(
+            kind: .wheel,
+            x: 520,
+            y: 520,
+            button: 0,
+            clickCount: 0,
+            deltaX: 0,
+            deltaY: -900,
+            modifiers: 0
+        ))
+        transport.sendKey(OwlFreshKeyEvent(keyDown: true, keyCode: 83, text: "S", modifiers: 1))
+
+        XCTAssertEqual(sink.calls, ["navigate", "resize", "sendMouse", "sendKey"])
+        XCTAssertEqual(transport.recordedCalls.map(\.method), ["navigate", "resize", "sendMouse", "sendKey"])
+        XCTAssertEqual(transport.recordedCalls.map(\.interface), Array(repeating: "OwlFreshHost", count: 4))
+        XCTAssertEqual(transport.recordedCalls[1].payloadType, "OwlFreshHostResizeRequest")
+        XCTAssertEqual(transport.recordedCalls[2].payloadType, "OwlFreshMouseEvent")
+        XCTAssertTrue(transport.recordedCalls[3].payloadSummary.contains("keyCode: 83"))
     }
 
     private let sampleMojo = """
@@ -78,4 +107,37 @@ final class OwlMojoBindingsGeneratorTests: XCTestCase {
       CaptureSurface() => (OwlFreshMouseEvent result);
     };
     """
+}
+
+private final class FakeHostSink: OwlFreshHostMojoSink {
+    var calls: [String] = []
+
+    func setClient(_ client: OwlFreshClientRemote) {
+        calls.append("setClient")
+    }
+
+    func navigate(_ url: String) {
+        calls.append("navigate")
+    }
+
+    func resize(_ request: OwlFreshHostResizeRequest) {
+        calls.append("resize")
+    }
+
+    func setFocus(_ focused: Bool) {
+        calls.append("setFocus")
+    }
+
+    func sendMouse(_ event: OwlFreshMouseEvent) {
+        calls.append("sendMouse")
+    }
+
+    func sendKey(_ event: OwlFreshKeyEvent) {
+        calls.append("sendKey")
+    }
+
+    func captureSurface() async throws -> OwlFreshCaptureResult {
+        calls.append("captureSurface")
+        return OwlFreshCaptureResult(png: [], width: 0, height: 0, captureMode: "fake", error: "")
+    }
 }
