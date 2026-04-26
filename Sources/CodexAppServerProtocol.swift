@@ -18,12 +18,12 @@ enum CodexAppServerJSONValue: Codable, Equatable {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self = .null
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
         } else if let value = try? container.decode([CodexAppServerJSONValue].self) {
             self = .array(value)
         } else if let value = try? container.decode([String: CodexAppServerJSONValue].self) {
@@ -58,20 +58,23 @@ enum CodexAppServerJSONValue: Codable, Equatable {
         if value is NSNull {
             return .null
         }
-        if let value = value as? Bool {
-            return .bool(value)
-        }
         if let value = value as? String {
             return .string(value)
+        }
+        if let value = value as? NSNumber {
+            if CFGetTypeID(value) == CFBooleanGetTypeID() {
+                return .bool(value.boolValue)
+            }
+            return .number(value.doubleValue)
+        }
+        if let value = value as? Bool {
+            return .bool(value)
         }
         if let value = value as? Int {
             return .number(Double(value))
         }
         if let value = value as? Double {
             return .number(value)
-        }
-        if let value = value as? NSNumber {
-            return .number(value.doubleValue)
         }
         if let value = value as? [Any] {
             return .array(value.map(CodexAppServerJSONValue.fromAny))
@@ -126,7 +129,7 @@ struct CodexAppServerServerNotification: Equatable {
 }
 
 struct CodexAppServerServerRequest: Equatable {
-    let id: Int
+    let id: CodexAppServerRequestID
     let method: CodexAppServerServerRequestMethod?
     let rawMethod: String
     let params: CodexAppServerJSONValue?
@@ -139,11 +142,15 @@ struct CodexAppServerServerRequest: Equatable {
         params?.objectValue
     }
 
-    init(id: Int, method: String, params: Any?) {
+    init(id: CodexAppServerRequestID, method: String, params: Any?) {
         self.id = id
         self.method = CodexAppServerServerRequestMethod(rawValue: method)
         self.rawMethod = method
         self.params = params.map(CodexAppServerJSONValue.fromAny)
+    }
+
+    init(id: Int, method: String, params: Any?) {
+        self.init(id: .int(id), method: method, params: params)
     }
 }
 

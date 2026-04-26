@@ -46,6 +46,12 @@ final class HeightIndexTests: XCTestCase {
         XCTAssertEqual(index.indexRange(intersectingOffset: 0, length: 5), 0..<1)
     }
 
+    func testVisibleRangeIncludesFractionalRowsAtUpperEdge() {
+        let index = CodexTrajectoryHeightIndex(heights: [0.2, 0.2, 0.2])
+
+        XCTAssertEqual(index.indexRange(intersectingOffset: 0, length: 0.4), 0..<2)
+    }
+
     func testLargeHeightIndexStressLookup() {
         let heights = (0..<50_000).map { CGFloat(($0 % 7) + 1) }
         let index = CodexTrajectoryHeightIndex(heights: heights)

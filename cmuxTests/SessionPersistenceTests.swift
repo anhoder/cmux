@@ -47,6 +47,32 @@ final class SessionPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceSessionSnapshotRestoresCodexAppServerThreadId() throws {
+        let workspace = Workspace()
+        let paneId = try XCTUnwrap(workspace.bonsplitController.allPaneIds.first)
+        let panel = try XCTUnwrap(
+            workspace.newCodexAppServerSurface(
+                inPane: paneId,
+                cwd: "/tmp/codex-project",
+                resumeThreadId: " thread-123 ",
+                focus: true
+            )
+        )
+
+        let snapshot = workspace.sessionSnapshot(includeScrollback: false)
+        let panelSnapshot = try XCTUnwrap(snapshot.panels.first { $0.id == panel.id })
+        XCTAssertEqual(panelSnapshot.codexAppServer?.threadId, "thread-123")
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.codexAppServerPanel(for: restoredPanelId))
+        XCTAssertEqual(restoredPanel.cwd, "/tmp/codex-project")
+        XCTAssertEqual(restoredPanel.resumableThreadId, "thread-123")
+    }
+
+    @MainActor
     func testSessionSnapshotSkipsTransientRemoteListeningPorts() throws {
         let workspace = Workspace()
         let panelId = try XCTUnwrap(workspace.focusedPanelId)

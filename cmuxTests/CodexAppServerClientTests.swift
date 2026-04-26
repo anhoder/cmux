@@ -10,6 +10,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
     func testInitializeRequestUsesCodexAppServerHandshakeShape() throws {
         let request = CodexAppServerRequestFactory.initializeRequest(id: 42)
 
+        XCTAssertEqual(request["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(request["id"] as? Int, 42)
         XCTAssertEqual(request["method"] as? String, "initialize")
 
@@ -26,6 +27,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
     func testInitializedNotificationHasNoRequestId() {
         let notification = CodexAppServerRequestFactory.initializedNotification()
 
+        XCTAssertEqual(notification["jsonrpc"] as? String, "2.0")
         XCTAssertNil(notification["id"])
         XCTAssertEqual(notification["method"] as? String, "initialized")
     }
@@ -36,6 +38,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             cwd: "/Users/cmux/project"
         )
 
+        XCTAssertEqual(request["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(request["id"] as? Int, 7)
         XCTAssertEqual(request["method"] as? String, "thread/start")
 
@@ -52,6 +55,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             cwd: "/Users/cmux/project"
         )
 
+        XCTAssertEqual(request["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(request["id"] as? Int, 8)
         XCTAssertEqual(request["method"] as? String, "thread/resume")
 
@@ -68,6 +72,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             cwd: "/Users/cmux/project"
         )
 
+        XCTAssertEqual(request["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(request["id"] as? Int, 9)
         XCTAssertEqual(request["method"] as? String, "turn/start")
 
@@ -88,6 +93,7 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             result: ["decision": "accept"]
         )
 
+        XCTAssertEqual(response["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(response["id"] as? Int, 12)
         XCTAssertNil(response["method"])
         let result = try XCTUnwrap(response["result"] as? [String: Any])
@@ -100,10 +106,21 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             message: "unsupported"
         )
 
+        XCTAssertEqual(response["jsonrpc"] as? String, "2.0")
         XCTAssertEqual(response["id"] as? Int, 13)
         let error = try XCTUnwrap(response["error"] as? [String: Any])
         XCTAssertEqual(error["message"] as? String, "unsupported")
         XCTAssertNotNil(error["code"] as? Int)
+    }
+
+    func testResponseObjectPreservesStringRequestId() throws {
+        let response = CodexAppServerRequestFactory.response(
+            id: .string("request-abc"),
+            result: ["decision": "accept"]
+        )
+
+        XCTAssertEqual(response["jsonrpc"] as? String, "2.0")
+        XCTAssertEqual(response["id"] as? String, "request-abc")
     }
 
     func testAppServerEnvironmentIncludesNodeVersionManagerPaths() throws {
@@ -592,9 +609,37 @@ final class CodexAppServerRequestFactoryTests: XCTestCase {
             method: "item/permissions/requestApproval",
             params: ["reason": "test"]
         )
-        XCTAssertEqual(request.id, 88)
+        XCTAssertEqual(request.id, .int(88))
         XCTAssertEqual(request.method, .itemPermissionsRequestApproval)
         XCTAssertEqual(request.paramsObject?["reason"] as? String, "test")
+    }
+
+    func testProtocolJSONValuePreservesNumericZeroOneValues() {
+        let object = CodexAppServerJSONValue.fromAny([
+            "zero": NSNumber(value: 0),
+            "one": NSNumber(value: 1),
+            "flag": NSNumber(value: true),
+        ])
+        let values = object.objectValue
+
+        XCTAssertEqual(values?["zero"] as? Double, 0)
+        XCTAssertEqual(values?["one"] as? Double, 1)
+        XCTAssertEqual(values?["flag"] as? Bool, true)
+    }
+
+    func testApprovalRequestSupportIncludesCurrentAndLegacyMethods() {
+        let supportedMethods = [
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+            "applyPatchApproval",
+            "execCommandApproval",
+        ]
+
+        for method in supportedMethods {
+            let request = CodexAppServerPendingRequest(id: .int(1), method: method, params: nil, summary: "")
+            XCTAssertTrue(request.supportsDecisionResponse, "Expected \(method) to support decision responses")
+        }
     }
 
     func testTranscriptDisplayCollapsesOnlyCurrentTurnProgress() {

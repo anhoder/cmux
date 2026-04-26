@@ -495,6 +495,7 @@ extension Workspace {
         let terminalSnapshot: SessionTerminalPanelSnapshot?
         let browserSnapshot: SessionBrowserPanelSnapshot?
         let markdownSnapshot: SessionMarkdownPanelSnapshot?
+        let codexSnapshot: SessionCodexAppServerPanelSnapshot?
         switch panel.panelType {
         case .terminal:
             guard let terminalPanel = panel as? TerminalPanel else { return nil }
@@ -519,6 +520,7 @@ extension Workspace {
             )
             browserSnapshot = nil
             markdownSnapshot = nil
+            codexSnapshot = nil
         case .browser:
             guard let browserPanel = panel as? BrowserPanel else { return nil }
             terminalSnapshot = nil
@@ -533,15 +535,19 @@ extension Workspace {
                 forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings
             )
             markdownSnapshot = nil
+            codexSnapshot = nil
         case .markdown:
             guard let markdownPanel = panel as? MarkdownPanel else { return nil }
             terminalSnapshot = nil
             browserSnapshot = nil
             markdownSnapshot = SessionMarkdownPanelSnapshot(filePath: markdownPanel.filePath)
+            codexSnapshot = nil
         case .codexAppServer:
+            guard let codexPanel = panel as? CodexAppServerPanel else { return nil }
             terminalSnapshot = nil
             browserSnapshot = nil
             markdownSnapshot = nil
+            codexSnapshot = SessionCodexAppServerPanelSnapshot(threadId: codexPanel.resumableThreadId)
         }
 
         return SessionPanelSnapshot(
@@ -557,7 +563,8 @@ extension Workspace {
             ttyName: ttyName,
             terminal: terminalSnapshot,
             browser: browserSnapshot,
-            markdown: markdownSnapshot
+            markdown: markdownSnapshot,
+            codexAppServer: codexSnapshot
         )
     }
 
@@ -782,6 +789,7 @@ extension Workspace {
             guard let codexPanel = newCodexAppServerSurface(
                 inPane: paneId,
                 cwd: snapshot.directory,
+                resumeThreadId: snapshot.codexAppServer?.threadId,
                 focus: false
             ) else {
                 return nil
@@ -9637,6 +9645,78 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     @discardableResult
+    func newCodexAppServerSplit(
+        from panelId: UUID,
+        orientation: SplitOrientation,
+        insertFirst: Bool = false,
+        cwd: String? = nil,
+        resumeThreadId: String? = nil,
+        focus: Bool = true
+    ) -> CodexAppServerPanel? {
+        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
+        var sourcePaneId: PaneID?
+        for paneId in bonsplitController.allPaneIds {
+            let tabs = bonsplitController.tabs(inPane: paneId)
+            if tabs.contains(where: { $0.id == sourceTabId }) {
+                sourcePaneId = paneId
+                break
+            }
+        }
+
+        guard let paneId = sourcePaneId else { return nil }
+
+        let requestedCwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedCwd = (requestedCwd?.isEmpty == false ? requestedCwd : nil)
+            ?? panelDirectories[panelId]
+            ?? currentDirectory
+        let codexPanel = CodexAppServerPanel(
+            workspaceId: id,
+            cwd: resolvedCwd,
+            resumeThreadId: resumeThreadId
+        )
+        panels[codexPanel.id] = codexPanel
+        panelTitles[codexPanel.id] = codexPanel.displayTitle
+
+        let newTab = Bonsplit.Tab(
+            title: codexPanel.displayTitle,
+            icon: codexPanel.displayIcon,
+            kind: SurfaceKind.codexAppServer,
+            isDirty: codexPanel.isDirty,
+            isLoading: false,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = codexPanel.id
+        let previousFocusedPanelId = focusedPanelId
+
+        isProgrammaticSplit = true
+        defer { isProgrammaticSplit = false }
+        guard bonsplitController.splitPane(paneId, orientation: orientation, withTab: newTab, insertFirst: insertFirst) != nil else {
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            panels.removeValue(forKey: codexPanel.id)
+            panelTitles.removeValue(forKey: codexPanel.id)
+            return nil
+        }
+
+        let previousHostedView = focusedTerminalPanel?.hostedView
+        if focus {
+            previousHostedView?.suppressReparentFocus()
+            focusPanel(codexPanel.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                previousHostedView?.clearSuppressReparentFocus()
+            }
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: codexPanel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        installCodexAppServerPanelSubscription(codexPanel)
+        return codexPanel
+    }
+
+    @discardableResult
     func newCodexAppServerSurface(
         inPane paneId: PaneID,
         cwd: String? = nil,
@@ -10189,6 +10269,9 @@ final class Workspace: Identifiable, ObservableObject {
                 remoteStatus: browserRemoteWorkspaceStatusSnapshot()
             )
             installBrowserPanelSubscription(browserPanel)
+        } else if let codexPanel = detached.panel as? CodexAppServerPanel {
+            codexPanel.reattachToWorkspace(id, cwd: detached.directory)
+            installCodexAppServerPanelSubscription(codexPanel)
         }
 
         if let directory = detached.directory {
@@ -12799,6 +12882,8 @@ extension Workspace: BonsplitDelegate {
             closeTabs(tabIdsToCloseOthers(of: tab.id, inPane: pane))
         case .move:
             promptMovePanel(tabId: tab.id)
+        case .moveToLeftPane, .moveToRightPane:
+            break
         case .newTerminalToRight:
             createTerminalToRight(of: tab.id, inPane: pane)
         case .newBrowserToRight:

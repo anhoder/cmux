@@ -6412,6 +6412,17 @@ class TerminalController {
                     url: url,
                     focus: v2FocusAllowed()
                 )?.id
+            } else if panelType == .codexAppServer {
+                let cwd = v2RawString(params, "cwd")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let threadId = v2RawString(params, "thread_id")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                newPanelId = ws.newCodexAppServerSplit(
+                    from: focusedPanelId,
+                    orientation: orientation,
+                    insertFirst: insertFirst,
+                    cwd: cwd?.isEmpty == false ? cwd : nil,
+                    resumeThreadId: threadId?.isEmpty == false ? threadId : nil,
+                    focus: v2FocusAllowed()
+                )?.id
             } else {
                 newPanelId = ws.newTerminalSplit(
                     from: focusedPanelId,

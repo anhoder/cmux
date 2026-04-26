@@ -78,14 +78,22 @@ struct CodexAppServerTranscriptItem: Identifiable, Equatable, Sendable {
 }
 
 struct CodexAppServerPendingRequest: Identifiable {
-    let id: Int
+    let id: CodexAppServerRequestID
     let method: String
     let params: [String: Any]?
     let summary: String
 
     var supportsDecisionResponse: Bool {
-        method == "item/commandExecution/requestApproval"
-            || method == "item/fileChange/requestApproval"
+        switch method {
+        case "item/commandExecution/requestApproval",
+             "item/fileChange/requestApproval",
+             "item/permissions/requestApproval",
+             "applyPatchApproval",
+             "execCommandApproval":
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -147,9 +155,12 @@ final class CodexAppServerPanel: Panel, ObservableObject {
     private var threadId: String?
     private var currentTurnId: String?
     private var activeAssistantItemId: UUID?
+    private var activeCommandOutputItemIDs: [String: UUID] = [:]
+    private var anonymousCommandOutputItemID: UUID?
     private var isStarted = false
     private var isClosed = false
     private var didResumeInitialThread = false
+    private var lifecycleGeneration = 0
 
     var displayTitle: String {
         String(localized: "codexAppServer.panel.title", defaultValue: "Codex")
@@ -161,6 +172,13 @@ final class CodexAppServerPanel: Panel, ObservableObject {
 
     var canSendPrompt: Bool {
         !status.isBusy && !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var resumableThreadId: String? {
+        if let current = normalizedThreadId(threadId) {
+            return current
+        }
+        return normalizedThreadId(initialResumeThreadId)
     }
 
     init(
@@ -188,9 +206,14 @@ final class CodexAppServerPanel: Panel, ObservableObject {
 
     func start() async {
         guard !isStarted, status != .starting else { return }
+        let generation = lifecycleGeneration
         status = .starting
         do {
             try await client.startAndInitialize()
+            guard isCurrentLifecycle(generation) else {
+                client.stop()
+                return
+            }
             isStarted = true
             if let initialResumeThreadId, !initialResumeThreadId.isEmpty, !didResumeInitialThread {
                 status = .running
@@ -198,22 +221,33 @@ final class CodexAppServerPanel: Panel, ObservableObject {
                     threadId: initialResumeThreadId,
                     cwd: currentWorkingDirectory()
                 )
+                guard isCurrentLifecycle(generation) else {
+                    client.stop()
+                    return
+                }
                 didResumeInitialThread = true
                 let snapshot = applyResumeResponse(response, fallbackThreadId: initialResumeThreadId)
                 if snapshot.responseWasTruncated {
                     await loadLocalHistory(for: snapshot.threadId)
+                }
+                guard isCurrentLifecycle(generation) else {
+                    client.stop()
+                    return
                 }
                 status = .ready
             } else {
                 status = .ready
             }
         } catch {
+            guard isCurrentLifecycle(generation) else { return }
+            isStarted = false
             status = .failed(error.localizedDescription)
             appendError(error.localizedDescription)
         }
     }
 
     func stop() {
+        lifecycleGeneration += 1
         if isStarted {
             client.stop()
         }
@@ -221,6 +255,9 @@ final class CodexAppServerPanel: Panel, ObservableObject {
         threadId = nil
         currentTurnId = nil
         activeAssistantItemId = nil
+        activeCommandOutputItemIDs.removeAll(keepingCapacity: false)
+        anonymousCommandOutputItemID = nil
+        didResumeInitialThread = false
         pendingRequests.removeAll()
         status = .stopped
     }
@@ -232,6 +269,7 @@ final class CodexAppServerPanel: Panel, ObservableObject {
         appendUser(text)
 
         do {
+            status = .running
             if !isStarted {
                 await start()
             }
@@ -245,7 +283,6 @@ final class CodexAppServerPanel: Panel, ObservableObject {
                 resolvedThreadId = newThreadId
             }
 
-            status = .running
             currentTurnId = try await client.startTurn(
                 threadId: resolvedThreadId,
                 text: text,
@@ -284,6 +321,7 @@ final class CodexAppServerPanel: Panel, ObservableObject {
 
     func close() {
         isClosed = true
+        lifecycleGeneration += 1
         stop()
     }
 
@@ -293,6 +331,17 @@ final class CodexAppServerPanel: Panel, ObservableObject {
 
     func triggerFlash(reason: WorkspaceAttentionFlashReason) {
         _ = reason
+    }
+
+    func reattachToWorkspace(_ workspaceId: UUID, cwd: String?) {
+        self.workspaceId = workspaceId
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            self.cwd = cwd
+        }
+    }
+
+    private func isCurrentLifecycle(_ generation: Int) -> Bool {
+        !isClosed && lifecycleGeneration == generation
     }
 
     private func handle(_ event: CodexAppServerEvent) {
@@ -317,14 +366,26 @@ final class CodexAppServerPanel: Panel, ObservableObject {
             append(
                 role: .stderr,
                 title: String(localized: "codexAppServer.event.stderr", defaultValue: "stderr"),
-                body: text.trimmingCharacters(in: .whitespacesAndNewlines)
+                body: text,
+                preservesBodyWhitespace: true
             )
         case .terminated(let statusCode):
             isStarted = false
-            status = .stopped
+            status = .failed(
+                String(
+                    format: String(
+                        localized: "codexAppServer.error.terminatedUnexpectedly",
+                        defaultValue: "Codex app-server exited unexpectedly with status %1$ld."
+                    ),
+                    locale: Locale.current,
+                    Int(statusCode)
+                )
+            )
             threadId = nil
             currentTurnId = nil
             activeAssistantItemId = nil
+            activeCommandOutputItemIDs.removeAll(keepingCapacity: false)
+            anonymousCommandOutputItemID = nil
             pendingRequests.removeAll()
             appendEvent(
                 title: String(localized: "codexAppServer.event.terminated", defaultValue: "App server exited"),
@@ -352,7 +413,19 @@ final class CodexAppServerPanel: Panel, ObservableObject {
         case "item/agentMessage/delta":
             appendAssistantDelta(Self.stringValue(named: "delta", in: params))
         case "item/commandExecution/outputDelta":
-            appendCommandDelta(Self.stringValue(named: "delta", in: params))
+            appendCommandDelta(
+                Self.stringValue(named: "delta", in: params),
+                itemId: Self.stringValue(named: "itemId", in: params)
+                    ?? Self.stringValue(named: "id", in: params)
+            )
+        case "item/commandExecution/stderrDelta":
+            appendCommandDelta(
+                Self.stringValue(named: "delta", in: params),
+                itemId: Self.stringValue(named: "itemId", in: params)
+                    ?? Self.stringValue(named: "id", in: params)
+            )
+        case "serverRequest/resolved":
+            removeResolvedServerRequest(params)
         case "item/completed":
             handleCompletedItem(params?["item"] as? [String: Any])
         case "thread/compacted":
@@ -384,6 +457,7 @@ final class CodexAppServerPanel: Panel, ObservableObject {
                 finishStreamingAssistant()
             }
         case "commandExecution":
+            finishCommandOutput(for: Self.itemIdentifier(from: item))
             appendEvent(
                 title: String(localized: "codexAppServer.event.command", defaultValue: "Command"),
                 body: Self.commandSummary(from: item),
@@ -427,20 +501,54 @@ final class CodexAppServerPanel: Panel, ObservableObject {
         }
     }
 
-    private func appendCommandDelta(_ delta: String?) {
+    private func appendCommandDelta(_ delta: String?, itemId: String?) {
         guard let delta, !delta.isEmpty else { return }
-        if let index = transcriptItems.indices.last,
-           transcriptItems[index].presentation == .commandOutput {
+
+        let normalizedItemId = itemId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputItemId: UUID?
+        if let normalizedItemId, !normalizedItemId.isEmpty {
+            outputItemId = activeCommandOutputItemIDs[normalizedItemId]
+        } else {
+            outputItemId = anonymousCommandOutputItemID
+        }
+
+        if let outputItemId,
+           let index = transcriptItems.firstIndex(where: { $0.id == outputItemId }) {
             transcriptItems[index].body = Self.truncatedTranscriptBody(transcriptItems[index].body + delta)
             transcriptItems[index].date = Date()
             return
         }
-        append(
+
+        let item = CodexAppServerTranscriptItem(
             role: .event,
             title: String(localized: "codexAppServer.event.output", defaultValue: "Output"),
             body: delta,
+            isStreaming: true,
             presentation: .commandOutput
         )
+        transcriptItems.append(item)
+        if let normalizedItemId, !normalizedItemId.isEmpty {
+            activeCommandOutputItemIDs[normalizedItemId] = item.id
+        } else {
+            anonymousCommandOutputItemID = item.id
+        }
+        trimTranscriptItemsIfNeeded()
+    }
+
+    private func finishCommandOutput(for itemId: String?) {
+        let normalizedItemId = itemId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputItemId: UUID?
+        if let normalizedItemId, !normalizedItemId.isEmpty {
+            outputItemId = activeCommandOutputItemIDs.removeValue(forKey: normalizedItemId)
+        } else {
+            outputItemId = anonymousCommandOutputItemID
+            anonymousCommandOutputItemID = nil
+        }
+        guard let outputItemId,
+              let index = transcriptItems.firstIndex(where: { $0.id == outputItemId }) else {
+            return
+        }
+        transcriptItems[index].isStreaming = false
     }
 
     private func finishStreamingAssistant() {
@@ -685,9 +793,11 @@ final class CodexAppServerPanel: Panel, ObservableObject {
         role: CodexAppServerTranscriptRole,
         title: String,
         body: String,
-        presentation: CodexAppServerTranscriptPresentation = .plain
+        presentation: CodexAppServerTranscriptPresentation = .plain,
+        preservesBodyWhitespace: Bool = false
     ) {
-        let trimmedBody = Self.truncatedTranscriptBody(body.trimmingCharacters(in: .whitespacesAndNewlines))
+        let rawBody = preservesBodyWhitespace ? body : body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = Self.truncatedTranscriptBody(rawBody)
         guard !trimmedBody.isEmpty else { return }
         transcriptItems.append(
             CodexAppServerTranscriptItem(
@@ -720,11 +830,28 @@ final class CodexAppServerPanel: Panel, ObservableObject {
     }
 
     private func removePendingRequest(id: Int) {
+        removePendingRequest(id: .int(id))
+    }
+
+    private func removePendingRequest(id: CodexAppServerRequestID) {
         pendingRequests.removeAll { $0.id == id }
+    }
+
+    private func removeResolvedServerRequest(_ params: [String: Any]?) {
+        for key in ["id", "requestId", "requestID", "serverRequestId"] {
+            guard let id = Self.requestIDValue(named: key, in: params) else { continue }
+            removePendingRequest(id: id)
+            return
+        }
     }
 
     private func currentWorkingDirectory() -> String {
         cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedThreadId(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func stringValue(named key: String, in object: [String: Any]?) -> String? {
@@ -736,6 +863,31 @@ final class CodexAppServerPanel: Panel, ObservableObject {
             return value.stringValue
         }
         return nil
+    }
+
+    private static func requestIDValue(named key: String, in object: [String: Any]?) -> CodexAppServerRequestID? {
+        guard let value = object?[key] else { return nil }
+        if let value = value as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            if let intValue = Int(trimmed) {
+                return .int(intValue)
+            }
+            return .string(trimmed)
+        }
+        if let value = value as? Int {
+            return .int(value)
+        }
+        if let value = value as? NSNumber,
+           CFGetTypeID(value) != CFBooleanGetTypeID() {
+            return .int(value.intValue)
+        }
+        return nil
+    }
+
+    private static func itemIdentifier(from item: [String: Any]) -> String? {
+        stringValue(named: "id", in: item)
+            ?? stringValue(named: "itemId", in: item)
     }
 
     private static func dateValue(named key: String, in object: [String: Any]?) -> Date? {
@@ -834,8 +986,14 @@ enum CodexSessionHistoryLoader {
     }
 
     private static func defaultSearchRoots() -> [URL] {
-        let codexHome = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex", isDirectory: true)
+        let environment = ProcessInfo.processInfo.environment
+        let configuredCodexHome = environment["CODEX_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codexHome = if let configuredCodexHome, !configuredCodexHome.isEmpty {
+            URL(fileURLWithPath: configuredCodexHome, isDirectory: true)
+        } else {
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex", isDirectory: true)
+        }
         return [
             codexHome.appendingPathComponent("sessions", isDirectory: true),
             codexHome.appendingPathComponent("archived_sessions", isDirectory: true),

@@ -32,4 +32,15 @@ final class TrajectoryStoreTests: XCTestCase {
         XCTAssertEqual(store[id: "same"]?.kind, .stderr)
         XCTAssertEqual(store[id: "same"]?.text, "new")
     }
+
+    func testInitWithDuplicateIDsKeepsLastBlockWithoutCrashing() {
+        let store = CodexTrajectoryStore(blocks: [
+            CodexTrajectoryBlock(id: "same", kind: .status, text: "old"),
+            CodexTrajectoryBlock(id: "same", kind: .stderr, text: "new"),
+        ])
+
+        XCTAssertEqual(store.count, 1)
+        XCTAssertEqual(store[id: "same"]?.kind, .stderr)
+        XCTAssertEqual(store[id: "same"]?.text, "new")
+    }
 }

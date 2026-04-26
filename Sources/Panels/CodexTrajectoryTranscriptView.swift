@@ -1095,6 +1095,7 @@ final class CodexTrajectoryTranscriptScrollView: NSScrollView {
         hasHorizontalScroller = false
         autohidesScrollers = true
         borderType = .noBorder
+        contentInsets = NSEdgeInsets(top: 18, left: 0, bottom: 92, right: 0)
         documentView = trajectoryView
         backgroundObserver = NotificationCenter.default.addObserver(
             forName: .ghosttyDefaultBackgroundDidChange,
@@ -1121,7 +1122,7 @@ final class CodexTrajectoryTranscriptScrollView: NSScrollView {
     }
 
     fileprivate func update(entries: [CodexTrajectoryTranscriptDisplayEntry]) {
-        let shouldStickToBottom = isScrolledNearBottom || entries.count > self.entries.count
+        let shouldStickToBottom = isScrolledNearBottom
         self.entries = entries
         reloadPreservingScroll(stickToBottom: shouldStickToBottom)
     }
@@ -1220,15 +1221,16 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
     private var pageEntries: [PageEntry] = []
     private var heightIndex = CodexTrajectoryHeightIndex()
     private var cachedLayouts: [LayoutCacheKey: CachedLayout] = [:]
+    private var activeLayoutCacheKeys: Set<LayoutCacheKey> = []
     private var expandedAccordionIDs: Set<String> = []
     private var expansionAnimations: [String: ExpansionAnimation] = [:]
     private var textSelection: TextSelection?
     private var isSelectingText = false
     private var animationTimer: Timer?
     private var documentWidth: CGFloat = 1
-    private let horizontalInset: CGFloat = 32
-    private let maxContentWidth: CGFloat = 1_520
-    private let maxUserBubbleWidth: CGFloat = 1_120
+    private let horizontalInset: CGFloat = 24
+    private let maxContentWidth: CGFloat = 740
+    private let maxUserBubbleWidth: CGFloat = 740
     private let rowSpacing: CGFloat = 16
     private let accordionHeaderTitleHeight: CGFloat = 28
     private let accordionSummaryRowHeight: CGFloat = 23
@@ -1263,10 +1265,22 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
         expandedAccordionIDs.formIntersection(activeAccordionIDs)
         expansionAnimations = expansionAnimations.filter { activeAccordionIDs.contains($0.key) }
 
-        guard entries != self.entries || abs(normalizedWidth - documentWidth) > 0.5 else { return }
+        let oldContentWidth = contentWidth
+        let widthChanged = abs(normalizedWidth - documentWidth) > 0.5
+        let entriesChanged = entries != self.entries
+        guard entriesChanged || widthChanged else { return }
+
         self.entries = entries
         documentWidth = normalizedWidth
-        rebuildLayout()
+
+        let contentWidthChanged = abs(contentWidth - oldContentWidth) > 0.5
+        if entriesChanged || contentWidthChanged || pageEntries.isEmpty {
+            rebuildLayout()
+        } else {
+            setFrameSize(NSSize(width: documentWidth, height: max(1, heightIndex.totalHeight)))
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
     }
 
     fileprivate func invalidateTheme() {
@@ -1591,6 +1605,7 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
         let theme = Self.theme(for: effectiveAppearance)
         let layoutWidth = contentWidth
         pageEntries.removeAll(keepingCapacity: true)
+        activeLayoutCacheKeys.removeAll(keepingCapacity: true)
         var heights: [CGFloat] = []
 
         func appendEntry(_ entry: CodexTrajectoryTranscriptDisplayEntry) {
@@ -1701,9 +1716,7 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
             appendEntry(entry)
         }
 
-        if cachedLayouts.count > max(256, entries.count * 3) {
-            pruneLayoutCache()
-        }
+        pruneLayoutCache()
 
         heightIndex.replaceAll(with: heights)
         setFrameSize(NSSize(width: documentWidth, height: max(1, heightIndex.totalHeight)))
@@ -1727,6 +1740,7 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
             width: Int(width.rounded()),
             themeIdentifier: theme.identifier
         )
+        activeLayoutCacheKeys.insert(cacheKey)
         if let cached = cachedLayouts[cacheKey] {
             return cached.layout
         }
@@ -1745,7 +1759,7 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
         theme: CodexTrajectoryTheme
     ) -> CGFloat {
         guard entry.isUserMessage else { return contentWidth }
-        let maxWidth = min(maxUserBubbleWidth, contentWidth * 0.74)
+        let maxWidth = min(maxUserBubbleWidth, contentWidth * 0.86)
         guard maxWidth > 1 else { return 1 }
         let minWidth = min(maxWidth, 260)
         let rendered = codexTrajectoryRenderedText(for: entry.block, theme: theme)
@@ -2338,7 +2352,7 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
         let measuredTitleWidth = min(titleWidth, measureTextWidth(entry.title, font: titleFont))
         drawChevron(
             progress: expansionProgress(for: entry.id),
-            center: CGPoint(x: textX + measuredTitleWidth + 14, y: rect.midY + 1),
+            center: CGPoint(x: textX + measuredTitleWidth + 14, y: rect.minY + 13),
             color: secondary.withAlphaComponent(0.86).cgColor,
             context: context
         )
@@ -2642,9 +2656,8 @@ private final class CodexTrajectoryTranscriptDocumentView: NSView, NSUserInterfa
     }
 
     private func pruneLayoutCache() {
-        let activeIDs = Set(entries.flatMap(\.blockIDs))
-        cachedLayouts = cachedLayouts.filter { _, value in
-            activeIDs.contains(value.block.id)
+        cachedLayouts = cachedLayouts.filter { key, _ in
+            activeLayoutCacheKeys.contains(key)
         }
     }
 

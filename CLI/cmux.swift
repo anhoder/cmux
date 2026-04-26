@@ -1840,9 +1840,10 @@ struct CMUXCLI {
         if command == "codex" {
             let sub = commandArgs.first?.lowercased() ?? "help"
             if sub == "help" || sub == "--help" || sub == "-h" {
-                if dispatchSubcommandHelp(command: command, commandArgs: commandArgs) {
-                    return
-                }
+                print("cmux codex")
+                print("")
+                print(codexCommandUsage())
+                return
             } else if sub == "install-hooks" {
                 try installAgentHooks(Self.agentDef(named: "codex")!)
                 return

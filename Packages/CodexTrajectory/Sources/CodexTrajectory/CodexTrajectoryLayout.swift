@@ -192,6 +192,8 @@ public struct CodexTrajectoryLayoutEngine {
         var current = 0
         var lines = 1
         var characters = 0
+        let resolvedPageLineLimit = max(1, pageLineLimit)
+        let resolvedMaximumPageCharacters = max(1, maximumPageCharacters)
 
         for character in text {
             current += character.utf16.count
@@ -200,7 +202,7 @@ public struct CodexTrajectoryLayoutEngine {
                 lines += 1
             }
 
-            if lines >= pageLineLimit || characters >= maximumPageCharacters {
+            if lines > resolvedPageLineLimit || characters >= resolvedMaximumPageCharacters {
                 ranges.append(CodexTrajectoryTextRange(location: start, length: current - start))
                 start = current
                 lines = 1

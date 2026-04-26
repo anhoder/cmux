@@ -97,7 +97,7 @@ public struct CodexTrajectoryHeightIndex: Sendable {
         let upper = min(totalHeight, offset + length + overscan)
         guard upper > lower,
               let start = index(containingOffset: lower),
-              let end = index(containingOffset: max(lower, upper - 0.5)) else {
+              let end = index(containingOffset: max(lower, upper.nextDown)) else {
             return 0..<0
         }
         return start..<min(end + 1, heights.count)

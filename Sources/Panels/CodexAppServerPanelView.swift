@@ -7,11 +7,8 @@ struct CodexAppServerPanelView: View {
     @FocusState private var promptFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            Divider()
+        ZStack(alignment: .bottom) {
             transcript
-            Divider()
             composer
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -28,62 +25,6 @@ struct CodexAppServerPanelView: View {
                 promptFocused = true
             }
         }
-    }
-
-    private var toolbar: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(statusForeground)
-                .frame(width: 7, height: 7)
-
-            Text(panel.status.localizedTitle)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 12)
-
-            Label(
-                String(localized: "codexAppServer.cwd.label", defaultValue: "Working directory"),
-                systemImage: "folder"
-            )
-            .labelStyle(.iconOnly)
-            .foregroundStyle(.secondary)
-
-            TextField(
-                String(localized: "codexAppServer.cwd.placeholder", defaultValue: "Working directory"),
-                text: $panel.cwd
-            )
-            .textFieldStyle(.plain)
-            .font(.system(size: 13, design: .monospaced))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.38), in: RoundedRectangle(cornerRadius: 7))
-            .frame(minWidth: 220, maxWidth: 360)
-
-            Button {
-                if showsStartButton {
-                    if !isStopped {
-                        panel.stop()
-                    }
-                    Task { await panel.start() }
-                } else {
-                    panel.stop()
-                }
-            } label: {
-                Image(systemName: showsStartButton ? "play.fill" : "stop.fill")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .frame(width: 26, height: 26)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.38), in: RoundedRectangle(cornerRadius: 7))
-            .accessibilityLabel(showsStartButton
-                ? String(localized: "codexAppServer.button.start", defaultValue: "Start")
-                : String(localized: "codexAppServer.button.stop", defaultValue: "Stop")
-            )
-            .disabled(panel.status == .starting)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 5)
     }
 
     private var transcript: some View {
@@ -104,6 +45,7 @@ struct CodexAppServerPanelView: View {
                 pendingRequests
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var pendingRequests: some View {
@@ -166,7 +108,6 @@ struct CodexAppServerPanelView: View {
                     .font(.system(size: 14, weight: .semibold))
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.return, modifiers: .command)
             .disabled(!panel.canSendPrompt)
             .foregroundStyle(panel.canSendPrompt ? .primary : .secondary)
             .frame(width: 28, height: 28)
@@ -174,46 +115,12 @@ struct CodexAppServerPanelView: View {
             .accessibilityLabel(String(localized: "codexAppServer.button.send", defaultValue: "Send"))
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.88), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.62), lineWidth: 1)
-        )
-        .frame(maxWidth: 1_180)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.82), in: RoundedRectangle(cornerRadius: 17))
+        .frame(maxWidth: 740)
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 24)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
-
-    private var isStopped: Bool {
-        if case .stopped = panel.status {
-            return true
-        }
-        return false
-    }
-
-    private var showsStartButton: Bool {
-        switch panel.status {
-        case .stopped, .failed:
-            return true
-        case .starting, .ready, .running:
-            return false
-        }
-    }
-
-    private var statusForeground: Color {
-        switch panel.status {
-        case .ready:
-            return .green
-        case .running, .starting:
-            return .blue
-        case .failed:
-            return .red
-        case .stopped:
-            return .secondary
-        }
+        .padding(.horizontal, 22)
+        .padding(.bottom, 16)
     }
 
 }

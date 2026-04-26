@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum CodexAppServerClientError: Error, LocalizedError {
@@ -11,17 +12,25 @@ enum CodexAppServerClientError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .alreadyRunning:
-            return "Codex app-server is already running."
+            return String(localized: "codexAppServer.error.alreadyRunning", defaultValue: "Codex app-server is already running.")
         case .notRunning:
-            return "Codex app-server is not running."
+            return String(localized: "codexAppServer.error.notRunning", defaultValue: "Codex app-server is not running.")
         case .processExited:
-            return "Codex app-server exited."
+            return String(localized: "codexAppServer.error.processExited", defaultValue: "Codex app-server exited.")
         case .invalidResponse(let message):
-            return "Invalid Codex app-server response: \(message)"
+            let format = String(
+                localized: "codexAppServer.error.invalidResponse",
+                defaultValue: "Invalid Codex app-server response: %@"
+            )
+            return String(format: format, locale: Locale.current, message)
         case .requestFailed(let message):
-            return "Codex app-server request failed: \(message)"
+            let format = String(
+                localized: "codexAppServer.error.requestFailed",
+                defaultValue: "Codex app-server request failed: %@"
+            )
+            return String(format: format, locale: Locale.current, message)
         case .writeFailed:
-            return "Failed to write to Codex app-server."
+            return String(localized: "codexAppServer.error.writeFailed", defaultValue: "Failed to write to Codex app-server.")
         }
     }
 }
@@ -33,6 +42,29 @@ enum CodexAppServerEvent {
     case terminated(Int32)
 }
 
+enum CodexAppServerRequestID: Hashable, Sendable, CustomStringConvertible {
+    case int(Int)
+    case string(String)
+
+    var jsonValue: Any {
+        switch self {
+        case .int(let value):
+            return value
+        case .string(let value):
+            return value
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .int(let value):
+            return String(value)
+        case .string(let value):
+            return value
+        }
+    }
+}
+
 struct CodexAppServerLaunchConfiguration: Equatable {
     var executablePath: String
     var arguments: [String]
@@ -42,6 +74,7 @@ struct CodexAppServerLaunchConfiguration: Equatable {
 enum CodexAppServerRequestFactory {
     static func request(id: Int, method: String, params: [String: Any]? = nil) -> [String: Any] {
         var object: [String: Any] = [
+            "jsonrpc": "2.0",
             "id": id,
             "method": method,
         ]
@@ -52,7 +85,10 @@ enum CodexAppServerRequestFactory {
     }
 
     static func notification(method: String, params: [String: Any]? = nil) -> [String: Any] {
-        var object: [String: Any] = ["method": method]
+        var object: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+        ]
         if let params {
             object["params"] = params
         }
@@ -60,15 +96,25 @@ enum CodexAppServerRequestFactory {
     }
 
     static func response(id: Int, result: [String: Any]) -> [String: Any] {
+        response(id: .int(id), result: result)
+    }
+
+    static func response(id: CodexAppServerRequestID, result: [String: Any]) -> [String: Any] {
         [
-            "id": id,
+            "jsonrpc": "2.0",
+            "id": id.jsonValue,
             "result": result,
         ]
     }
 
     static func errorResponse(id: Int, message: String) -> [String: Any] {
+        errorResponse(id: .int(id), message: message)
+    }
+
+    static func errorResponse(id: CodexAppServerRequestID, message: String) -> [String: Any] {
         [
-            "id": id,
+            "jsonrpc": "2.0",
+            "id": id.jsonValue,
             "error": [
                 "code": -32000,
                 "message": message,
@@ -220,9 +266,26 @@ final class CodexAppServerClient: @unchecked Sendable {
     private var stderrPipe: Pipe?
     private var stdoutLineBuffer = CodexAppServerLineBuffer()
     private var nextRequestId = 1
-    private var pending: [Int: PendingRequest] = [:]
+    private var pending: [CodexAppServerRequestID: PendingRequest] = [:]
+    private var eventHandler: EventHandler?
 
-    var onEvent: EventHandler?
+    var onEvent: EventHandler? {
+        get {
+            if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) === stateQueueIdentity {
+                return eventHandler
+            }
+            return stateQueue.sync { eventHandler }
+        }
+        set {
+            if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) === stateQueueIdentity {
+                eventHandler = newValue
+            } else {
+                stateQueue.sync {
+                    eventHandler = newValue
+                }
+            }
+        }
+    }
 
     init(callbackQueue: DispatchQueue = .main) {
         self.callbackQueue = callbackQueue
@@ -262,9 +325,14 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     func startAndInitialize() async throws {
-        try start()
-        _ = try await sendRequestObject(CodexAppServerRequestFactory.initializeRequest(id: nextId()))
-        try sendNotificationObject(CodexAppServerRequestFactory.initializedNotification())
+        do {
+            try start()
+            _ = try await sendRequestObject(CodexAppServerRequestFactory.initializeRequest(id: nextId()))
+            try sendNotificationObject(CodexAppServerRequestFactory.initializedNotification())
+        } catch {
+            stopSynchronously()
+            throw error
+        }
     }
 
     func startThread(cwd: String?) async throws -> String {
@@ -313,11 +381,11 @@ final class CodexAppServerClient: @unchecked Sendable {
         return turnId
     }
 
-    func respondToServerRequest(id: Int, result: [String: Any]) throws {
+    func respondToServerRequest(id: CodexAppServerRequestID, result: [String: Any]) throws {
         try sendResponseObject(CodexAppServerRequestFactory.response(id: id, result: result))
     }
 
-    func rejectServerRequest(id: Int, message: String) throws {
+    func rejectServerRequest(id: CodexAppServerRequestID, message: String) throws {
         try sendResponseObject(CodexAppServerRequestFactory.errorResponse(id: id, message: message))
     }
 
@@ -347,7 +415,7 @@ final class CodexAppServerClient: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         process.terminationHandler = { [weak self] process in
-            self?.handleTermination(status: process.terminationStatus)
+            self?.handleTermination(process: process, status: process.terminationStatus)
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -361,6 +429,10 @@ final class CodexAppServerClient: @unchecked Sendable {
                   let text = String(data: data, encoding: .utf8),
                   !text.isEmpty else { return }
             self?.emit(.stderr(text))
+        }
+
+        guard fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw CodexAppServerClientError.invalidResponse("failed to configure Codex app-server stdin pipe")
         }
 
         do {
@@ -390,6 +462,16 @@ final class CodexAppServerClient: @unchecked Sendable {
         stderrPipe = nil
         stdoutLineBuffer.removeAll(keepingCapacity: false)
         failPending(CodexAppServerClientError.processExited)
+    }
+
+    private func stopSynchronously() {
+        if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) === stateQueueIdentity {
+            stopLocked()
+        } else {
+            stateQueue.sync {
+                stopLocked()
+            }
+        }
     }
 
     static func appServerLaunchConfiguration(
@@ -567,7 +649,7 @@ final class CodexAppServerClient: @unchecked Sendable {
         maximumResponseBytesToParse: Int? = nil,
         oversizedResponseFallback: [String: Any]? = nil
     ) async throws -> [String: Any] {
-        guard let id = Self.integerId(from: object["id"]) else {
+        guard let id = Self.requestID(from: object["id"]) else {
             throw CodexAppServerClientError.invalidResponse("request object missing numeric id")
         }
 
@@ -650,6 +732,7 @@ final class CodexAppServerClient: @unchecked Sendable {
     private func handleStdoutLine(_ data: Data) {
         if let id = Self.responseId(in: data),
            let request = pending[id],
+           !Self.containsTopLevelKey("error", in: data),
            let fallback = request.fallbackIfOversized(byteCount: data.count) {
             pending.removeValue(forKey: id)
             request.continuation.resume(returning: fallback)
@@ -663,7 +746,7 @@ final class CodexAppServerClient: @unchecked Sendable {
             return
         }
 
-        if let id = Self.integerId(from: object["id"]),
+        if let id = Self.requestID(from: object["id"]),
            object["result"] != nil || object["error"] != nil {
             let request = pending.removeValue(forKey: id)
             if let errorObject = object["error"] as? [String: Any] {
@@ -679,15 +762,16 @@ final class CodexAppServerClient: @unchecked Sendable {
 
         guard let method = object["method"] as? String else { return }
         let params = object["params"]
-        if let id = Self.integerId(from: object["id"]) {
+        if let id = Self.requestID(from: object["id"]) {
             emit(.serverRequest(CodexAppServerServerRequest(id: id, method: method, params: params)))
         } else {
             emit(.notification(CodexAppServerServerNotification(method: method, params: params)))
         }
     }
 
-    private func handleTermination(status: Int32) {
+    private func handleTermination(process terminatedProcess: Process, status: Int32) {
         stateQueue.async {
+            guard self.process === terminatedProcess else { return }
             self.stdoutPipe?.fileHandleForReading.readabilityHandler = nil
             self.stderrPipe?.fileHandleForReading.readabilityHandler = nil
             self.process = nil
@@ -709,51 +793,142 @@ final class CodexAppServerClient: @unchecked Sendable {
     }
 
     private func emit(_ event: CodexAppServerEvent) {
-        callbackQueue.async { [weak self] in
-            self?.onEvent?(event)
+        let handler: EventHandler? = {
+            if DispatchQueue.getSpecific(key: Self.stateQueueSpecificKey) === stateQueueIdentity {
+                return eventHandler
+            }
+            return stateQueue.sync { eventHandler }
+        }()
+        guard let handler else { return }
+        callbackQueue.async {
+            handler(event)
         }
     }
 
-    private static func integerId(from value: Any?) -> Int? {
+    private static func requestID(from value: Any?) -> CodexAppServerRequestID? {
         if let value = value as? Int {
-            return value
+            return .int(value)
         }
         if let value = value as? NSNumber {
-            return value.intValue
+            guard !isBooleanNumber(value) else { return nil }
+            return .int(value.intValue)
+        }
+        if let value = value as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            if let intValue = Int(trimmed) {
+                return .int(intValue)
+            }
+            return .string(trimmed)
         }
         return nil
     }
 
-    private static func responseId(in data: Data) -> Int? {
-        guard let prefix = String(data: data.prefix(4096), encoding: .utf8) else {
-            return nil
-        }
+    private static func isBooleanNumber(_ value: NSNumber) -> Bool {
+        CFGetTypeID(value) == CFBooleanGetTypeID()
+    }
 
-        var searchStart = prefix.startIndex
-        while let idLabelRange = prefix.range(of: "\"id\"", range: searchStart..<prefix.endIndex) {
-            var index = idLabelRange.upperBound
-            while index < prefix.endIndex, prefix[index].isWhitespace {
-                index = prefix.index(after: index)
-            }
-            guard index < prefix.endIndex, prefix[index] == ":" else {
-                searchStart = idLabelRange.upperBound
+    private static func responseId(in data: Data) -> CodexAppServerRequestID? {
+        topLevelRequestID(for: "id", in: data)
+    }
+
+    private static func containsTopLevelKey(_ key: String, in data: Data) -> Bool {
+        topLevelValueIndex(for: key, in: data) != nil
+    }
+
+    private static func topLevelRequestID(for key: String, in data: Data) -> CodexAppServerRequestID? {
+        guard let valueIndex = topLevelValueIndex(for: key, in: data) else { return nil }
+        return parseRequestIDValue(in: data, startingAt: valueIndex)
+    }
+
+    private static func topLevelValueIndex(for key: String, in data: Data) -> Data.Index? {
+        var index = data.startIndex
+        var depth = 0
+        while index < data.endIndex {
+            let byte = data[index]
+            if byte == 0x22 {
+                guard let (string, nextIndex) = parseJSONString(in: data, startingAt: index) else {
+                    return nil
+                }
+                if depth == 1, string == key {
+                    var valueIndex = skipWhitespace(in: data, startingAt: nextIndex)
+                    guard valueIndex < data.endIndex, data[valueIndex] == 0x3A else {
+                        index = nextIndex
+                        continue
+                    }
+                    valueIndex = data.index(after: valueIndex)
+                    return skipWhitespace(in: data, startingAt: valueIndex)
+                }
+                index = nextIndex
                 continue
             }
-            index = prefix.index(after: index)
-            while index < prefix.endIndex, prefix[index].isWhitespace {
-                index = prefix.index(after: index)
+            if byte == 0x7B || byte == 0x5B {
+                depth += 1
+            } else if byte == 0x7D || byte == 0x5D {
+                depth = max(0, depth - 1)
             }
-
-            var digits = ""
-            while index < prefix.endIndex, prefix[index].isNumber {
-                digits.append(prefix[index])
-                index = prefix.index(after: index)
-            }
-            if let id = Int(digits) {
-                return id
-            }
-            searchStart = idLabelRange.upperBound
+            index = data.index(after: index)
         }
         return nil
+    }
+
+    private static func parseRequestIDValue(in data: Data, startingAt index: Data.Index) -> CodexAppServerRequestID? {
+        guard index < data.endIndex else { return nil }
+        if data[index] == 0x22,
+           let (string, _) = parseJSONString(in: data, startingAt: index) {
+            return requestID(from: string)
+        }
+
+        var current = index
+        var digits = Data()
+        if current < data.endIndex, data[current] == 0x2D {
+            digits.append(data[current])
+            current = data.index(after: current)
+        }
+        while current < data.endIndex, data[current] >= 0x30, data[current] <= 0x39 {
+            digits.append(data[current])
+            current = data.index(after: current)
+        }
+        guard !digits.isEmpty,
+              let text = String(data: digits, encoding: .utf8),
+              let value = Int(text) else {
+            return nil
+        }
+        return .int(value)
+    }
+
+    private static func parseJSONString(in data: Data, startingAt quoteIndex: Data.Index) -> (String, Data.Index)? {
+        guard quoteIndex < data.endIndex, data[quoteIndex] == 0x22 else { return nil }
+        var index = data.index(after: quoteIndex)
+        var bytes = Data()
+        var escaped = false
+        while index < data.endIndex {
+            let byte = data[index]
+            if escaped {
+                bytes.append(byte)
+                escaped = false
+            } else if byte == 0x5C {
+                escaped = true
+            } else if byte == 0x22 {
+                return String(data: bytes, encoding: .utf8).map { ($0, data.index(after: index)) }
+            } else {
+                bytes.append(byte)
+            }
+            index = data.index(after: index)
+        }
+        return nil
+    }
+
+    private static func skipWhitespace(in data: Data, startingAt index: Data.Index) -> Data.Index {
+        var index = index
+        while index < data.endIndex {
+            switch data[index] {
+            case 0x09, 0x0A, 0x0D, 0x20:
+                index = data.index(after: index)
+            default:
+                return index
+            }
+        }
+        return index
     }
 }

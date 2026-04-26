@@ -53,10 +53,11 @@ public struct CodexTrajectoryStore: Sendable {
     private var indexByID: [String: Int]
 
     public init(blocks: [CodexTrajectoryBlock] = []) {
-        self.blocks = blocks
-        self.indexByID = Dictionary(
-            uniqueKeysWithValues: blocks.enumerated().map { index, block in (block.id, index) }
-        )
+        self.blocks = []
+        self.indexByID = [:]
+        for block in blocks {
+            append(block)
+        }
     }
 
     public var isEmpty: Bool {

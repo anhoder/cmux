@@ -31,6 +31,26 @@ final class LayoutAndRendererTests: XCTestCase {
         XCTAssertTrue(layout.pages.allSatisfy { $0.measuredSize.width == 640 })
     }
 
+    func testLayoutSplitsAfterPageLineLimitIsExceeded() {
+        let block = CodexTrajectoryBlock(
+            id: "lines",
+            kind: .commandOutput,
+            text: "one\ntwo\nthree"
+        )
+
+        let layout = CodexTrajectoryLayoutEngine().layout(
+            block: block,
+            configuration: CodexTrajectoryLayoutConfiguration(
+                width: 320,
+                pageLineLimit: 2,
+                maximumPageCharacters: 10_000
+            ),
+            theme: .defaultLight()
+        )
+
+        XCTAssertEqual(layout.pages.count, 2)
+    }
+
     func testLayoutUsesRenderedMarkdownTextForAssistantBlocks() throws {
         let theme = CodexTrajectoryTheme.defaultLight(textSize: 14, monospacedSize: 11)
         let block = CodexTrajectoryBlock(
