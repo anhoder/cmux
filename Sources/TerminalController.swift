@@ -1279,7 +1279,7 @@ class TerminalController {
         }
     }
 
-    private func passwordAuthRequiredResponse(for command: String) -> String {
+    private nonisolated func passwordAuthRequiredResponse(for command: String) -> String {
         let message = "Authentication required. Send auth <password> first."
         guard command.hasPrefix("{"),
               let data = command.data(using: .utf8),
@@ -1290,7 +1290,7 @@ class TerminalController {
         return v2Error(id: id, code: "auth_required", message: message)
     }
 
-    private func passwordLoginV1ResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
+    private nonisolated func passwordLoginV1ResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
         let lowered = command.lowercased()
         guard lowered == "auth" || lowered.hasPrefix("auth ") else {
             return nil
@@ -1315,7 +1315,7 @@ class TerminalController {
         return "OK: Authenticated"
     }
 
-    private func passwordLoginV2ResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
+    private nonisolated func passwordLoginV2ResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
         guard command.hasPrefix("{"),
               let data = command.data(using: .utf8),
               let dict = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] else {
@@ -1347,7 +1347,7 @@ class TerminalController {
         return v2Ok(id: id, result: ["authenticated": true])
     }
 
-    private func authResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
+    private nonisolated func authResponseIfNeeded(for command: String, authenticated: inout Bool) -> String? {
         guard accessMode.requiresPasswordAuth else {
             return nil
         }
@@ -1636,20 +1636,16 @@ class TerminalController {
         _ command: String,
         authenticated: Bool
     ) -> SocketLineProcessingResult {
-        return v2MainSync {
+        var nextAuthenticated = authenticated
+        if let response = authResponseIfNeeded(for: command, authenticated: &nextAuthenticated) {
+            return SocketLineProcessingResult(response: response, authenticated: nextAuthenticated)
+        }
+
+        let response = v2MainSync {
             MainActor.assumeIsolated {
-                self.processSocketLineOnMain(command, authenticated: authenticated)
+                self.processCommand(command)
             }
         }
-    }
-
-    private func processSocketLineOnMain(
-        _ command: String,
-        authenticated: Bool
-    ) -> SocketLineProcessingResult {
-        var nextAuthenticated = authenticated
-        let response = authResponseIfNeeded(for: command, authenticated: &nextAuthenticated)
-            ?? processCommand(command)
         return SocketLineProcessingResult(response: response, authenticated: nextAuthenticated)
     }
 
@@ -3039,7 +3035,7 @@ class TerminalController {
         return result
     }
 
-    private func v2OrNull(_ value: Any?) -> Any {
+    private nonisolated func v2OrNull(_ value: Any?) -> Any {
         // Avoid relying on `?? NSNull()` inference (Swift toolchains can disagree).
         if let value { return value }
         return NSNull()
@@ -3052,7 +3048,7 @@ class TerminalController {
         return DispatchQueue.main.sync(execute: body)
     }
 
-    private func v2Ok(id: Any?, result: Any) -> String {
+    private nonisolated func v2Ok(id: Any?, result: Any) -> String {
         return v2Encode([
             "id": v2OrNull(id),
             "ok": true,
@@ -3060,7 +3056,7 @@ class TerminalController {
         ])
     }
 
-    private func v2Error(id: Any?, code: String, message: String, data: Any? = nil) -> String {
+    private nonisolated func v2Error(id: Any?, code: String, message: String, data: Any? = nil) -> String {
         var err: [String: Any] = ["code": code, "message": message]
         if let data {
             err["data"] = data
@@ -3086,7 +3082,7 @@ class TerminalController {
         }
     }
 
-    private func v2Encode(_ object: Any) -> String {
+    private nonisolated func v2Encode(_ object: Any) -> String {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: []),
               var s = String(data: data, encoding: .utf8) else {
