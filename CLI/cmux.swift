@@ -5141,11 +5141,16 @@ struct CMUXCLI {
         isShellSnippet: Bool = false
     ) throws -> String {
         let trimmedFeatures = shellFeatures.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sshAuthSockBootstrap = Self.normalizedEnvValue(ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"])
+            .map { "export SSH_AUTH_SOCK=\(shellQuote($0))" } ?? ""
         let shellFeaturesBootstrap: String = trimmedFeatures.isEmpty
             ? ""
             : "export GHOSTTY_SHELL_FEATURES=\(shellQuote(trimmedFeatures))"
         let lifecycleCleanup = buildSSHSessionEndShellCommand(remoteRelayPort: remoteRelayPort)
         var scriptLines: [String] = []
+        if !sshAuthSockBootstrap.isEmpty {
+            scriptLines.append(sshAuthSockBootstrap)
+        }
         if !shellFeaturesBootstrap.isEmpty {
             scriptLines.append(shellFeaturesBootstrap)
         }
