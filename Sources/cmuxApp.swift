@@ -4,152 +4,6 @@ import Darwin
 import Bonsplit
 import UniformTypeIdentifiers
 
-enum WorkspaceTitlebarSettings {
-    static let showTitlebarKey = "workspaceTitlebarVisible"
-    static let defaultShowTitlebar = true
-
-    static func isVisible(defaults: UserDefaults = .standard) -> Bool {
-        if defaults.object(forKey: showTitlebarKey) == nil {
-            return defaultShowTitlebar
-        }
-        return defaults.bool(forKey: showTitlebarKey)
-    }
-}
-
-enum WorkspacePresentationModeSettings {
-    static let modeKey = "workspacePresentationMode"
-
-    enum Mode: String {
-        case standard
-        case minimal
-    }
-
-    static let defaultMode: Mode = .standard
-
-    static func mode(for rawValue: String?) -> Mode {
-        Mode(rawValue: rawValue ?? "") ?? defaultMode
-    }
-
-    static func mode(defaults: UserDefaults = .standard) -> Mode {
-        mode(for: defaults.string(forKey: modeKey))
-    }
-
-    static func isMinimal(defaults: UserDefaults = .standard) -> Bool {
-        mode(defaults: defaults) == .minimal
-    }
-}
-
-enum WorkspaceButtonFadeSettings {
-    static let modeKey = "workspaceButtonsFadeMode"
-    static let legacyTitlebarControlsVisibilityModeKey = "titlebarControlsVisibilityMode"
-    static let legacyPaneTabBarControlsVisibilityModeKey = "paneTabBarControlsVisibilityMode"
-
-    enum Mode: String {
-        case enabled
-        case disabled
-    }
-
-    static let defaultMode: Mode = .disabled
-
-    static func mode(for rawValue: String?) -> Mode {
-        Mode(rawValue: rawValue ?? "") ?? defaultMode
-    }
-
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        mode(for: defaults.string(forKey: modeKey)) == .enabled
-    }
-
-    static func initializeStoredModeIfNeeded(defaults: UserDefaults = .standard) {
-        guard defaults.string(forKey: modeKey) == nil else { return }
-
-        if let migratedMode = migratedLegacyMode(defaults: defaults) {
-            defaults.set(migratedMode.rawValue, forKey: modeKey)
-            return
-        }
-
-        let initialMode: Mode = WorkspaceTitlebarSettings.isVisible(defaults: defaults) ? .disabled : .enabled
-        defaults.set(initialMode.rawValue, forKey: modeKey)
-    }
-
-    private static func migratedLegacyMode(defaults: UserDefaults) -> Mode? {
-        let legacyValues = [
-            defaults.string(forKey: legacyTitlebarControlsVisibilityModeKey),
-            defaults.string(forKey: legacyPaneTabBarControlsVisibilityModeKey),
-        ]
-
-        if legacyValues.contains(where: { $0 == "onHover" || $0 == "hover" || $0 == "enabled" }) {
-            return .enabled
-        }
-        if legacyValues.contains(where: { $0 == "always" || $0 == "disabled" }) {
-            return .disabled
-        }
-        return nil
-    }
-}
-
-enum PaneFirstClickFocusSettings {
-    static let enabledKey = "paneFirstClickFocus.enabled"
-    static let defaultEnabled = false
-
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: enabledKey) as? Bool ?? defaultEnabled
-    }
-}
-
-enum TerminalScrollBarSettings {
-    static let showScrollBarKey = "terminal.showScrollBar"
-    static let defaultShowScrollBar = true
-    static let didChangeNotification = Notification.Name("cmux.terminalScrollBarSettingsDidChange")
-
-    static func isVisible(defaults: UserDefaults = .standard) -> Bool {
-        if defaults.object(forKey: showScrollBarKey) == nil {
-            return defaultShowScrollBar
-        }
-        return defaults.bool(forKey: showScrollBarKey)
-    }
-
-    static func notifyDidChange(notificationCenter: NotificationCenter = .default) {
-        notificationCenter.post(name: didChangeNotification, object: nil)
-    }
-}
-
-enum UITestLaunchManifest {
-    static let argumentName = "-cmuxUITestLaunchManifest"
-
-    struct Payload: Decodable {
-        let environment: [String: String]
-    }
-
-    static func applyIfPresent(
-        arguments: [String] = CommandLine.arguments,
-        loadData: (String) -> Data? = { path in
-            try? Data(contentsOf: URL(fileURLWithPath: path))
-        },
-        applyEnvironment: (String, String) -> Void = { key, value in
-            setenv(key, value, 1)
-        }
-    ) {
-        guard let path = manifestPath(from: arguments),
-              let data = loadData(path),
-              let payload = try? JSONDecoder().decode(Payload.self, from: data) else {
-            return
-        }
-
-        for (key, value) in payload.environment {
-            applyEnvironment(key, value)
-        }
-    }
-
-    static func manifestPath(from arguments: [String]) -> String? {
-        guard let index = arguments.firstIndex(of: argumentName) else { return nil }
-        let valueIndex = arguments.index(after: index)
-        guard valueIndex < arguments.endIndex else { return nil }
-
-        let rawPath = arguments[valueIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-        return rawPath.isEmpty ? nil : rawPath
-    }
-}
-
 @main
 struct cmuxApp: App {
     @StateObject private var tabManager: TabManager
@@ -502,6 +356,14 @@ struct cmuxApp: App {
                     Button("Debug Window Controls…") {
                         DebugWindowControlsWindowController.shared.show()
                     }
+                    Button(
+                        String(
+                            localized: "debug.menu.startupAppearanceDebug",
+                            defaultValue: "Startup Appearance Debug…"
+                        )
+                    ) {
+                        StartupAppearanceDebugWindowController.shared.show()
+                    }
                     Button("Menu Bar Extra Debug…") {
                         MenuBarExtraDebugWindowController.shared.show()
                     }
@@ -584,16 +446,12 @@ struct cmuxApp: App {
 
                 splitCommandButton(title: String(localized: "menu.file.newWorkspace", defaultValue: "New Workspace"), shortcut: menuShortcut(for: .newTab)) {
                     if let appDelegate = AppDelegate.shared {
-                        if appDelegate.addWorkspaceInPreferredMainWindow(debugSource: "menu.newWorkspace") == nil {
-#if DEBUG
-                            FocusLogStore.shared.append(
-                                "cmdn.route phase=fallback_new_window src=menu.newWorkspace reason=workspace_creation_returned_nil"
-                            )
-#endif
-                            appDelegate.openNewMainWindow(nil)
-                        }
+                        appDelegate.performNewWorkspaceAction(
+                            tabManager: activeTabManager,
+                            debugSource: "menu.newWorkspace"
+                        )
                     } else {
-                        activeTabManager.addTab()
+                        activeTabManager.addWorkspace()
                     }
                 }
 
@@ -650,6 +508,12 @@ struct cmuxApp: App {
                     workspaceCommandMenuContent(manager: activeTabManager)
                 }
 
+                splitCommandButton(title: String(localized: "menu.file.reopenPreviousSession", defaultValue: "Reopen Previous Session"), shortcut: menuShortcut(for: .reopenPreviousSession)) {
+                    if AppDelegate.shared?.reopenPreviousSession() != true {
+                        NSSound.beep()
+                    }
+                }
+
                 splitCommandButton(title: String(localized: "menu.file.reopenClosedBrowserPanel", defaultValue: "Reopen Closed Browser Panel"), shortcut: menuShortcut(for: .reopenClosedBrowserPanel)) {
                     _ = activeTabManager.reopenMostRecentlyClosedBrowserPanel()
                 }
@@ -660,7 +524,7 @@ struct cmuxApp: App {
                 Menu(String(localized: "menu.find.title", defaultValue: "Find")) {
                     splitCommandButton(title: String(localized: "menu.find.find", defaultValue: "Find…"), shortcut: menuShortcut(for: .find)) {
 #if DEBUG
-                        dlog("find.menu Cmd+F fired")
+                        cmuxDebugLog("find.menu Cmd+F fired")
 #endif
                         activeTabManager.startSearch()
                     }
@@ -1159,6 +1023,7 @@ struct cmuxApp: App {
         SettingsAboutTitlebarDebugWindowController.shared.show()
         SidebarDebugWindowController.shared.show()
         BackgroundDebugWindowController.shared.show()
+        StartupAppearanceDebugWindowController.shared.show()
         MenuBarExtraDebugWindowController.shared.show()
     }
 }
@@ -1174,6 +1039,7 @@ private let cmuxAuxiliaryWindowIdentifiers: Set<String> = [
     "cmux.sidebarDebug",
     "cmux.menubarDebug",
     "cmux.backgroundDebug",
+    "cmux.startupAppearanceDebug",
 ]
 
 /// Returns whether the given window should handle the standard close shortcut
@@ -1807,6 +1673,14 @@ private struct DebugWindowControlsView: View {
                         Button("Background Debug…") {
                             BackgroundDebugWindowController.shared.show()
                         }
+                        Button(
+                            String(
+                                localized: "debug.menu.startupAppearanceDebug",
+                                defaultValue: "Startup Appearance Debug…"
+                            )
+                        ) {
+                            StartupAppearanceDebugWindowController.shared.show()
+                        }
                         Button("Menu Bar Extra Debug…") {
                             MenuBarExtraDebugWindowController.shared.show()
                         }
@@ -1816,6 +1690,7 @@ private struct DebugWindowControlsView: View {
                             SettingsAboutTitlebarDebugWindowController.shared.show()
                             SidebarDebugWindowController.shared.show()
                             BackgroundDebugWindowController.shared.show()
+                            StartupAppearanceDebugWindowController.shared.show()
                             MenuBarExtraDebugWindowController.shared.show()
                         }
                     }
@@ -2534,7 +2409,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func show(navigationTarget: SettingsNavigationTarget? = nil) {
         guard let window else { return }
 #if DEBUG
-        dlog("settings.window.show requested isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
+        cmuxDebugLog("settings.window.show requested isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
 #endif
         SettingsAboutTitlebarDebugStore.shared.applyCurrentOptions(to: window, for: .settings)
         if !window.isVisible {
@@ -2547,7 +2422,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             }
         }
 #if DEBUG
-        dlog("settings.window.show completed isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
+        cmuxDebugLog("settings.window.show completed isVisible=\(window.isVisible ? 1 : 0) isKey=\(window.isKeyWindow ? 1 : 0)")
 #endif
     }
 
@@ -3592,6 +3467,291 @@ private struct BackgroundDebugView: View {
     }
 }
 
+private final class StartupAppearanceDebugWindowController: NSWindowController, NSWindowDelegate {
+    static let shared = StartupAppearanceDebugWindowController()
+
+    private init() {
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
+            styleMask: [.titled, .closable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = String(
+            localized: "debug.startupAppearance.window.title",
+            defaultValue: "Startup Appearance Debug"
+        )
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.identifier = NSUserInterfaceItemIdentifier("cmux.startupAppearanceDebug")
+        window.center()
+        window.contentView = NSHostingView(rootView: StartupAppearanceDebugView())
+        AppDelegate.shared?.applyWindowDecorations(to: window)
+        super.init(window: window)
+        window.delegate = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show() {
+        window?.center()
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+private enum StartupAppearancePreviewMode: String, CaseIterable, Identifiable {
+    case stored
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .stored:
+            return String(
+                localized: "debug.startupAppearance.mode.stored",
+                defaultValue: "Stored App Setting"
+            )
+        case .light:
+            return String(
+                localized: "debug.startupAppearance.mode.light",
+                defaultValue: "Force Light"
+            )
+        case .dark:
+            return String(
+                localized: "debug.startupAppearance.mode.dark",
+                defaultValue: "Force Dark"
+            )
+        }
+    }
+}
+
+private struct StartupAppearanceDebugView: View {
+    @State private var selectedProfile = GhosttyStartupAppearancePreviewState.profile
+    @State private var selectedAppearance = StartupAppearancePreviewMode.stored
+    @State private var lastAppliedProfile = GhosttyStartupAppearancePreviewState.profile
+    @State private var lastAppliedAppearance = StartupAppearancePreviewMode.stored
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(
+                    String(
+                        localized: "debug.startupAppearance.window.title",
+                        defaultValue: "Startup Appearance Debug"
+                    )
+                )
+                    .font(.headline)
+
+                GroupBox(
+                    String(
+                        localized: "debug.startupAppearance.preview.heading",
+                        defaultValue: "Preview"
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker(
+                            String(
+                                localized: "debug.startupAppearance.startupConfig.label",
+                                defaultValue: "Startup config"
+                            ),
+                            selection: $selectedProfile
+                        ) {
+                            ForEach(GhosttyStartupAppearancePreviewProfile.allCases) { profile in
+                                Text(profile.displayName).tag(profile)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Text(selectedProfile.detail)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Picker(
+                            String(
+                                localized: "debug.startupAppearance.appearance.label",
+                                defaultValue: "Appearance"
+                            ),
+                            selection: $selectedAppearance
+                        ) {
+                            ForEach(StartupAppearancePreviewMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        HStack(spacing: 12) {
+                            Button(
+                                String(
+                                    localized: "debug.startupAppearance.applyPreview.button",
+                                    defaultValue: "Apply Preview"
+                                )
+                            ) {
+                                applyPreview()
+                            }
+                            .keyboardShortcut(.defaultAction)
+
+                            Button(
+                                String(
+                                    localized: "debug.startupAppearance.restoreRealStartup.button",
+                                    defaultValue: "Restore Real Startup"
+                                )
+                            ) {
+                                restoreRealStartup()
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+
+                GroupBox(
+                    String(
+                        localized: "debug.startupAppearance.selectedConfig.heading",
+                        defaultValue: "Selected Config"
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ScrollView {
+                            Text(selectedConfigText)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                                .padding(8)
+                        }
+                        .frame(minHeight: 92, maxHeight: 150)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                        Button(
+                            String(
+                                localized: "debug.startupAppearance.copySelectedConfig.button",
+                                defaultValue: "Copy Selected Config"
+                            )
+                        ) {
+                            copySelectedConfig()
+                        }
+                        .disabled(selectedPreviewConfigText == nil)
+                    }
+                    .padding(.top, 2)
+                }
+
+                GroupBox(
+                    String(
+                        localized: "debug.startupAppearance.applied.heading",
+                        defaultValue: "Applied"
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 4) {
+                            Text(
+                                String(
+                                    localized: "debug.startupAppearance.applied.configLabel",
+                                    defaultValue: "Config:"
+                                )
+                            )
+                            Text(lastAppliedProfile.displayName)
+                        }
+                        HStack(spacing: 4) {
+                            Text(
+                                String(
+                                    localized: "debug.startupAppearance.applied.appearanceLabel",
+                                    defaultValue: "Appearance:"
+                                )
+                            )
+                            Text(lastAppliedAppearance.displayName)
+                        }
+                        Text(
+                            String(
+                                localized: "debug.startupAppearance.applied.help",
+                                defaultValue: "Reloads the running app through Ghostty config update, matching startup theme resolution without editing config files."
+                            )
+                        )
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var selectedPreviewConfigText: String? {
+        selectedProfile.previewConfigContents()
+    }
+
+    private var selectedConfigText: String {
+        selectedPreviewConfigText ?? String(
+            localized: "debug.startupAppearance.realConfigFallback",
+            defaultValue: "Loads real user config files."
+        )
+    }
+
+    private func applyPreview() {
+        applyAppearance(selectedAppearance)
+        GhosttyStartupAppearancePreviewState.profile = selectedProfile
+        GhosttyConfig.invalidateLoadCache()
+        GhosttyApp.shared.reloadConfiguration(
+            source: "debug.startupAppearancePreview",
+            reloadSettingsFromFile: false
+        )
+        lastAppliedProfile = selectedProfile
+        lastAppliedAppearance = selectedAppearance
+    }
+
+    private func restoreRealStartup() {
+        selectedProfile = .realUserConfig
+        selectedAppearance = .stored
+        applyAppearance(.stored)
+        GhosttyStartupAppearancePreviewState.profile = .realUserConfig
+        GhosttyConfig.invalidateLoadCache()
+        GhosttyApp.shared.reloadConfiguration(
+            source: "debug.startupAppearanceRestore",
+            reloadSettingsFromFile: false
+        )
+        lastAppliedProfile = .realUserConfig
+        lastAppliedAppearance = .stored
+    }
+
+    private func applyAppearance(_ mode: StartupAppearancePreviewMode) {
+        switch mode {
+        case .stored:
+            switch AppearanceSettings.resolvedMode() {
+            case .system, .auto:
+                NSApplication.shared.appearance = nil
+            case .light:
+                NSApplication.shared.appearance = NSAppearance(named: .aqua)
+            case .dark:
+                NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+            }
+        case .light:
+            NSApplication.shared.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
+    private func copySelectedConfig() {
+        guard let config = selectedPreviewConfigText else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(config, forType: .string)
+    }
+}
+
 private struct AboutPropertyRow: View {
     private let label: String
     private let text: String
@@ -4493,7 +4653,6 @@ struct SettingsView: View {
     @State private var showLanguageRestartAlert = false
     @State private var isResettingSettings = false
     @State private var workspaceTabPaletteEntries = WorkspaceTabColorSettings.palette()
-    @State private var trustedDirectoriesDraft: String = CmuxDirectoryTrust.shared.allTrustedPaths.joined(separator: "\n")
 
     private var selectedWorkspacePlacement: NewWorkspacePlacement {
         NewWorkspacePlacement(rawValue: newWorkspacePlacement) ?? WorkspacePlacementSettings.defaultPlacement
@@ -4735,14 +4894,6 @@ struct SettingsView: View {
         browserInsecureHTTPAllowlistDraft != browserInsecureHTTPAllowlist
     }
 
-    private func saveTrustedDirectories() {
-        let paths = trustedDirectoriesDraft
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        CmuxDirectoryTrust.shared.replaceAll(with: paths)
-    }
-
     private var hasCustomNotificationSoundFilePath: Bool {
         !notificationSoundCustomFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -4933,7 +5084,7 @@ struct SettingsView: View {
     private func handleNotificationPermissionAction() {
         let state = notificationStore.authorizationState.statusLabel
 #if DEBUG
-        dlog("notification.ui enableTapped state=\(state)")
+        cmuxDebugLog("notification.ui enableTapped state=\(state)")
 #endif
         NSLog("notification.ui enableTapped state=%@", state)
         switch notificationStore.authorizationState {
@@ -5961,39 +6112,6 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardNote(String(localized: "settings.automation.port.note", defaultValue: "Each workspace gets CMUX_PORT and CMUX_PORT_END env vars with a dedicated port range. New terminals inherit these values."))
-                    }
-
-                    SettingsSectionHeader(title: String(localized: "settings.section.customCommands", defaultValue: "Custom Commands"))
-                    SettingsCard {
-                        VStack(alignment: .leading, spacing: 6) {
-                            SettingsCardRow(
-                                configurationReview: .json("customCommands.trustedDirectories"),
-                                String(localized: "settings.customCommands.trustedDirectories", defaultValue: "Trusted Directories"),
-                                subtitle: String(localized: "settings.customCommands.trustedDirectories.subtitle", defaultValue: "Commands from cmux.json in these directories run without confirmation. One path per line.")
-                            ) {
-                                EmptyView()
-                            }
-
-                            TextEditor(text: $trustedDirectoriesDraft)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(minHeight: 60, maxHeight: 120)
-                                .scrollContentBackground(.hidden)
-                                .padding(6)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-                                )
-                                .padding(.horizontal, 16)
-                                .padding(.bottom, 12)
-                                .onChange(of: trustedDirectoriesDraft) { _ in
-                                    saveTrustedDirectories()
-                                }
-                        }
-
-                        SettingsCardDivider()
-                        SettingsCardNote(String(localized: "settings.customCommands.trustedDirectories.note", defaultValue: "Place a cmux.json in your project root to define custom commands. Trust a directory from the confirmation dialog, or add paths here. For git repos, trusting the root covers all subdirectories."))
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.browser", defaultValue: "Browser"))
