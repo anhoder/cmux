@@ -38,6 +38,25 @@ final class CMUXMarkdownTests: XCTestCase {
         XCTAssertEqual(document.blocks[5].kind, .codeBlock(language: "swift"))
     }
 
+    func testLongCodeFenceCanContainShorterFence() {
+        let markdown = """
+        ````markdown
+        ```swift
+        let value = true
+        ```
+        ````
+
+        After
+        """
+
+        let document = CMUXMarkdownParser().parse(markdown)
+
+        XCTAssertEqual(document.blocks.count, 2)
+        XCTAssertEqual(document.blocks[0].kind, .codeBlock(language: "markdown"))
+        XCTAssertEqual(document.blocks[0].text, "```swift\nlet value = true\n```")
+        XCTAssertEqual(document.blocks[1].text, "After")
+    }
+
     func testRendererProducesCoreTextAttributedString() {
         let rendered = CMUXMarkdownCoreTextRenderer().render("## Hello\n\nUse **bold** and `code`.")
 

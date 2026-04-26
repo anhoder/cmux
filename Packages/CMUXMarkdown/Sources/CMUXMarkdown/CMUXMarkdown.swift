@@ -232,8 +232,10 @@ public struct CMUXMarkdownParser: Sendable {
     private func fencedCodeStart(_ line: String) -> (marker: String, language: String?)? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") else { return nil }
-        let marker = String(trimmed.prefix(3))
-        let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespaces)
+        guard let markerCharacter = trimmed.first else { return nil }
+        let marker = String(trimmed.prefix { $0 == markerCharacter })
+        guard marker.count >= 3 else { return nil }
+        let language = trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
         return (marker, language.isEmpty ? nil : language)
     }
 
