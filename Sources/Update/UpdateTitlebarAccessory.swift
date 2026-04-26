@@ -1507,8 +1507,9 @@ final class UpdateTitlebarAccessoryController {
         let popover = NSPopover()
         let delegate = DetachedNotificationsPopoverDelegate { [weak self, weak popover] in
             popover?.contentViewController = nil
-            self?.detachedNotificationsPopover = nil
-            self?.detachedNotificationsPopoverDelegate = nil
+            guard let self, self.detachedNotificationsPopover === popover else { return }
+            self.detachedNotificationsPopover = nil
+            self.detachedNotificationsPopoverDelegate = nil
             postNotificationsPopoverVisibilityDidChange(isShown: false)
         }
         popover.behavior = .semitransient
