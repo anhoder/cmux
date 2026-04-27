@@ -35,6 +35,9 @@ export async function withAuthedVmApiRoute(
       try {
         const user = await verifyRequest(request);
         if (!user) return unauthorized();
+        if (requiresBrowserMutationProtection(request) && !browserMutationOriginAllowed(request)) {
+          return jsonResponse({ error: "forbidden" }, 403);
+        }
         return await handler({ user, span });
       } catch (err) {
         recordSpanError(span, err);
@@ -59,4 +62,44 @@ export function jsonResponse(data: unknown, status = 200): Response {
 
 export function notFoundVm(vmId: string): Response {
   return jsonResponse({ error: `vm not found: ${vmId}` }, 404);
+}
+
+function requiresBrowserMutationProtection(request: Request): boolean {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
+    return false;
+  }
+  return parseBearer(request) === null;
+}
+
+function browserMutationOriginAllowed(request: Request): boolean {
+  const origin = request.headers.get("origin")?.trim();
+  const secFetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
+
+  if (secFetchSite === "cross-site") return false;
+  if (!origin) {
+    return secFetchSite === "same-origin" ||
+      secFetchSite === "same-site" ||
+      secFetchSite === "none";
+  }
+
+  const requestOrigin = requestURLOrigin(request);
+  if (requestOrigin && origin === requestOrigin) return true;
+  return allowedBrowserOrigins().has(origin);
+}
+
+function requestURLOrigin(request: Request): string | null {
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function allowedBrowserOrigins(): Set<string> {
+  const configured = process.env.CMUX_VM_ALLOWED_ORIGINS?.split(",") ?? [];
+  return new Set(
+    configured
+      .map((origin) => origin.trim())
+      .filter((origin) => origin.length > 0),
+  );
 }
