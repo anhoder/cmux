@@ -7193,18 +7193,26 @@ enum WorkspaceSurfaceIdentifierClipboardText {
 
     static func make(
         workspaceId: UUID,
+        paneId: UUID? = nil,
         surfaceId: UUID,
         workspaceRef: String? = nil,
+        paneRef: String? = nil,
         surfaceRef: String? = nil
     ) -> String {
         var lines: [String] = []
         if let workspaceRef {
             lines.append("workspace_ref=\(workspaceRef)")
         }
+        lines.append("workspace_id=\(workspaceId.uuidString)")
+        if let paneRef {
+            lines.append("pane_ref=\(paneRef)")
+        }
+        if let paneId {
+            lines.append("pane_id=\(paneId.uuidString)")
+        }
         if let surfaceRef {
             lines.append("surface_ref=\(surfaceRef)")
         }
-        lines.append("workspace_id=\(workspaceId.uuidString)")
         lines.append("surface_id=\(surfaceId.uuidString)")
         return lines.joined(separator: "\n")
     }
@@ -11342,14 +11350,21 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func copyWorkspaceAndSurfaceIDsToPasteboard(surfaceId: UUID) {
-        let refs = TerminalController.shared.v2WorkspaceAndSurfaceRefs(workspaceId: id, surfaceId: surfaceId)
+        let paneId = paneId(forPanelId: surfaceId)?.id
+        let refs = TerminalController.shared.v2WorkspacePaneAndSurfaceRefs(
+            workspaceId: id,
+            paneId: paneId,
+            surfaceId: surfaceId
+        )
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(
             WorkspaceSurfaceIdentifierClipboardText.make(
                 workspaceId: id,
+                paneId: paneId,
                 surfaceId: surfaceId,
                 workspaceRef: refs.workspaceRef,
+                paneRef: refs.paneRef,
                 surfaceRef: refs.surfaceRef
             ),
             forType: .string

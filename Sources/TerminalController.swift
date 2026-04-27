@@ -3309,9 +3309,14 @@ class TerminalController {
         return refs
     }
 
-    func v2WorkspaceAndSurfaceRefs(workspaceId: UUID, surfaceId: UUID) -> (workspaceRef: String, surfaceRef: String) {
+    func v2WorkspacePaneAndSurfaceRefs(
+        workspaceId: UUID,
+        paneId: UUID?,
+        surfaceId: UUID
+    ) -> (workspaceRef: String, paneRef: String?, surfaceRef: String) {
         return (
             workspaceRef: v2EnsureHandleRef(kind: .workspace, uuid: workspaceId),
+            paneRef: paneId.map { v2EnsureHandleRef(kind: .pane, uuid: $0) },
             surfaceRef: v2EnsureHandleRef(kind: .surface, uuid: surfaceId)
         )
     }

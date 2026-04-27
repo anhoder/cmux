@@ -6611,8 +6611,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
 
     @IBAction func copyWorkspaceAndSurfaceIdentifiers(_ sender: Any?) {
         guard let terminalSurface else { return }
-        let refs = TerminalController.shared.v2WorkspaceAndSurfaceRefs(
+        let paneId = terminalSurface.owningWorkspace()?.paneId(forPanelId: terminalSurface.id)?.id
+        let refs = TerminalController.shared.v2WorkspacePaneAndSurfaceRefs(
             workspaceId: terminalSurface.tabId,
+            paneId: paneId,
             surfaceId: terminalSurface.id
         )
         let pasteboard = NSPasteboard.general
@@ -6620,8 +6622,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         pasteboard.setString(
             WorkspaceSurfaceIdentifierClipboardText.make(
                 workspaceId: terminalSurface.tabId,
+                paneId: paneId,
                 surfaceId: terminalSurface.id,
                 workspaceRef: refs.workspaceRef,
+                paneRef: refs.paneRef,
                 surfaceRef: refs.surfaceRef
             ),
             forType: .string
