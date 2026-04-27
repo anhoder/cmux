@@ -61,6 +61,49 @@ final class SidebarSelectedWorkspaceColorTests: XCTestCase {
 }
 
 
+@MainActor
+final class WorkspaceSplitPolicyTests: XCTestCase {
+    func testCloseTabHonorsDisabledClosePolicy() throws {
+        let controller = WorkspaceLayoutController(
+            configuration: WorkspaceLayoutConfiguration(allowCloseTabs: false)
+        )
+        let tab = try XCTUnwrap(controller.createTab(title: "One"))
+
+        XCTAssertFalse(controller.closeTab(tab))
+        XCTAssertNotNil(controller.rootNode.findTab(tab))
+    }
+
+    func testSamePaneMoveHonorsDisabledReorderPolicy() throws {
+        let controller = WorkspaceLayoutController(
+            configuration: WorkspaceLayoutConfiguration(allowTabReordering: false)
+        )
+        let first = try XCTUnwrap(controller.createTab(title: "One"))
+        let second = try XCTUnwrap(controller.createTab(title: "Two"))
+        let paneId = try XCTUnwrap(controller.focusedPaneId)
+
+        XCTAssertEqual(controller.rootNode.findPane(paneId)?.tabIds, [first.id, second.id])
+        XCTAssertFalse(controller.reorderTab(first, toIndex: 2))
+        XCTAssertFalse(controller.moveTab(first, toPane: paneId, atIndex: 2))
+        XCTAssertEqual(controller.rootNode.findPane(paneId)?.tabIds, [first.id, second.id])
+    }
+
+    func testCrossPaneMoveHonorsDisabledCrossPanePolicy() throws {
+        let controller = WorkspaceLayoutController(
+            configuration: WorkspaceLayoutConfiguration(allowCrossPaneTabMove: false)
+        )
+        let tab = try XCTUnwrap(controller.createTab(title: "One"))
+        let sourcePaneId = try XCTUnwrap(controller.focusedPaneId)
+        let targetPaneId = try XCTUnwrap(
+            controller.splitPane(sourcePaneId, orientation: .horizontal)
+        )
+
+        XCTAssertFalse(controller.moveTab(tab, toPane: targetPaneId))
+        XCTAssertEqual(controller.rootNode.findPane(sourcePaneId)?.tabIds, [tab.id])
+        XCTAssertEqual(controller.rootNode.findPane(targetPaneId)?.tabIds, [])
+    }
+}
+
+
 final class WorkspaceRenameShortcutDefaultsTests: XCTestCase {
     func testRenameTabShortcutDefaultsAndMetadata() {
         XCTAssertEqual(KeyboardShortcutSettings.Action.renameTab.label, "Rename Tab")

@@ -2049,6 +2049,8 @@ final class WorkspaceLayoutController {
     /// - Parameter tabIndex: The position of the tab within the pane
     /// - Parameter paneId: The pane in which to close the tab
     private func closeTab(_ tabId: TabID, with tabIndex: Int, inPane paneId: PaneID) -> Bool {
+        guard configuration.allowCloseTabs else { return false }
+
         // Check with delegate
         if delegate?.workspaceSplit(shouldCloseTab: tabId, inPane: paneId) == false {
             return false
@@ -2091,6 +2093,8 @@ final class WorkspaceLayoutController {
 
         let surfaceId = sourcePane.tabIds[sourceIndex]
         if sourcePaneId == targetPane.id {
+            guard configuration.allowTabReordering else { return false }
+
             // Reorder within same pane.
             let destinationIndex: Int = {
                 if let index { return max(0, min(index, sourcePane.tabIds.count)) }
@@ -2106,6 +2110,8 @@ final class WorkspaceLayoutController {
             return true
         }
 
+        guard configuration.allowCrossPaneTabMove else { return false }
+
         performMoveTab(surfaceId, from: sourcePaneId, to: targetPane.id, atIndex: index)
         delegate?.workspaceSplit(didMoveTab: tabId, fromPane: sourcePaneId, toPane: targetPane.id)
         notifyGeometryChange()
@@ -2119,6 +2125,8 @@ final class WorkspaceLayoutController {
     /// - Returns: true if reordered.
     @discardableResult
     func reorderTab(_ tabId: TabID, toIndex: Int) -> Bool {
+        guard configuration.allowTabReordering else { return false }
+
         guard let (paneId, sourceIndex) = findTabInternal(tabId),
               let pane = rootNode.findPane(paneId) else { return false }
         let destinationIndex = max(0, min(toIndex, pane.tabIds.count))
