@@ -5,6 +5,7 @@ final class WindowDecorationsController {
     private var didStart = false
     private var trafficLightBaseFrames: [ObjectIdentifier: [NSWindow.ButtonType: NSRect]] = [:]
     private var minimalModeTitlebarDoubleClickMonitor: Any?
+    private var lastMinimalModeTitlebarClick: MinimalModeTitlebarClickRecord?
 
     deinit {
         let center = NotificationCenter.default
@@ -42,12 +43,33 @@ final class WindowDecorationsController {
 
     private func installMinimalModeTitlebarDoubleClickMonitor() {
         guard minimalModeTitlebarDoubleClickMonitor == nil else { return }
-        minimalModeTitlebarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
-            guard event.clickCount >= 2, let window = event.window else { return event }
-            guard shouldHandleMinimalModeWindowTitlebarDoubleClick(window: window, event: event) else {
+        minimalModeTitlebarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            guard let self, let window = event.window else { return event }
+            guard isMinimalModeWindowTitlebarClickCandidate(window: window, event: event) else {
+                self.lastMinimalModeTitlebarClick = nil
                 return event
             }
 
+            let windowNumber = window.windowNumber
+            let isDoubleClick = minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: event.clickCount,
+                timestamp: event.timestamp,
+                locationInWindow: event.locationInWindow,
+                windowNumber: windowNumber,
+                previous: self.lastMinimalModeTitlebarClick,
+                doubleClickInterval: NSEvent.doubleClickInterval
+            )
+
+            guard isDoubleClick else {
+                self.lastMinimalModeTitlebarClick = MinimalModeTitlebarClickRecord(
+                    windowNumber: windowNumber,
+                    timestamp: event.timestamp,
+                    locationInWindow: event.locationInWindow
+                )
+                return event
+            }
+
+            self.lastMinimalModeTitlebarClick = nil
             let result = handleTitlebarDoubleClick(window: window, behavior: .standardAction)
 #if DEBUG
             cmuxDebugLog(

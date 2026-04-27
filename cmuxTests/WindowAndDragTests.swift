@@ -773,6 +773,65 @@ final class WindowDragHandleHitTests: XCTestCase {
         )
     }
 
+    func testMinimalModeTitlebarConsecutiveClicksCanFormDoubleClick() {
+        let previous = MinimalModeTitlebarClickRecord(
+            windowNumber: 42,
+            timestamp: 10,
+            locationInWindow: NSPoint(x: 200, y: 292)
+        )
+
+        XCTAssertTrue(
+            minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: 1,
+                timestamp: 10.2,
+                locationInWindow: NSPoint(x: 201, y: 291),
+                windowNumber: 42,
+                previous: previous,
+                doubleClickInterval: 0.5
+            )
+        )
+        XCTAssertTrue(
+            minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: 2,
+                timestamp: 20,
+                locationInWindow: NSPoint(x: 20, y: 20),
+                windowNumber: 99,
+                previous: nil,
+                doubleClickInterval: 0.5
+            )
+        )
+        XCTAssertFalse(
+            minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: 1,
+                timestamp: 10.8,
+                locationInWindow: NSPoint(x: 201, y: 291),
+                windowNumber: 42,
+                previous: previous,
+                doubleClickInterval: 0.5
+            )
+        )
+        XCTAssertFalse(
+            minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: 1,
+                timestamp: 10.2,
+                locationInWindow: NSPoint(x: 240, y: 292),
+                windowNumber: 42,
+                previous: previous,
+                doubleClickInterval: 0.5
+            )
+        )
+        XCTAssertFalse(
+            minimalModeTitlebarClickFormsDoubleClick(
+                clickCount: 1,
+                timestamp: 10.2,
+                locationInWindow: NSPoint(x: 201, y: 291),
+                windowNumber: 43,
+                previous: previous,
+                doubleClickInterval: 0.5
+            )
+        )
+    }
+
     func testDragHandleIgnoresPassiveHostSiblingHit() {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 36))
         let dragHandle = NSView(frame: container.bounds)

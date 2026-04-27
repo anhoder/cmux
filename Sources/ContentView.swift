@@ -9724,6 +9724,7 @@ struct VerticalTabsSidebar: View {
         )
         .equatable()
         .id(tab.id)
+        .accessibilityIdentifier("sidebarWorkspace.\(tab.id.uuidString)")
         .preference(key: SidebarWorkspaceRowIdsPreferenceKey.self, value: Set([tab.id]))
     }
 

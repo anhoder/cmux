@@ -558,6 +558,7 @@ struct HiddenTitlebarSidebarControlsView: View {
     let onToggleNotifications: (NSView?) -> Void
     let onNewTab: () -> Void
     @StateObject private var viewModel = TitlebarControlsViewModel()
+    @State private var isHoveringHost = false
 
     private let hostWidth: CGFloat = 124
     private let hostHeight: CGFloat = 28
@@ -571,15 +572,78 @@ struct HiddenTitlebarSidebarControlsView: View {
                 onToggleNotifications(viewModel.notificationsAnchorView)
             },
             onNewTab: onNewTab,
-            visibilityMode: .onHover
+            visibilityMode: isHoveringHost ? .alwaysVisible : .onHover
         )
         .frame(width: hostWidth, height: hostHeight, alignment: .leading)
+        .background(
+            PassthroughHoverTrackingView { isHovering in
+                isHoveringHost = isHovering
+            }
+        )
+        .onDisappear {
+            isHoveringHost = false
+        }
     }
 }
 
 enum TitlebarControlsVisibilityMode {
     case alwaysVisible
     case onHover
+}
+
+private struct PassthroughHoverTrackingView: NSViewRepresentable {
+    let onHoverChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.onHoverChanged = onHoverChanged
+        return view
+    }
+
+    func updateNSView(_ nsView: TrackingView, context: Context) {
+        nsView.onHoverChanged = onHoverChanged
+    }
+
+    final class TrackingView: NSView {
+        var onHoverChanged: ((Bool) -> Void)?
+        private var trackingArea: NSTrackingArea?
+        private var isHovering = false
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let trackingArea {
+                removeTrackingArea(trackingArea)
+            }
+            let area = NSTrackingArea(
+                rect: bounds,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
+                owner: self
+            )
+            addTrackingArea(area)
+            trackingArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            emitHoverChanged(true)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            emitHoverChanged(false)
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            let point = convert(event.locationInWindow, from: nil)
+            emitHoverChanged(bounds.contains(point))
+        }
+
+        private func emitHoverChanged(_ newValue: Bool) {
+            guard isHovering != newValue else { return }
+            isHovering = newValue
+            onHoverChanged?(newValue)
+        }
+    }
 }
 
 @MainActor

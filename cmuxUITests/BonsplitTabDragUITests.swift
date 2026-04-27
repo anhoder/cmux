@@ -227,15 +227,15 @@ final class BonsplitTabDragUITests: XCTestCase {
             "Expected standard mode to keep workspace controls visible in the titlebar."
         )
 
-        let leadingControlX = min(
-            toggleSidebarButton.frame.minX,
-            notificationsButton.frame.minX,
-            newWorkspaceButton.frame.minX
+        let lowestControlY = max(
+            toggleSidebarButton.frame.maxY,
+            notificationsButton.frame.maxY,
+            newWorkspaceButton.frame.maxY
         )
-        XCTAssertGreaterThanOrEqual(
-            leadingControlX,
-            sidebar.frame.maxX - 4,
-            "Expected standard mode workspace controls to stay outside the sidebar header. sidebar=\(sidebar.frame) toggle=\(toggleSidebarButton.frame) notifications=\(notificationsButton.frame) new=\(newWorkspaceButton.frame)"
+        XCTAssertLessThanOrEqual(
+            lowestControlY,
+            sidebar.frame.minY + 4,
+            "Expected standard mode workspace controls to stay in the titlebar above the sidebar list. sidebar=\(sidebar.frame) toggle=\(toggleSidebarButton.frame) notifications=\(notificationsButton.frame) new=\(newWorkspaceButton.frame)"
         )
     }
 

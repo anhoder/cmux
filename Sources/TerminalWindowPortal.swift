@@ -131,7 +131,8 @@ final class WindowTerminalHostView: NSView {
     }
 
     // PERF: hitTest is called on EVERY event including keyboard. Keep non-pointer
-    // path minimal. Do not add work outside the isPointerEvent guard.
+    // path minimal; nil-event probes only get the cheap titlebar pass-through
+    // so injected/test titlebar and pane-tab events do not get trapped here.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let currentEvent = NSApp.currentEvent
         let isPointerEvent: Bool
@@ -144,6 +145,10 @@ final class WindowTerminalHostView: NSView {
             isPointerEvent = true
         default:
             isPointerEvent = false
+        }
+
+        if currentEvent == nil, shouldPassThroughToTitlebar(at: point) {
+            return nil
         }
 
         if isPointerEvent {
