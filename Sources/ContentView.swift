@@ -3688,6 +3688,11 @@ struct ContentView: View {
             }
             AppDelegate.shared?.attachUpdateAccessory(to: window)
             AppDelegate.shared?.applyWindowDecorations(to: window)
+            syncUnifiedNativeTitlebarBackdrop(
+                in: window,
+                color: currentThemeBackground,
+                enabled: shouldForceTransparentHosting && appearance.unifySurfaceBackdrops
+            )
             AppDelegate.shared?.registerMainWindow(
                 window,
                 windowId: windowId,
@@ -4012,6 +4017,175 @@ struct ContentView: View {
                 themeFrame.addSubview(backdrop, positioned: .below, relativeTo: nil)
             }
         }
+    }
+
+    private func syncUnifiedNativeTitlebarBackdrop(
+        in window: NSWindow,
+        color: NSColor,
+        enabled: Bool
+    ) {
+        guard let titlebarContainer = nativeTitlebarContainer(in: window) else { return }
+        let titlebarView = firstNativeDescendant(
+            in: titlebarContainer,
+            className: "NSTitlebarView",
+            includeRoot: true
+        )
+        let titlebarBackgroundView = firstNativeDescendant(
+            in: titlebarContainer,
+            className: "NSTitlebarBackgroundView",
+            includeRoot: true
+        )
+        let effectView = nativeDescendants(in: titlebarContainer, className: "NSVisualEffectView").first
+
+        if enabled {
+            rememberNativeTitlebarBackdropState(
+                in: window,
+                titlebarView: titlebarView,
+                titlebarBackgroundView: titlebarBackgroundView,
+                effectView: effectView
+            )
+        } else {
+            restoreNativeTitlebarBackdropState(
+                in: window,
+                titlebarView: titlebarView,
+                titlebarBackgroundView: titlebarBackgroundView,
+                effectView: effectView
+            )
+            return
+        }
+
+        if #available(macOS 26.0, *) {
+            titlebarView?.wantsLayer = true
+            titlebarView?.layer?.backgroundColor = color.cgColor
+            titlebarBackgroundView?.isHidden = true
+        } else {
+            titlebarContainer.wantsLayer = true
+            titlebarContainer.layer?.backgroundColor = color.cgColor
+            effectView?.isHidden = true
+            window.titlebarAppearsTransparent = true
+        }
+    }
+
+    private static var unifiedTitlebarAppliedKey: UInt8 = 0
+    private static var unifiedTitlebarColorKey: UInt8 = 0
+    private static var unifiedTitlebarContainerColorKey: UInt8 = 0
+    private static var unifiedTitlebarBackgroundHiddenKey: UInt8 = 0
+    private static var unifiedTitlebarEffectHiddenKey: UInt8 = 0
+
+    private func rememberNativeTitlebarBackdropState(
+        in window: NSWindow,
+        titlebarView: NSView?,
+        titlebarBackgroundView: NSView?,
+        effectView: NSView?
+    ) {
+        guard objc_getAssociatedObject(window, &Self.unifiedTitlebarAppliedKey) == nil else { return }
+
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarAppliedKey, NSNumber(value: true), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarColorKey, titlebarView?.layer?.backgroundColor ?? NSNull(), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarContainerColorKey, titlebarView?.superview?.layer?.backgroundColor ?? NSNull(), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarBackgroundHiddenKey, NSNumber(value: titlebarBackgroundView?.isHidden ?? false), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarEffectHiddenKey, NSNumber(value: effectView?.isHidden ?? false), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func restoreNativeTitlebarBackdropState(
+        in window: NSWindow,
+        titlebarView: NSView?,
+        titlebarBackgroundView: NSView?,
+        effectView: NSView?
+    ) {
+        guard objc_getAssociatedObject(window, &Self.unifiedTitlebarAppliedKey) != nil else { return }
+
+        if let storedColor = objc_getAssociatedObject(window, &Self.unifiedTitlebarColorKey),
+           !(storedColor is NSNull) {
+            titlebarView?.layer?.backgroundColor = storedColor as! CGColor
+        } else {
+            titlebarView?.layer?.backgroundColor = nil
+        }
+
+        if let storedColor = objc_getAssociatedObject(window, &Self.unifiedTitlebarContainerColorKey),
+           !(storedColor is NSNull) {
+            titlebarView?.superview?.layer?.backgroundColor = storedColor as! CGColor
+        } else {
+            titlebarView?.superview?.layer?.backgroundColor = nil
+        }
+
+        if let hidden = objc_getAssociatedObject(window, &Self.unifiedTitlebarBackgroundHiddenKey) as? NSNumber {
+            titlebarBackgroundView?.isHidden = hidden.boolValue
+        }
+        if let hidden = objc_getAssociatedObject(window, &Self.unifiedTitlebarEffectHiddenKey) as? NSNumber {
+            effectView?.isHidden = hidden.boolValue
+        }
+
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarAppliedKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarColorKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarContainerColorKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarBackgroundHiddenKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(window, &Self.unifiedTitlebarEffectHiddenKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func nativeTitlebarContainer(in window: NSWindow) -> NSView? {
+        if !window.styleMask.contains(.fullScreen) {
+            return window.contentView.flatMap {
+                firstNativeDescendant(
+                    in: nativeRootView(from: $0),
+                    className: "NSTitlebarContainerView",
+                    includeRoot: true
+                )
+            }
+        }
+
+        for candidate in NSApp.windows where candidate.className == "NSToolbarFullScreenWindow" {
+            guard candidate.parent == window else { continue }
+            if let contentView = candidate.contentView {
+                return firstNativeDescendant(
+                    in: nativeRootView(from: contentView),
+                    className: "NSTitlebarContainerView",
+                    includeRoot: true
+                )
+            }
+        }
+
+        return nil
+    }
+
+    private func nativeRootView(from view: NSView) -> NSView {
+        var root = view
+        while let superview = root.superview {
+            root = superview
+        }
+        return root
+    }
+
+    private func firstNativeDescendant(
+        in view: NSView,
+        className: String,
+        includeRoot: Bool = false
+    ) -> NSView? {
+        if includeRoot, String(describing: type(of: view)) == className {
+            return view
+        }
+
+        for subview in view.subviews {
+            if String(describing: type(of: subview)) == className {
+                return subview
+            }
+            if let found = firstNativeDescendant(in: subview, className: className) {
+                return found
+            }
+        }
+
+        return nil
+    }
+
+    private func nativeDescendants(in view: NSView, className: String) -> [NSView] {
+        var result: [NSView] = []
+        for subview in view.subviews {
+            if String(describing: type(of: subview)) == className {
+                result.append(subview)
+            }
+            result.append(contentsOf: nativeDescendants(in: subview, className: className))
+        }
+        return result
     }
 
     private func setTitlebarControlsHidden(_ hidden: Bool, in window: NSWindow) {

@@ -762,12 +762,12 @@ final class WorkspaceChromeThemeTests: XCTestCase {
 }
 
 final class WindowAppearanceSnapshotTests: XCTestCase {
-    func testUnifiedSurfaceBackdropsUseTerminalBackdropForNonTerminalSurfaces() {
+    func testUnifiedSurfaceBackdropsLetNativeTitlebarUseWindowBackdrop() {
         let snapshot = makeSnapshot(unifySurfaceBackdrops: true)
 
         assertTerminalBackdrop(snapshot.policy(for: .terminalCanvas))
         assertTerminalBackdrop(snapshot.policy(for: .bonsplitChrome))
-        assertTerminalBackdrop(snapshot.policy(for: .titlebar))
+        assertClearBackdrop(snapshot.policy(for: .titlebar))
         assertTerminalBackdrop(snapshot.policy(for: .browserSurface))
         assertTerminalBackdrop(snapshot.policy(for: .leftSidebar))
         assertTerminalBackdrop(snapshot.policy(for: .rightSidebar))
@@ -834,6 +834,17 @@ final class WindowAppearanceSnapshotTests: XCTestCase {
         XCTAssertEqual(color.hexString(), "#272822", file: file, line: line)
         XCTAssertEqual(opacity, 0.6, accuracy: 0.0001, file: file, line: line)
         XCTAssertEqual(renderingMode, .hostLayerSolidColor, file: file, line: line)
+    }
+
+    private func assertClearBackdrop(
+        _ policy: WindowBackdropPolicy,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case .clear = policy else {
+            XCTFail("expected clear backdrop", file: file, line: line)
+            return
+        }
     }
 
 }
