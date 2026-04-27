@@ -3,9 +3,18 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import postgres, { type Sql } from "postgres";
 import { closeCloudDbForTests } from "../db/client";
+import {
+  VmBillingGateway,
+  noOpVmBillingGateway,
+  type VmBillingGatewayShape,
+} from "../services/vms/billingGateway";
 import { VmProviderGateway, type VmProviderGatewayShape } from "../services/vms/providerGateway";
 import { VmRepositoryLive } from "../services/vms/repository";
-import { VmLimitExceededError, VmNotFoundError } from "../services/vms/errors";
+import {
+  VmCreateCreditsInsufficientError,
+  VmLimitExceededError,
+  VmNotFoundError,
+} from "../services/vms/errors";
 import {
   createVm,
   openAttachEndpoint,
@@ -25,8 +34,15 @@ function databaseURL() {
   return url;
 }
 
-function providerLayer(provider: VmProviderGatewayShape) {
-  return Layer.mergeAll(VmRepositoryLive, Layer.succeed(VmProviderGateway, provider));
+function providerLayer(
+  provider: VmProviderGatewayShape,
+  billing: VmBillingGatewayShape = noOpVmBillingGateway(),
+) {
+  return Layer.mergeAll(
+    VmRepositoryLive,
+    Layer.succeed(VmProviderGateway, provider),
+    Layer.succeed(VmBillingGateway, billing),
+  );
 }
 
 beforeAll(() => {
@@ -66,6 +82,7 @@ describe("VM Effect workflows", () => {
 
     const program = createVm({
       userId: "user-workflow-idem",
+      billingCustomerType: "team",
       billingTeamId: "team-workflow-idem",
       billingPlanId: "free",
       maxActiveVms: 1,
@@ -185,6 +202,7 @@ describe("VM Effect workflows", () => {
     const error = await Effect.runPromise(
       createVm({
         userId: "user-workflow-limit-new",
+        billingCustomerType: "team",
         billingTeamId: "team-workflow-limit",
         billingPlanId: "free",
         maxActiveVms: 1,
@@ -199,6 +217,164 @@ describe("VM Effect workflows", () => {
 
     expect(error).toBeInstanceOf(VmLimitExceededError);
     expect(createCalls).toBe(0);
+  });
+
+  dbTest("reserves Stack Auth credits only once per new idempotency key", async () => {
+    if (!sql) throw new Error("test database not initialized");
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+
+    let createCalls = 0;
+    const provider: VmProviderGatewayShape = {
+      create: () =>
+        Effect.sync(() => {
+          createCalls += 1;
+          return {
+            provider: "freestyle" as const,
+            providerVmId: "provider-vm-credit-idem",
+            status: "running" as const,
+            image: "snapshot-credit",
+            createdAt: Date.now(),
+          };
+        }),
+      destroy: () => Effect.void,
+      exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+      openAttach: () => Effect.fail(new Error("unused") as never),
+      openSSH: () => Effect.fail(new Error("unused") as never),
+      revokeSSHIdentity: () => Effect.void,
+    };
+
+    let reserveCalls = 0;
+    const billing: VmBillingGatewayShape = {
+      reserveCreate: () =>
+        Effect.sync(() => {
+          reserveCalls += 1;
+          return {
+            kind: "stack_item" as const,
+            itemId: "cmux-vm-create-credit",
+            customerType: "team" as const,
+            customerId: "team-workflow-credit-idem",
+            amount: 1,
+          };
+        }),
+      refundCreate: () => Effect.void,
+    };
+
+    const program = createVm({
+      userId: "user-workflow-credit-idem",
+      billingCustomerType: "team",
+      billingTeamId: "team-workflow-credit-idem",
+      billingPlanId: "free",
+      maxActiveVms: 1,
+      provider: "freestyle",
+      image: "snapshot-credit",
+      idempotencyKey: "credit-idem-1",
+    });
+    const layer = providerLayer(provider, billing);
+
+    const first = await Effect.runPromise(program.pipe(Effect.provide(layer)));
+    const second = await Effect.runPromise(program.pipe(Effect.provide(layer)));
+
+    expect(first).toEqual(second);
+    expect(createCalls).toBe(1);
+    expect(reserveCalls).toBe(1);
+
+    const usageEvents = await sql<{ eventType: string }[]>`
+      select event_type as "eventType" from cloud_vm_usage_events
+      where user_id = 'user-workflow-credit-idem'
+      order by created_at, event_type
+    `;
+    expect(usageEvents.map((event) => event.eventType)).toContain("vm.create.credit.reserved");
+  });
+
+  dbTest("does not call the provider when Stack Auth credits are insufficient", async () => {
+    if (!sql) throw new Error("test database not initialized");
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+
+    let createCalls = 0;
+    const provider: VmProviderGatewayShape = {
+      create: () =>
+        Effect.sync(() => {
+          createCalls += 1;
+          throw new Error("provider should not be called");
+        }),
+      destroy: () => Effect.void,
+      exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+      openAttach: () => Effect.fail(new Error("unused") as never),
+      openSSH: () => Effect.fail(new Error("unused") as never),
+      revokeSSHIdentity: () => Effect.void,
+    };
+    const billing: VmBillingGatewayShape = {
+      reserveCreate: () => Effect.fail(new VmCreateCreditsInsufficientError({
+        itemId: "cmux-vm-create-credit",
+        billingCustomerId: "team-workflow-credit-empty",
+        amount: 1,
+      })),
+      refundCreate: () => Effect.void,
+    };
+
+    const error = await Effect.runPromise(
+      createVm({
+        userId: "user-workflow-credit-empty",
+        billingCustomerType: "team",
+        billingTeamId: "team-workflow-credit-empty",
+        billingPlanId: "free",
+        maxActiveVms: 1,
+        provider: "freestyle",
+        image: "snapshot-credit-empty",
+        idempotencyKey: "credit-empty-1",
+      }).pipe(
+        Effect.flip,
+        Effect.provide(providerLayer(provider, billing)),
+      ),
+    );
+
+    expect(error).toBeInstanceOf(VmCreateCreditsInsufficientError);
+    expect(createCalls).toBe(0);
+  });
+
+  dbTest("refunds a reserved Stack Auth credit when provider create fails", async () => {
+    if (!sql) throw new Error("test database not initialized");
+    await sql`truncate cloud_vm_usage_events, cloud_vm_leases, cloud_vms restart identity cascade`;
+
+    const provider: VmProviderGatewayShape = {
+      create: () => Effect.fail(new Error("provider unavailable") as never),
+      destroy: () => Effect.void,
+      exec: () => Effect.succeed({ exitCode: 0, stdout: "", stderr: "" }),
+      openAttach: () => Effect.fail(new Error("unused") as never),
+      openSSH: () => Effect.fail(new Error("unused") as never),
+      revokeSSHIdentity: () => Effect.void,
+    };
+    let refundCalls = 0;
+    const billing: VmBillingGatewayShape = {
+      reserveCreate: () => Effect.succeed({
+        kind: "stack_item" as const,
+        itemId: "cmux-vm-create-credit",
+        customerType: "team" as const,
+        customerId: "team-workflow-credit-refund",
+        amount: 1,
+      }),
+      refundCreate: () =>
+        Effect.sync(() => {
+          refundCalls += 1;
+        }),
+    };
+
+    await expect(
+      Effect.runPromise(
+        createVm({
+          userId: "user-workflow-credit-refund",
+          billingCustomerType: "team",
+          billingTeamId: "team-workflow-credit-refund",
+          billingPlanId: "free",
+          maxActiveVms: 1,
+          provider: "freestyle",
+          image: "snapshot-credit-refund",
+          idempotencyKey: "credit-refund-1",
+        }).pipe(Effect.provide(providerLayer(provider, billing))),
+      ),
+    ).rejects.toThrow();
+
+    expect(refundCalls).toBe(1);
   });
 
   dbTest("does not attach another user's VM", async () => {

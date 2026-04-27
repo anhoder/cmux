@@ -26,8 +26,6 @@ mock.module("../services/vms/workflows", () => ({
   runVmWorkflow,
 }));
 
-process.env.CMUX_RATE_LIMIT_DRIVER = "disabled";
-
 const { GET, POST } = await import("../app/api/vm/route");
 const { DELETE } = await import("../app/api/vm/[id]/route");
 const attachRoute = await import("../app/api/vm/[id]/attach-endpoint/route");
@@ -129,6 +127,7 @@ describe("VM REST auth", () => {
     });
     expect(createVm).toHaveBeenCalledWith({
       userId: "user-1",
+      billingCustomerType: "team",
       billingTeamId: "team-1",
       billingPlanId: "pro",
       maxActiveVms: 10,

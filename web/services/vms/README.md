@@ -7,6 +7,7 @@ Backend for `cmux vm new/ls/rm/exec/attach` and the sidebar Cloud VM surface. St
 ```text
 services/vms/
   auth.ts             Stack Auth request verification helpers
+  billingGateway.ts   Stack Auth VM create credit reservations
   entitlements.ts     Team plan and active VM limit resolution
   drivers/            Provider SDK adapters for E2B and Freestyle
   errors.ts           Typed Effect errors for VM workflows
@@ -14,7 +15,6 @@ services/vms/
   repository.ts       Effect service for Postgres state and usage rows
   routeHelpers.ts     Shared authenticated REST route helpers
   workflows.ts        Effect workflows for create, list, destroy, exec, attach
-services/rateLimit.ts Redis/Upstash-backed Effect rate limit service
 db/
   schema.ts           Drizzle schema for VM state, leases, and usage events
   migrations/         SQL migrations applied by `bun db:migrate`
@@ -81,21 +81,16 @@ Set these Vercel environment variables per production/staging environment:
 - `E2B_CMUXD_WS_TEMPLATE`, E2B template alias/name for WebSocket PTY sandboxes.
 - `FREESTYLE_SANDBOX_SNAPSHOT`, Freestyle snapshot id.
 - `CMUX_VM_DEFAULT_PROVIDER`, `freestyle` or `e2b`.
-- `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`, Upstash Redis REST endpoint/token for rate limits.
-- `KV_REST_API_URL` and `KV_REST_API_TOKEN`, equivalent Vercel Marketplace Upstash env names.
-- `REDIS_URL` or `KV_URL`, supported for Redis protocol connections when REST envs are not available.
-- `CMUX_VM_CREATE_RATE_LIMIT_BURST`, default `3`.
-- `CMUX_VM_CREATE_RATE_LIMIT_BURST_WINDOW_MS`, default `600000`.
-- `CMUX_VM_CREATE_RATE_LIMIT_DAILY`, default `20`.
-- `CMUX_VM_CREATE_RATE_LIMIT_DAILY_WINDOW_MS`, default `86400000`.
-- `CMUX_VM_CONTROL_RATE_LIMIT_BURST`, default `600`.
-- `CMUX_VM_CONTROL_RATE_LIMIT_WINDOW_MS`, default `60000`.
+- `CMUX_VM_CREATE_CREDIT_ITEM_ID`, optional Stack Auth team item used as a prepaid create-credit bucket. When unset, create credits are disabled and only active VM limits apply.
+- `CMUX_VM_CREATE_CREDIT_COST`, default `1`.
+- `CMUX_VM_CREATE_CREDIT_COST_E2B`, optional provider-specific override.
+- `CMUX_VM_CREATE_CREDIT_COST_FREESTYLE`, optional provider-specific override.
 - `CMUX_VM_FREE_MAX_ACTIVE_VMS`, default `1`.
 - `CMUX_VM_PAID_MAX_ACTIVE_VMS`, default `10`.
 - Stack Auth environment variables.
 - Axiom/OpenTelemetry exporter variables.
 
-Local development keeps using Docker Postgres through `DATABASE_URL` and Docker Redis through `REDIS_URL`, both derived from `CMUX_PORT`.
+Local development keeps using Docker Postgres through `DATABASE_URL`, derived from `CMUX_PORT`.
 
 Run production/staging migrations explicitly, never during Vercel build or route startup:
 
@@ -117,9 +112,9 @@ Use `CMUX_PORT` to run multiple isolated web and database environments on one ma
 CMUX_PORT=10180 bun dev
 ```
 
-`bun dev` sources `~/.secrets/cmuxterm-dev.env` (falling back to the legacy secret files), derives local database and Redis URLs from `CMUX_PORT`, starts this worktree's Docker Postgres and Redis, applies Drizzle migrations, then starts Next.js. When it exits or is interrupted, it stops the matching Docker containers and network while preserving the Postgres volume.
+`bun dev` sources `~/.secrets/cmuxterm-dev.env` (falling back to the legacy secret files), derives the local database URL from `CMUX_PORT`, starts this worktree's Docker Postgres, applies Drizzle migrations, then starts Next.js. When it exits or is interrupted, it stops the matching Docker container and network while preserving the Postgres volume.
 
-The dev Postgres port is `CMUX_PORT + 10000`, so `CMUX_PORT=10180` maps to `localhost:20180`. The dev Redis port is `CMUX_PORT + 20000`. `bun db:test` starts a separate test DB on `CMUX_PORT + 30000` and test Redis on `CMUX_PORT + 40000`, applies migrations twice, and runs behavior tests against real Postgres and Redis containers.
+The dev Postgres port is `CMUX_PORT + 10000`, so `CMUX_PORT=10180` maps to `localhost:20180`. `bun db:test` starts a separate test DB on `CMUX_PORT + 30000`, applies migrations twice, and runs behavior tests against a real Postgres container.
 
 ## Provider matrix
 
@@ -136,6 +131,6 @@ E2B interactive paths require a cmuxd WebSocket PTY image. The backend writes on
 
 ## Usage, limits, and pricing
 
-The usage ledger is in Postgres. Hot request throttling is in Redis, keyed by Stack Auth user id. VM create has burst and daily limits because it can spend provider money. Other VM endpoints use a generous control-plane limit.
+The usage ledger is in Postgres. VM create pricing gates use Stack Auth payment items when `CMUX_VM_CREATE_CREDIT_ITEM_ID` is configured. The create workflow inserts the idempotent VM row first, reserves one Stack Auth create credit only for a newly inserted row, calls the provider, and refunds the credit if provisioning fails before a usable VM exists.
 
 Plan limits are team-based. Stack Auth personal teams should stay enabled for both dev/staging and production projects. New VM rows store `billing_team_id` and `billing_plan_id`; the free plan allows one active VM by default. Paid plan activation should write a readable plan id such as `pro` into Stack Auth team read-only metadata (`cmuxVmPlan`) or equivalent billing sync metadata, then configure the matching `CMUX_VM_PLAN_<PLAN>_MAX_ACTIVE_VMS` env var.

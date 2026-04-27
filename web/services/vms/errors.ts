@@ -31,13 +31,26 @@ export class VmLimitExceededError extends Data.TaggedError("VmLimitExceededError
   readonly limit: number;
 }> {}
 
+export class VmCreateCreditsInsufficientError extends Data.TaggedError("VmCreateCreditsInsufficientError")<{
+  readonly itemId: string;
+  readonly billingCustomerId: string;
+  readonly amount: number;
+}> {}
+
+export class VmBillingError extends Data.TaggedError("VmBillingError")<{
+  readonly operation: string;
+  readonly cause: unknown;
+}> {}
+
 export type VmWorkflowError =
   | VmDatabaseError
   | VmProviderOperationError
   | VmNotFoundError
   | VmCreateInProgressError
   | VmCreateFailedError
-  | VmLimitExceededError;
+  | VmLimitExceededError
+  | VmCreateCreditsInsufficientError
+  | VmBillingError;
 
 export function isVmNotFoundError(err: unknown): err is VmNotFoundError {
   return (err as { _tag?: string } | null)?._tag === "VmNotFoundError";
@@ -53,4 +66,12 @@ export function isVmCreateFailedError(err: unknown): err is VmCreateFailedError 
 
 export function isVmLimitExceededError(err: unknown): err is VmLimitExceededError {
   return (err as { _tag?: string } | null)?._tag === "VmLimitExceededError";
+}
+
+export function isVmCreateCreditsInsufficientError(err: unknown): err is VmCreateCreditsInsufficientError {
+  return (err as { _tag?: string } | null)?._tag === "VmCreateCreditsInsufficientError";
+}
+
+export function isVmBillingError(err: unknown): err is VmBillingError {
+  return (err as { _tag?: string } | null)?._tag === "VmBillingError";
 }

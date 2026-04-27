@@ -4,6 +4,7 @@ export type AuthedUser = {
   id: string;
   displayName: string | null;
   primaryEmail: string | null;
+  billingCustomerType: "team" | "user";
   billingTeamId: string;
   teamIds: readonly string[];
   billingPlanId: string | null;
@@ -61,6 +62,7 @@ async function authedUserFromStackUser(user: StackUserLike): Promise<AuthedUser>
     id: user.id,
     displayName: user.displayName,
     primaryEmail: user.primaryEmail,
+    billingCustomerType: billingTeam ? "team" : "user",
     billingTeamId: billingTeam?.id ?? user.id,
     teamIds,
     billingPlanId: planIdFromMetadata(billingTeam?.clientReadOnlyMetadata) ??

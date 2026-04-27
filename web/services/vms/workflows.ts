@@ -9,6 +9,13 @@ import type {
   SSHEndpoint,
 } from "./drivers";
 import {
+  VmBillingGateway,
+  VmBillingGatewayLive,
+  type BillingCustomerType,
+  type VmCreateCreditReservation,
+  type VmBillingGatewayShape,
+} from "./billingGateway";
+import {
   VmCreateFailedError,
   VmCreateInProgressError,
   VmNotFoundError,
@@ -21,6 +28,7 @@ import {
   VmRepositoryLive,
   type CloudVmLeaseKind,
   type CloudVmRow,
+  type VmRepositoryShape,
 } from "./repository";
 
 export type VmEntry = {
@@ -30,10 +38,10 @@ export type VmEntry = {
   readonly createdAt: number;
 };
 
-export const VmWorkflowLive = Layer.mergeAll(VmRepositoryLive, VmProviderGatewayLive);
+export const VmWorkflowLive = Layer.mergeAll(VmRepositoryLive, VmProviderGatewayLive, VmBillingGatewayLive);
 
 export function runVmWorkflow<A>(
-  program: Effect.Effect<A, VmWorkflowError, VmRepository | VmProviderGateway>,
+  program: Effect.Effect<A, VmWorkflowError, VmRepository | VmProviderGateway | VmBillingGateway>,
 ): Promise<A> {
   return Effect.runPromise(program.pipe(Effect.provide(VmWorkflowLive)));
 }
@@ -48,6 +56,7 @@ export function listUserVms(userId: string) {
 
 export function createVm(input: {
   readonly userId: string;
+  readonly billingCustomerType: BillingCustomerType;
   readonly billingTeamId: string;
   readonly billingPlanId: string;
   readonly maxActiveVms: number;
@@ -58,6 +67,7 @@ export function createVm(input: {
   return Effect.gen(function* () {
     const repo = yield* VmRepository;
     const providers = yield* VmProviderGateway;
+    const billing = yield* VmBillingGateway;
     const create = yield* repo.beginCreate(input);
 
     if (!create.inserted) {
@@ -78,6 +88,20 @@ export function createVm(input: {
       return vmEntryFromRow(existing);
     }
 
+    const creditReservation = yield* billing.reserveCreate({
+      userId: input.userId,
+      billingCustomerType: input.billingCustomerType,
+      billingTeamId: input.billingTeamId,
+      billingPlanId: input.billingPlanId,
+      provider: input.provider,
+      image: input.image,
+      vmId: create.vm.id,
+      idempotencyKey: input.idempotencyKey,
+    });
+
+    yield* recordCreditEvent(repo, create.vm, "vm.create.credit.reserved", creditReservation)
+      .pipe(Effect.catchAll(() => Effect.void));
+
     yield* repo.recordUsageEvent({
       userId: input.userId,
       billingTeamId: input.billingTeamId,
@@ -92,6 +116,7 @@ export function createVm(input: {
     const handle = yield* providers.create(input.provider, { image: input.image }).pipe(
       Effect.tapError((err) =>
         Effect.all([
+          refundCredit(billing, repo, create.vm, creditReservation),
           repo.markCreateFailed({
             id: create.vm.id,
             code: err.operation,
@@ -121,6 +146,7 @@ export function createVm(input: {
         Effect.catchAll((err) =>
           Effect.gen(function* () {
             yield* providers.destroy(input.provider, handle.providerVmId).pipe(Effect.catchAll(() => Effect.void));
+            yield* refundCredit(billing, repo, create.vm, creditReservation);
             yield* repo.markCreateFailed({
               id: create.vm.id,
               code: "database_finalize_failed",
@@ -322,6 +348,42 @@ function storeEndpointLeases(vm: CloudVmRow, endpoint: AttachEndpoint | SSHEndpo
       });
     }
   });
+}
+
+function recordCreditEvent(
+  repo: VmRepositoryShape,
+  vm: CloudVmRow,
+  eventType: string,
+  reservation: VmCreateCreditReservation,
+) {
+  if (reservation.kind === "none") return Effect.void;
+  return repo.recordUsageEvent({
+    userId: vm.userId,
+    billingTeamId: vm.billingTeamId,
+    billingPlanId: vm.billingPlanId,
+    vmId: vm.id,
+    eventType,
+    provider: vm.provider,
+    imageId: vm.imageId,
+    metadata: {
+      itemId: reservation.itemId,
+      amount: reservation.amount,
+      customerType: reservation.customerType,
+      customerIdSet: !!reservation.customerId,
+    },
+  });
+}
+
+function refundCredit(
+  billing: VmBillingGatewayShape,
+  repo: VmRepositoryShape,
+  vm: CloudVmRow,
+  reservation: VmCreateCreditReservation,
+) {
+  return billing.refundCreate(reservation).pipe(
+    Effect.andThen(recordCreditEvent(repo, vm, "vm.create.credit.refunded", reservation)),
+    Effect.catchAll(() => Effect.void),
+  );
 }
 
 function recordEndpointLease(

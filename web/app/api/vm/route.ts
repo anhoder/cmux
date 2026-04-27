@@ -8,14 +8,14 @@ import {
   type ProviderId,
 } from "../../../services/vms/drivers";
 import {
+  isVmBillingError,
   isVmCreateFailedError,
+  isVmCreateCreditsInsufficientError,
   isVmCreateInProgressError,
   isVmLimitExceededError,
 } from "../../../services/vms/errors";
-import { vmCreateRateLimitPolicies } from "../../../services/rateLimit";
 import { resolveVmEntitlements } from "../../../services/vms/entitlements";
 import {
-  enforceVmRateLimit,
   jsonResponse,
   withAuthedVmApiRoute,
 } from "../../../services/vms/routeHelpers";
@@ -117,12 +117,10 @@ export async function POST(request: Request): Promise<Response> {
         "cmux.idempotency_key_set": !!idempotencyKey,
       });
 
-      const createRateLimitFailure = await enforceVmRateLimit(user, vmCreateRateLimitPolicies(), span);
-      if (createRateLimitFailure) return createRateLimitFailure;
-
       const entitlements = resolveVmEntitlements(user);
       setSpanAttributes(span, {
         "cmux.billing.team_id_set": !!entitlements.billingTeamId,
+        "cmux.billing.customer_type": user.billingCustomerType,
         "cmux.billing.plan_id": entitlements.planId,
         "cmux.vm.max_active": entitlements.maxActiveVms,
       });
@@ -131,6 +129,7 @@ export async function POST(request: Request): Promise<Response> {
       try {
         created = await runVmWorkflow(createVm({
           userId: user.id,
+          billingCustomerType: user.billingCustomerType,
           billingTeamId: entitlements.billingTeamId,
           billingPlanId: entitlements.planId,
           maxActiveVms: entitlements.maxActiveVms,
@@ -151,6 +150,16 @@ export async function POST(request: Request): Promise<Response> {
             limit: err.limit,
             billingTeamId: err.billingTeamId,
           }, 402);
+        }
+        if (isVmCreateCreditsInsufficientError(err)) {
+          return jsonResponse({
+            error: "vm_create_credits_insufficient",
+            itemId: err.itemId,
+            amount: err.amount,
+          }, 402);
+        }
+        if (isVmBillingError(err)) {
+          return jsonResponse({ error: "vm_billing_unavailable" }, 503);
         }
         throw err;
       }
