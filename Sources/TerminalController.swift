@@ -3300,6 +3300,22 @@ class TerminalController {
         return v2EnsureHandleRef(kind: kind, uuid: uuid)
     }
 
+    func v2WorkspaceRefs(for ids: [UUID]) -> [UUID: String] {
+        var refs: [UUID: String] = [:]
+        refs.reserveCapacity(ids.count)
+        for id in ids {
+            refs[id] = v2EnsureHandleRef(kind: .workspace, uuid: id)
+        }
+        return refs
+    }
+
+    func v2WorkspaceAndSurfaceRefs(workspaceId: UUID, surfaceId: UUID) -> (workspaceRef: String, surfaceRef: String) {
+        return (
+            workspaceRef: v2EnsureHandleRef(kind: .workspace, uuid: workspaceId),
+            surfaceRef: v2EnsureHandleRef(kind: .surface, uuid: surfaceId)
+        )
+    }
+
     private func v2TabRef(uuid: UUID?) -> Any {
         guard let uuid else { return NSNull() }
         let surfaceRef = v2EnsureHandleRef(kind: .surface, uuid: uuid)

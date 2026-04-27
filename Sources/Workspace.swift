@@ -7172,19 +7172,41 @@ struct ClosedBrowserPanelRestoreSnapshot {
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 enum WorkspaceSurfaceIdentifierClipboardText {
-    static func make(workspaceId: UUID) -> String {
-        "workspace_id=\(workspaceId.uuidString)"
+    static func make(workspaceId: UUID, workspaceRef: String? = nil) -> String {
+        var lines: [String] = []
+        if let workspaceRef {
+            lines.append("workspace_ref=\(workspaceRef)")
+        }
+        lines.append("workspace_id=\(workspaceId.uuidString)")
+        return lines.joined(separator: "\n")
     }
 
     static func make(workspaceIds: [UUID]) -> String {
-        workspaceIds.map { make(workspaceId: $0) }.joined(separator: "\n")
+        workspaceIds.map { make(workspaceId: $0) }.joined(separator: "\n\n")
     }
 
-    static func make(workspaceId: UUID, surfaceId: UUID) -> String {
-        """
-        \(make(workspaceId: workspaceId))
-        surface_id=\(surfaceId.uuidString)
-        """
+    static func make(workspaces: [(id: UUID, ref: String?)]) -> String {
+        workspaces
+            .map { make(workspaceId: $0.id, workspaceRef: $0.ref) }
+            .joined(separator: "\n\n")
+    }
+
+    static func make(
+        workspaceId: UUID,
+        surfaceId: UUID,
+        workspaceRef: String? = nil,
+        surfaceRef: String? = nil
+    ) -> String {
+        var lines: [String] = []
+        if let workspaceRef {
+            lines.append("workspace_ref=\(workspaceRef)")
+        }
+        if let surfaceRef {
+            lines.append("surface_ref=\(surfaceRef)")
+        }
+        lines.append("workspace_id=\(workspaceId.uuidString)")
+        lines.append("surface_id=\(surfaceId.uuidString)")
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -11320,10 +11342,16 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func copyWorkspaceAndSurfaceIDsToPasteboard(surfaceId: UUID) {
+        let refs = TerminalController.shared.v2WorkspaceAndSurfaceRefs(workspaceId: id, surfaceId: surfaceId)
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(
-            WorkspaceSurfaceIdentifierClipboardText.make(workspaceId: id, surfaceId: surfaceId),
+            WorkspaceSurfaceIdentifierClipboardText.make(
+                workspaceId: id,
+                surfaceId: surfaceId,
+                workspaceRef: refs.workspaceRef,
+                surfaceRef: refs.surfaceRef
+            ),
             forType: .string
         )
     }
