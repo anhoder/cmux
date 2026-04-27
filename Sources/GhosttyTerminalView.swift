@@ -6614,10 +6614,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(
-            """
-            workspace_id=\(terminalSurface.tabId.uuidString)
-            surface_id=\(terminalSurface.id.uuidString)
-            """,
+            WorkspaceSurfaceIdentifierClipboardText.make(
+                workspaceId: terminalSurface.tabId,
+                surfaceId: terminalSurface.id
+            ),
             forType: .string
         )
     }

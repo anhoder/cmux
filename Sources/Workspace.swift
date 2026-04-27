@@ -7171,6 +7171,15 @@ struct ClosedBrowserPanelRestoreSnapshot {
 
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
+enum WorkspaceSurfaceIdentifierClipboardText {
+    static func make(workspaceId: UUID, surfaceId: UUID) -> String {
+        """
+        workspace_id=\(workspaceId.uuidString)
+        surface_id=\(surfaceId.uuidString)
+        """
+    }
+}
+
 @MainActor
 final class Workspace: Identifiable, ObservableObject {
     static let terminalScrollBarHiddenDidChangeNotification = Notification.Name(
@@ -11302,18 +11311,11 @@ final class Workspace: Identifiable, ObservableObject {
         return shortcuts
     }
 
-    private static func workspaceAndSurfaceIDsClipboardText(workspaceId: UUID, surfaceId: UUID) -> String {
-        """
-        workspace_id=\(workspaceId.uuidString)
-        surface_id=\(surfaceId.uuidString)
-        """
-    }
-
     private func copyWorkspaceAndSurfaceIDsToPasteboard(surfaceId: UUID) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(
-            Self.workspaceAndSurfaceIDsClipboardText(workspaceId: id, surfaceId: surfaceId),
+            WorkspaceSurfaceIdentifierClipboardText.make(workspaceId: id, surfaceId: surfaceId),
             forType: .string
         )
     }
