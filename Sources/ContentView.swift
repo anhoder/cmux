@@ -12333,7 +12333,7 @@ private struct TabItemView: View, Equatable {
     }
 
     private func copyWorkspaceIdsToPasteboard(_ ids: [UUID]) {
-        copyTextToPasteboard(ids.map(\.uuidString).joined(separator: "\n"))
+        copyTextToPasteboard(WorkspaceSurfaceIdentifierClipboardText.make(workspaceIds: ids))
     }
 
     private var visibleAuxiliaryDetails: SidebarWorkspaceAuxiliaryDetailVisibility {

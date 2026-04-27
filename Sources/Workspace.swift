@@ -7172,9 +7172,17 @@ struct ClosedBrowserPanelRestoreSnapshot {
 /// Workspace represents a sidebar tab.
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 enum WorkspaceSurfaceIdentifierClipboardText {
+    static func make(workspaceId: UUID) -> String {
+        "workspace_id=\(workspaceId.uuidString)"
+    }
+
+    static func make(workspaceIds: [UUID]) -> String {
+        workspaceIds.map { make(workspaceId: $0) }.joined(separator: "\n")
+    }
+
     static func make(workspaceId: UUID, surfaceId: UUID) -> String {
         """
-        workspace_id=\(workspaceId.uuidString)
+        \(make(workspaceId: workspaceId))
         surface_id=\(surfaceId.uuidString)
         """
     }
