@@ -12894,11 +12894,6 @@ private struct TabItemView: View, Equatable {
             }
         }
 
-        Button(copyWorkspaceIDLabel) {
-            copyWorkspaceIdsToPasteboard(targetIds)
-        }
-        .disabled(targetIds.isEmpty)
-
         if !remoteContextMenuWorkspaceIds.isEmpty {
             Divider()
 
@@ -13057,6 +13052,13 @@ private struct TabItemView: View, Equatable {
             clearLatestNotifications(targetIds)
         }
         .disabled(!hasLatestNotifications(in: targetIds))
+
+        Divider()
+
+        Button(copyWorkspaceIDLabel) {
+            copyWorkspaceIdsToPasteboard(targetIds)
+        }
+        .disabled(targetIds.isEmpty)
     }
 
     private var backgroundColor: Color {

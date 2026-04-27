@@ -8626,14 +8626,6 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             keyEquivalent: ""
         )
         pasteItem.target = self
-        if terminalSurface != nil {
-            let identifiersItem = menu.addItem(
-                withTitle: String(localized: "terminalContextMenu.copyWorkspaceAndSurfaceIDs", defaultValue: "Copy Workspace and Surface IDs"),
-                action: #selector(copyWorkspaceAndSurfaceIdentifiers(_:)),
-                keyEquivalent: ""
-            )
-            identifiersItem.target = self
-        }
         menu.addItem(.separator())
         let splitHorizontallyItem = menu.addItem(
             withTitle: String(localized: "terminalContextMenu.splitHorizontally", defaultValue: "Split Horizontally"),
@@ -8669,6 +8661,15 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
             systemSymbolName: "arrow.trianglehead.2.clockwise",
             accessibilityDescription: nil
         )
+        if terminalSurface != nil {
+            menu.addItem(.separator())
+            let identifiersItem = menu.addItem(
+                withTitle: String(localized: "terminalContextMenu.copyWorkspaceAndSurfaceIDs", defaultValue: "Copy Workspace and Surface IDs"),
+                action: #selector(copyWorkspaceAndSurfaceIdentifiers(_:)),
+                keyEquivalent: ""
+            )
+            identifiersItem.target = self
+        }
         return menu
     }
 
