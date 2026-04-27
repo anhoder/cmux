@@ -1069,7 +1069,7 @@ final class FilePreviewPDFChromeTests: XCTestCase {
         }
 
         defaults.removeObject(forKey: FilePreviewPDFChromeStyleVariant.defaultsKey)
-        XCTAssertEqual(FilePreviewPDFChromeStyleVariant.current(), .systemControlGroup)
+        XCTAssertEqual(FilePreviewPDFChromeStyleVariant.current(), .liquidGlass)
 
         FilePreviewPDFChromeStyleVariant.thinOutline.persist()
         XCTAssertEqual(FilePreviewPDFChromeStyleVariant.current(), .thinOutline)

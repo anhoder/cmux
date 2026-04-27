@@ -2657,10 +2657,10 @@ private struct PDFPreviewChromeDebugView: View {
     @ObservedObject var model: PDFPreviewChromeDebugModel
 
     @AppStorage(FilePreviewPDFChromeStyleVariant.defaultsKey)
-    private var chromeStyleRawValue = FilePreviewPDFChromeStyleVariant.systemControlGroup.rawValue
+    private var chromeStyleRawValue = FilePreviewPDFChromeStyleVariant.liquidGlass.rawValue
 
     private var currentVariant: FilePreviewPDFChromeStyleVariant {
-        FilePreviewPDFChromeStyleVariant(rawValue: chromeStyleRawValue) ?? .systemControlGroup
+        FilePreviewPDFChromeStyleVariant(rawValue: chromeStyleRawValue) ?? .liquidGlass
     }
 
     var body: some View {
@@ -2721,7 +2721,7 @@ private struct PDFPreviewChromeDebugView: View {
                     }
 
                     Button(String(localized: "debug.pdfPreviewChrome.resetToDefault", defaultValue: "Reset to Default")) {
-                        apply(.systemControlGroup)
+                        apply(.liquidGlass)
                     }
                 }
             }
@@ -2815,51 +2815,12 @@ private struct PDFPreviewChromeDebugSample: View {
     @ObservedObject var model: PDFPreviewChromeDebugModel
 
     var body: some View {
-        if variant == .systemControlGroup {
-            ControlGroup {
-                sampleButtons(includeDividers: false)
-            } label: {
-                Label(
-                    String(localized: "filePreview.pdf.zoomControls", defaultValue: "Zoom Controls"),
-                    systemImage: "magnifyingglass"
-                )
-            }
-            .controlSize(.regular)
-        } else {
-            HStack(spacing: 0) {
-                sampleButtons(includeDividers: true)
-            }
-            .frame(height: 36)
-            .modifier(FilePreviewPDFChromeStyleModifier(variant: variant))
-        }
-    }
-
-    @ViewBuilder
-    private func sampleButtons(includeDividers: Bool) -> some View {
-        sampleButton(.zoomOut)
-        if includeDividers {
-            Divider()
-                .frame(height: 20)
-        }
-        sampleButton(.actualSize)
-        if includeDividers {
-            Divider()
-                .frame(height: 20)
-        }
-        sampleButton(.zoomIn)
-    }
-
-    private func sampleButton(_ action: PDFPreviewChromeDebugAction) -> some View {
-        Button {
-            model.record(action)
-        } label: {
-            Image(systemName: action.systemName)
-                .font(.system(size: 16, weight: .regular))
-                .frame(width: 38, height: 36)
-                .contentShape(Rectangle())
-        }
-        .accessibilityLabel(action.title)
-        .help(action.title)
+        FilePreviewPDFZoomChromeView(
+            chromeStyleVariant: variant,
+            zoomOut: { model.record(.zoomOut) },
+            actualSize: { model.record(.actualSize) },
+            zoomIn: { model.record(.zoomIn) }
+        )
     }
 }
 
