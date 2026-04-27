@@ -24,7 +24,14 @@ export function assertVmCreateEnabled(
 }
 
 export function providerEnabledEnvKey(provider: ProviderId): string {
-  return provider === "e2b" ? "CMUX_VM_E2B_ENABLED" : "CMUX_VM_FREESTYLE_ENABLED";
+  switch (provider) {
+    case "e2b":
+      return "CMUX_VM_E2B_ENABLED";
+    case "freestyle":
+      return "CMUX_VM_FREESTYLE_ENABLED";
+    default:
+      return assertNever(provider);
+  }
 }
 
 export function isDeployedRuntime(env: VmRuntimeEnv = process.env): boolean {
@@ -64,4 +71,8 @@ function isTrueFlag(value: string | undefined): boolean {
     default:
       return false;
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unsupported VM provider: ${String(value)}`);
 }

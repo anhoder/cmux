@@ -99,7 +99,11 @@ Set these Vercel environment variables per production/staging environment:
 - `PGUSER`, IAM-enabled Postgres role.
 - `PGDATABASE`, app database name.
 - `CMUX_DB_POOL_MAX`, small pool size for Vercel Functions. Start with `5`.
-- `CMUX_DB_SSL_REJECT_UNAUTHORIZED`, currently `false` unless an RDS CA certificate is configured.
+- `CMUX_DB_SSL_CA_PEM`, optional AWS RDS CA bundle PEM, such as the current global bundle from AWS.
+- `CMUX_DB_SSL_CA_PEM_BASE64`, Vercel-friendly alternative to `CMUX_DB_SSL_CA_PEM`.
+- `CMUX_DB_SSL_REJECT_UNAUTHORIZED`, defaults to verifying AWS RDS server certificates. Only set
+  `false` temporarily after explicitly accepting the risk, and prefer installing or pinning the AWS
+  RDS global CA bundle.
 - `CMUX_VM_CREATE_ENABLED`, global create kill switch. Set `0` to block new paid creates while
   keeping list, attach, and delete available.
 - `CMUX_VM_E2B_ENABLED`, per-provider E2B create kill switch.

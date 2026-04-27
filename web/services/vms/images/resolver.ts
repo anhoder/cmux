@@ -29,7 +29,14 @@ const typedManifest = manifest as {
 };
 
 export function providerImageEnvKey(provider: ProviderId): string {
-  return provider === "e2b" ? "E2B_CMUXD_WS_TEMPLATE" : "FREESTYLE_SANDBOX_SNAPSHOT";
+  switch (provider) {
+    case "e2b":
+      return "E2B_CMUXD_WS_TEMPLATE";
+    case "freestyle":
+      return "FREESTYLE_SANDBOX_SNAPSHOT";
+    default:
+      return assertNever(provider);
+  }
 }
 
 export function listVmImageManifestEntries(): readonly VmImageManifestEntry[] {
@@ -109,4 +116,8 @@ function selectionFromEntry(entry: VmImageManifestEntry): VmImageSelection {
     imageVersion: entry.version,
     manifestEntry: entry,
   };
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unsupported VM provider: ${String(value)}`);
 }

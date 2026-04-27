@@ -177,6 +177,22 @@ describe("VM REST auth", () => {
     expect(runVmWorkflow).not.toHaveBeenCalled();
   });
 
+  test("requires an Origin header for cookie-authenticated mutations", async () => {
+    getUser.mockResolvedValue(authedStackUser());
+
+    const response = await POST(
+      new Request("https://cmux.test/api/vm", {
+        method: "POST",
+        headers: { "sec-fetch-site": "same-origin" },
+        body: JSON.stringify({ provider: "freestyle", image: "snapshot-test" }),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "forbidden" });
+    expect(runVmWorkflow).not.toHaveBeenCalled();
+  });
+
   test("blocks cross-site cookie mutations on VM child routes before workflow", async () => {
     getUser.mockResolvedValue(authedStackUser());
     const context = { params: Promise.resolve({ id: "provider-vm-1" }) };
@@ -292,6 +308,30 @@ describe("VM REST auth", () => {
       provider: "freestyle",
       image: "unknown-snapshot",
     });
+    expect(runVmWorkflow).not.toHaveBeenCalled();
+  });
+
+  test("omits image from image config errors when no image was resolved", async () => {
+    process.env.VERCEL = "1";
+    process.env.VERCEL_ENV = "preview";
+    getUser.mockResolvedValue(authedStackUser());
+
+    const response = await POST(
+      new Request("https://cmux.test/api/vm", {
+        method: "POST",
+        headers: { origin: "https://cmux.test" },
+        body: JSON.stringify({ provider: "freestyle" }),
+      }),
+    );
+
+    const payload = await response.json();
+    expect(response.status).toBe(503);
+    expect(payload).toMatchObject({
+      error: "vm_image_config_error",
+      provider: "freestyle",
+      envVar: "FREESTYLE_SANDBOX_SNAPSHOT",
+    });
+    expect(payload).not.toHaveProperty("image");
     expect(runVmWorkflow).not.toHaveBeenCalled();
   });
 

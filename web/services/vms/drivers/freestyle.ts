@@ -89,7 +89,7 @@ export class FreestyleProvider implements VMProvider {
       {
         "cmux.vm.provider": "freestyle",
         "cmux.vm.operation": "create",
-        "cmux.vm.image_set": image.length > 0,
+        "cmux.vm.image": image,
         "cmux.timeout_ms": CREATE_TIMEOUT_MS,
       },
       async (span) => {

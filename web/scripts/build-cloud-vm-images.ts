@@ -64,7 +64,8 @@ const imageMetadata = {
   builtAt: new Date().toISOString(),
   cmuxdRemoteCommit: await gitRevParse(path.join(repoRoot, "daemon/remote")),
   binarySha256: sha256File(binaryPath),
-  builderScriptVersion: "2026-04-27",
+  builderScriptVersion: sha256File(fileURLToPath(import.meta.url)),
+  validationStatus: "passed" as const,
 };
 
 const output: Record<string, unknown> = {
@@ -142,7 +143,7 @@ async function buildE2BTemplate(
       cmuxdRemoteCommit: metadata.cmuxdRemoteCommit,
       builtAt: metadata.builtAt,
       builderScriptVersion: metadata.builderScriptVersion,
-      validationStatus: "passed",
+      validationStatus: metadata.validationStatus,
       notes: `binarySha256=${metadata.binarySha256}`,
     },
   };
@@ -171,7 +172,13 @@ async function buildFreestyleSnapshot(
       skipCache,
     },
   });
-  const imageId = extractProviderId(result) ?? name;
+  const imageId = extractProviderId(result);
+  if (!imageId) {
+    const keys = result && typeof result === "object"
+      ? Object.keys(result as unknown as Record<string, unknown>).sort().join(", ")
+      : typeof result;
+    throw new Error(`Freestyle snapshot build did not return a snapshot id; result keys: ${keys}`);
+  }
   return {
     name,
     daemonURL: daemonURL.includes("X-Amz-") ? "<presigned-r2-url>" : daemonURL,
@@ -185,7 +192,7 @@ async function buildFreestyleSnapshot(
       cmuxdRemoteCommit: metadata.cmuxdRemoteCommit,
       builtAt: metadata.builtAt,
       builderScriptVersion: metadata.builderScriptVersion,
-      validationStatus: "passed",
+      validationStatus: metadata.validationStatus,
       notes: `binarySha256=${metadata.binarySha256}`,
     },
   };
@@ -308,6 +315,7 @@ type ImageBuildMetadata = {
   readonly cmuxdRemoteCommit: string;
   readonly binarySha256: string;
   readonly builderScriptVersion: string;
+  readonly validationStatus: "passed" | "failed" | "unknown";
 };
 
 function sha256File(filePath: string): string {

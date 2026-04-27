@@ -44,7 +44,7 @@ export class E2BProvider implements VMProvider {
       {
         "cmux.vm.provider": "e2b",
         "cmux.vm.operation": "create",
-        "cmux.vm.image_set": image.length > 0,
+        "cmux.vm.image": image,
       },
       async (span) => {
         try {

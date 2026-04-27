@@ -117,13 +117,20 @@ export async function POST(request: Request): Promise<Response> {
           }, 503);
         }
         if (isVmImageConfigError(err)) {
-          return jsonResponse({
+          const payload: {
+            error: "vm_image_config_error";
+            provider: ProviderId;
+            image?: string;
+            envVar?: string;
+            reason: string;
+          } = {
             error: "vm_image_config_error",
             provider: err.provider,
-            image: err.image,
             envVar: err.envVar,
             reason: err.reason,
-          }, 503);
+          };
+          if (err.image !== undefined) payload.image = err.image;
+          return jsonResponse(payload, 503);
         }
         throw err;
       }

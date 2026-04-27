@@ -33,9 +33,10 @@ export async function withAuthedVmApiRoute(
     { "cmux.subsystem": "vm-cloud", ...attributes },
     async (span) => {
       try {
+        const bearer = parseBearer(request);
         const user = await verifyRequest(request);
         if (!user) return unauthorized();
-        if (requiresBrowserMutationProtection(request) && !browserMutationOriginAllowed(request)) {
+        if (requiresBrowserMutationProtection(request.method, bearer) && !browserMutationOriginAllowed(request)) {
           return jsonResponse({ error: "forbidden" }, 403);
         }
         return await handler({ user, span });
@@ -64,11 +65,11 @@ export function notFoundVm(vmId: string): Response {
   return jsonResponse({ error: `vm not found: ${vmId}` }, 404);
 }
 
-function requiresBrowserMutationProtection(request: Request): boolean {
-  if (!["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
+function requiresBrowserMutationProtection(method: string, bearer: StackBearer | null): boolean {
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase())) {
     return false;
   }
-  return parseBearer(request) === null;
+  return bearer === null;
 }
 
 function browserMutationOriginAllowed(request: Request): boolean {
@@ -76,11 +77,7 @@ function browserMutationOriginAllowed(request: Request): boolean {
   const secFetchSite = request.headers.get("sec-fetch-site")?.trim().toLowerCase();
 
   if (secFetchSite === "cross-site") return false;
-  if (!origin) {
-    return secFetchSite === "same-origin" ||
-      secFetchSite === "same-site" ||
-      secFetchSite === "none";
-  }
+  if (!origin) return false;
 
   const requestOrigin = requestURLOrigin(request);
   if (requestOrigin && origin === requestOrigin) return true;
@@ -95,11 +92,21 @@ function requestURLOrigin(request: Request): string | null {
   }
 }
 
+let cachedAllowedOriginsEnv: string | undefined;
+let cachedAllowedOrigins: Set<string> | null = null;
+
+// CMUX_VM_ALLOWED_ORIGINS is a comma-separated list of full origins that must match
+// the Origin header exactly, for example `https://app.example.com,https://staging.example.com`.
+// Do not include paths, schemeless hosts, or trailing slashes.
 function allowedBrowserOrigins(): Set<string> {
-  const configured = process.env.CMUX_VM_ALLOWED_ORIGINS?.split(",") ?? [];
-  return new Set(
+  const raw = process.env.CMUX_VM_ALLOWED_ORIGINS;
+  if (cachedAllowedOrigins && cachedAllowedOriginsEnv === raw) return cachedAllowedOrigins;
+  cachedAllowedOriginsEnv = raw;
+  const configured = raw?.split(",") ?? [];
+  cachedAllowedOrigins = new Set(
     configured
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0),
   );
+  return cachedAllowedOrigins;
 }
