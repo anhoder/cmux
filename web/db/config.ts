@@ -52,11 +52,16 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 
 function decodeBase64Env(value: string | undefined, key: string): string | undefined {
   if (!value) return undefined;
-  try {
-    return Buffer.from(value, "base64").toString("utf8");
-  } catch (cause) {
-    throw new Error(`${key} must be valid base64`, { cause });
+  const normalized = value.replace(/\s+/g, "");
+  // Buffer.from(_, "base64") is permissive, so validate before decoding.
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalized)) {
+    throw new Error(`${key} must be valid base64`);
   }
+  const decoded = Buffer.from(normalized, "base64");
+  if (decoded.toString("base64") !== normalized) {
+    throw new Error(`${key} must be valid base64`);
+  }
+  return decoded.toString("utf8");
 }
 
 function missingAwsKeys(env: Env): readonly string[] {

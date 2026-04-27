@@ -68,6 +68,20 @@ describe("cloud DB config", () => {
     expect(config.sslRejectUnauthorized).toBe(false);
   });
 
+  test("rejects malformed base64 CA bundles", () => {
+    expect(() =>
+      cloudDbConfig({
+        AWS_REGION: "us-west-2",
+        AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/vercel-cmux-staging",
+        PGHOST: "cmux-staging.cluster-example.us-west-2.rds.amazonaws.com",
+        PGPORT: "5432",
+        PGUSER: "cmux_app",
+        PGDATABASE: "cmux",
+        CMUX_DB_SSL_CA_PEM_BASE64: "not base64!!!",
+      }),
+    ).toThrow("CMUX_DB_SSL_CA_PEM_BASE64 must be valid base64");
+  });
+
   test("auto-detects Vercel Marketplace Aurora OIDC env without explicit driver", () => {
     expect(
       cloudDbConfig({
