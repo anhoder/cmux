@@ -3654,9 +3654,9 @@ struct ContentView: View {
             installNativeTitlebarBackdrop(
                 in: window,
                 height: nextPadding,
+                leftWidth: sidebarState.isVisible ? sidebarWidth : 0,
+                rightWidth: rightSidebarWidth,
                 color: currentThemeBackground,
-                // Shared-surface mode already lets the native titlebar composite with
-                // the same clear window backdrop as the terminal and sidebars.
                 enabled: shouldForceTransparentHosting && !appearance.unifySurfaceBackdrops
             )
 #if DEBUG
@@ -3961,6 +3961,8 @@ struct ContentView: View {
     private func installNativeTitlebarBackdrop(
         in window: NSWindow,
         height: CGFloat,
+        leftWidth: CGFloat,
+        rightWidth: CGFloat,
         color: NSColor,
         enabled: Bool
     ) {
@@ -3968,7 +3970,7 @@ struct ContentView: View {
               let themeFrame = contentView.superview else { return }
 
         let identifier = NSUserInterfaceItemIdentifier("cmux.nativeTitlebarBackdrop")
-        let existing = themeFrame.subviews.first { $0.identifier == identifier }
+        let existing = themeFrame.subviews.first { $0.identifier == identifier } as? NativeTitlebarBackdropView
         guard enabled else {
             existing?.removeFromSuperview()
             return
@@ -3979,16 +3981,25 @@ struct ContentView: View {
         backdrop.wantsLayer = true
         backdrop.layer?.backgroundColor = color.cgColor
         backdrop.layer?.isOpaque = color.alphaComponent >= 0.999
-        backdrop.autoresizingMask = [.width, .minYMargin]
+        backdrop.autoresizingMask = []
+
         let resolvedHeight = max(0, height)
+        let resolvedLeftWidth = max(0, leftWidth)
+        let resolvedRightWidth = max(0, rightWidth)
+        let resolvedWidth = max(0, themeFrame.bounds.width - resolvedLeftWidth - resolvedRightWidth)
         backdrop.frame = NSRect(
-            x: 0,
+            x: resolvedLeftWidth,
             y: max(0, themeFrame.bounds.height - resolvedHeight),
-            width: themeFrame.bounds.width,
+            width: resolvedWidth,
             height: resolvedHeight
         )
 
         if backdrop.superview == nil {
+            if contentView.superview === themeFrame {
+                themeFrame.addSubview(backdrop, positioned: .below, relativeTo: contentView)
+                return
+            }
+
             var titlebarChromeView: NSView? = window.standardWindowButton(.closeButton)
             while let parent = titlebarChromeView?.superview, parent !== themeFrame {
                 titlebarChromeView = parent
