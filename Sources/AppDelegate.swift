@@ -10465,6 +10465,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // browser NSTextView during split focus transitions.
         if matchConfiguredShortcut(event: event, action: .closeTab) {
             let targetWindow = resolvedShortcutEventWindow(event) ?? NSApp.keyWindow ?? NSApp.mainWindow
+            if let targetWindow,
+               let ghosttyView = cmuxOwningGhosttyView(for: targetWindow.firstResponder),
+               ghosttyView.performKeyEquivalentAfterMenuMiss(with: event) {
+#if DEBUG
+                cmuxDebugLog("shortcut.cmdW route=ghosttyFirst")
+#endif
+                return true
+            }
+
             let routedManager = preferredMainWindowContextForShortcutRouting(event: event)?.tabManager ?? tabManager
             // Browser popup windows primarily intercept Cmd+W in BrowserPopupPanel.
             // This AppDelegate path is a fallback for cases where AppKit routes the
@@ -13346,11 +13355,21 @@ private extension NSWindow {
         }
 
         // When the terminal is focused, skip the full NSWindow.performKeyEquivalent
-        // (which walks the SwiftUI content view hierarchy) and dispatch Command-key
-        // events directly to the main menu. This avoids the broken SwiftUI focus path.
-        if firstResponderGhosttyView != nil,
+        // (which walks the SwiftUI content view hierarchy) and give Ghostty the first
+        // chance to resolve Command-key bindings. This preserves terminal-level
+        // conditional bindings such as [var=in_editor:*]cmd+w=unbind. If Ghostty
+        // does not consume the event, fall back to the main menu.
+        if let firstResponderGhosttyView,
            shouldRouteCommandEquivalentDirectlyToMainMenu(event),
            let mainMenu = NSApp.mainMenu {
+            let consumedByGhostty = firstResponderGhosttyView.performKeyEquivalentAfterMenuMiss(with: event)
+#if DEBUG
+            cmuxDebugLog("  → ghostty command path first: \(consumedByGhostty)")
+#endif
+            if consumedByGhostty {
+                return true
+            }
+
             let consumedByMenu = mainMenu.performKeyEquivalent(with: event)
 #if DEBUG
             if browserZoomShortcutTraceCandidate(
@@ -13365,19 +13384,9 @@ private extension NSWindow {
                 )
             }
 #endif
-            if !consumedByMenu {
-                // After a direct-to-menu miss, let Ghostty resolve the command key
-                // through its normal binding path so user key overrides still win.
-                let consumedByGhostty = firstResponderGhosttyView?.performKeyEquivalentAfterMenuMiss(with: event) == true
+            if consumedByMenu {
 #if DEBUG
-                cmuxDebugLog("  → mainMenu miss; ghostty command path: \(consumedByGhostty)")
-#endif
-                if consumedByGhostty {
-                    return true
-                }
-            } else {
-#if DEBUG
-                cmuxDebugLog("  → consumed by mainMenu (bypassed SwiftUI)")
+                cmuxDebugLog("  → consumed by mainMenu after ghostty miss")
 #endif
                 return true
             }
