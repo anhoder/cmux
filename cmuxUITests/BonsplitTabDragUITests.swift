@@ -121,6 +121,40 @@ final class BonsplitTabDragUITests: XCTestCase {
         )
     }
 
+    func testMinimalModeTitlebarDoubleClickZoomsWindow() {
+        let (app, dataPath) = launchConfiguredApp()
+
+        XCTAssertTrue(
+            ensureForegroundAfterLaunch(app, timeout: launchTimeout),
+            "Expected app to launch for minimal-mode titlebar double-click UI test. state=\(app.state.rawValue)"
+        )
+        XCTAssertTrue(waitForAnyJSON(atPath: dataPath, timeout: setupTimeout), "Expected tab-drag setup data at \(dataPath)")
+        guard let ready = waitForJSONKey("ready", equals: "1", atPath: dataPath, timeout: setupTimeout) else {
+            XCTFail("Timed out waiting for ready=1. data=\(loadJSON(atPath: dataPath) ?? [:])")
+            return
+        }
+
+        if let setupError = ready["setupError"], !setupError.isEmpty {
+            XCTFail("Setup failed: \(setupError)")
+            return
+        }
+
+        let window = app.windows.element(boundBy: 0)
+        XCTAssertTrue(window.waitForExistence(timeout: 5.0), "Expected main window to exist")
+
+        let initialFrame = window.frame
+        let point = CGPoint(x: initialFrame.midX, y: initialFrame.minY + 16)
+        doubleClick(atAccessibilityPoint: point)
+
+        XCTAssertTrue(
+            waitForCondition(timeout: 4.0) {
+                let frame = window.frame
+                return frame.width > initialFrame.width + 80 || frame.height > initialFrame.height + 80
+            },
+            "Expected titlebar double-click in minimal mode to zoom the window. initial=\(initialFrame) current=\(window.frame)"
+        )
+    }
+
     func testMinimalModeKeepsSidebarRowsBelowTrafficLights() {
         let (app, dataPath) = launchConfiguredApp()
 
@@ -573,10 +607,29 @@ final class BonsplitTabDragUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
 
+    private func doubleClick(atAccessibilityPoint point: CGPoint) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        XCTAssertNotNil(source, "Expected CGEventSource for raw mouse double-click")
+        guard let source else { return }
+
+        let quartzPoint = quartzPoint(fromAccessibilityPoint: point)
+        postMouseEvent(type: .mouseMoved, at: quartzPoint, source: source)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        postMouseEvent(type: .leftMouseDown, at: quartzPoint, source: source, clickState: 1)
+        postMouseEvent(type: .leftMouseUp, at: quartzPoint, source: source, clickState: 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+
+        postMouseEvent(type: .leftMouseDown, at: quartzPoint, source: source, clickState: 2)
+        postMouseEvent(type: .leftMouseUp, at: quartzPoint, source: source, clickState: 2)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    }
+
     private func postMouseEvent(
         type: CGEventType,
         at point: CGPoint,
-        source: CGEventSource
+        source: CGEventSource,
+        clickState: Int = 1
     ) {
         guard let event = CGEvent(
             mouseEventSource: source,
@@ -588,7 +641,7 @@ final class BonsplitTabDragUITests: XCTestCase {
             return
         }
 
-        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
         event.post(tap: .cghidEventTap)
     }
 
