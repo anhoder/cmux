@@ -63,7 +63,7 @@ run_suite() {
       OWL_LAYER_HOST_INPUT_CHECK=1 \
       OWL_LAYER_HOST_INPUT_DIAGNOSTIC_CAPTURE=1 \
       OWL_LAYER_HOST_WIDGET_CHECK=1 \
-      OWL_LAYER_HOST_ONLY_TARGETS="widget-fixture" \
+      OWL_LAYER_HOST_ONLY_TARGETS="widget-fixture,native-popup-fixture" \
         "$RUN_SCRIPT"
       ;;
     google)

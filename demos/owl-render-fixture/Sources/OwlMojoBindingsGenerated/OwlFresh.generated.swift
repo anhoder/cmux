@@ -79,6 +79,56 @@ public struct OwlFreshCompositorInfo: Equatable, Codable {
     }
 }
 
+public enum OwlFreshSurfaceKind: UInt32, Codable, CaseIterable {
+    case webView = 0
+    case popupWidget = 1
+    case nativeMenu = 2
+}
+
+public struct OwlFreshSurfaceInfo: Equatable, Codable {
+    public let surfaceId: UInt64
+    public let parentSurfaceId: UInt64
+    public let kind: OwlFreshSurfaceKind
+    public let contextId: UInt32
+    public let x: Int32
+    public let y: Int32
+    public let width: UInt32
+    public let height: UInt32
+    public let scale: Float
+    public let zIndex: Int32
+    public let visible: Bool
+    public let menuItems: [String]
+    public let selectedIndex: Int32
+    public let label: String
+
+    public init(surfaceId: UInt64, parentSurfaceId: UInt64, kind: OwlFreshSurfaceKind, contextId: UInt32, x: Int32, y: Int32, width: UInt32, height: UInt32, scale: Float, zIndex: Int32, visible: Bool, menuItems: [String], selectedIndex: Int32, label: String) {
+        self.surfaceId = surfaceId
+        self.parentSurfaceId = parentSurfaceId
+        self.kind = kind
+        self.contextId = contextId
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.scale = scale
+        self.zIndex = zIndex
+        self.visible = visible
+        self.menuItems = menuItems
+        self.selectedIndex = selectedIndex
+        self.label = label
+    }
+}
+
+public struct OwlFreshSurfaceTree: Equatable, Codable {
+    public let generation: UInt64
+    public let surfaces: [OwlFreshSurfaceInfo]
+
+    public init(generation: UInt64, surfaces: [OwlFreshSurfaceInfo]) {
+        self.generation = generation
+        self.surfaces = surfaces
+    }
+}
+
 public struct OwlFreshCaptureResult: Equatable, Codable {
     public let png: [UInt8]
     public let width: UInt32
@@ -101,6 +151,7 @@ public typealias OwlFreshClientRemote = MojoPendingRemote<OwlFreshClientMojoInte
 public protocol OwlFreshClientMojoInterface {
     func onReady(_ request: OwlFreshClientOnReadyRequest)
     func onCompositorChanged(_ compositor: OwlFreshCompositorInfo)
+    func onSurfaceTreeChanged(_ surfaceTree: OwlFreshSurfaceTree)
     func onNavigationChanged(_ request: OwlFreshClientOnNavigationChangedRequest)
     func onHostLog(_ message: String)
 }
@@ -130,6 +181,7 @@ public struct OwlFreshClientOnNavigationChangedRequest: Equatable, Codable {
 public protocol OwlFreshClientMojoSink: AnyObject {
     func onReady(_ request: OwlFreshClientOnReadyRequest)
     func onCompositorChanged(_ compositor: OwlFreshCompositorInfo)
+    func onSurfaceTreeChanged(_ surfaceTree: OwlFreshSurfaceTree)
     func onNavigationChanged(_ request: OwlFreshClientOnNavigationChangedRequest)
     func onHostLog(_ message: String)
 }
@@ -165,6 +217,11 @@ public final class GeneratedOwlFreshClientMojoTransport: OwlFreshClientMojoInter
         sink.onCompositorChanged(compositor)
     }
 
+    public func onSurfaceTreeChanged(_ surfaceTree: OwlFreshSurfaceTree) {
+        record(method: "onSurfaceTreeChanged", payloadType: "OwlFreshSurfaceTree", payloadSummary: String(describing: surfaceTree))
+        sink.onSurfaceTreeChanged(surfaceTree)
+    }
+
     public func onNavigationChanged(_ request: OwlFreshClientOnNavigationChangedRequest) {
         record(method: "onNavigationChanged", payloadType: "OwlFreshClientOnNavigationChangedRequest", payloadSummary: String(describing: request))
         sink.onNavigationChanged(request)
@@ -188,6 +245,9 @@ public protocol OwlFreshHostMojoInterface {
     func sendKey(_ event: OwlFreshKeyEvent)
     func flush() async throws -> Bool
     func captureSurface() async throws -> OwlFreshCaptureResult
+    func getSurfaceTree() async throws -> OwlFreshSurfaceTree
+    func acceptActivePopupMenuItem(_ index: UInt32) async throws -> Bool
+    func cancelActivePopup() async throws -> Bool
 }
 
 public struct OwlFreshHostResizeRequest: Equatable, Codable {
@@ -211,6 +271,9 @@ public protocol OwlFreshHostMojoSink: AnyObject {
     func sendKey(_ event: OwlFreshKeyEvent)
     func flush() async throws -> Bool
     func captureSurface() async throws -> OwlFreshCaptureResult
+    func getSurfaceTree() async throws -> OwlFreshSurfaceTree
+    func acceptActivePopupMenuItem(_ index: UInt32) async throws -> Bool
+    func cancelActivePopup() async throws -> Bool
 }
 
 public final class GeneratedOwlFreshHostMojoTransport: OwlFreshHostMojoInterface {
@@ -273,6 +336,21 @@ public final class GeneratedOwlFreshHostMojoTransport: OwlFreshHostMojoInterface
         record(method: "captureSurface", payloadType: "Void", payloadSummary: "")
         return try await sink.captureSurface()
     }
+
+    public func getSurfaceTree() async throws -> OwlFreshSurfaceTree {
+        record(method: "getSurfaceTree", payloadType: "Void", payloadSummary: "")
+        return try await sink.getSurfaceTree()
+    }
+
+    public func acceptActivePopupMenuItem(_ index: UInt32) async throws -> Bool {
+        record(method: "acceptActivePopupMenuItem", payloadType: "UInt32", payloadSummary: String(describing: index))
+        return try await sink.acceptActivePopupMenuItem(index)
+    }
+
+    public func cancelActivePopup() async throws -> Bool {
+        record(method: "cancelActivePopup", payloadType: "Void", payloadSummary: "")
+        return try await sink.cancelActivePopup()
+    }
 }
 
 public struct MojoSchemaDeclaration: Equatable, Codable {
@@ -282,12 +360,15 @@ public struct MojoSchemaDeclaration: Equatable, Codable {
 
 public enum OwlFreshMojoSchema {
     public static let module = "content.mojom"
-    public static let sourceChecksum = "fnv1a64:f1267ac781dd95f0"
+    public static let sourceChecksum = "fnv1a64:9ea0a10990b5c8cb"
     public static let declarations: [MojoSchemaDeclaration] = [
         MojoSchemaDeclaration(kind: "enum", name: "OwlFreshMouseKind"),
         MojoSchemaDeclaration(kind: "struct", name: "OwlFreshMouseEvent"),
         MojoSchemaDeclaration(kind: "struct", name: "OwlFreshKeyEvent"),
         MojoSchemaDeclaration(kind: "struct", name: "OwlFreshCompositorInfo"),
+        MojoSchemaDeclaration(kind: "enum", name: "OwlFreshSurfaceKind"),
+        MojoSchemaDeclaration(kind: "struct", name: "OwlFreshSurfaceInfo"),
+        MojoSchemaDeclaration(kind: "struct", name: "OwlFreshSurfaceTree"),
         MojoSchemaDeclaration(kind: "struct", name: "OwlFreshCaptureResult"),
         MojoSchemaDeclaration(kind: "interface", name: "OwlFreshClient"),
         MojoSchemaDeclaration(kind: "interface", name: "OwlFreshHost")

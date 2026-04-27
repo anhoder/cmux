@@ -29,6 +29,34 @@ struct OwlFreshCompositorInfo {
   uint32 context_id;
 };
 
+enum OwlFreshSurfaceKind {
+  kWebView = 0,
+  kPopupWidget = 1,
+  kNativeMenu = 2,
+};
+
+struct OwlFreshSurfaceInfo {
+  uint64 surface_id;
+  uint64 parent_surface_id;
+  OwlFreshSurfaceKind kind;
+  uint32 context_id;
+  int32 x;
+  int32 y;
+  uint32 width;
+  uint32 height;
+  float scale;
+  int32 z_index;
+  bool visible;
+  array<string> menu_items;
+  int32 selected_index;
+  string label;
+};
+
+struct OwlFreshSurfaceTree {
+  uint64 generation;
+  array<OwlFreshSurfaceInfo> surfaces;
+};
+
 struct OwlFreshCaptureResult {
   array<uint8> png;
   uint32 width;
@@ -40,6 +68,7 @@ struct OwlFreshCaptureResult {
 interface OwlFreshClient {
   OnReady(int32 host_pid, OwlFreshCompositorInfo compositor);
   OnCompositorChanged(OwlFreshCompositorInfo compositor);
+  OnSurfaceTreeChanged(OwlFreshSurfaceTree surface_tree);
   OnNavigationChanged(string url, string title, bool loading);
   OnHostLog(string message);
 };
@@ -53,4 +82,7 @@ interface OwlFreshHost {
   SendKey(OwlFreshKeyEvent event);
   Flush() => (bool ok);
   CaptureSurface() => (OwlFreshCaptureResult result);
+  GetSurfaceTree() => (OwlFreshSurfaceTree surface_tree);
+  AcceptActivePopupMenuItem(uint32 index) => (bool ok);
+  CancelActivePopup() => (bool ok);
 };

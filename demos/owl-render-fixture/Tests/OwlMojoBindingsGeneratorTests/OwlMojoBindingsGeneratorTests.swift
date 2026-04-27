@@ -80,15 +80,41 @@ final class OwlMojoBindingsGeneratorTests: XCTestCase {
         ))
         transport.sendKey(OwlFreshKeyEvent(keyDown: true, keyCode: 83, text: "S", modifiers: 1))
         let flushed = try await transport.flush()
+        let tree = try await transport.getSurfaceTree()
+        let accepted = try await transport.acceptActivePopupMenuItem(1)
+        let canceled = try await transport.cancelActivePopup()
 
         XCTAssertTrue(flushed)
-        XCTAssertEqual(sink.calls, ["navigate", "resize", "sendMouse", "sendKey", "flush"])
-        XCTAssertEqual(transport.recordedCalls.map(\.method), ["navigate", "resize", "sendMouse", "sendKey", "flush"])
-        XCTAssertEqual(transport.recordedCalls.map(\.interface), Array(repeating: "OwlFreshHost", count: 5))
+        XCTAssertEqual(tree.generation, 7)
+        XCTAssertTrue(accepted)
+        XCTAssertTrue(canceled)
+        XCTAssertEqual(sink.calls, [
+            "navigate",
+            "resize",
+            "sendMouse",
+            "sendKey",
+            "flush",
+            "getSurfaceTree",
+            "acceptActivePopupMenuItem",
+            "cancelActivePopup",
+        ])
+        XCTAssertEqual(transport.recordedCalls.map(\.method), [
+            "navigate",
+            "resize",
+            "sendMouse",
+            "sendKey",
+            "flush",
+            "getSurfaceTree",
+            "acceptActivePopupMenuItem",
+            "cancelActivePopup",
+        ])
+        XCTAssertEqual(transport.recordedCalls.map(\.interface), Array(repeating: "OwlFreshHost", count: 8))
         XCTAssertEqual(transport.recordedCalls[1].payloadType, "OwlFreshHostResizeRequest")
         XCTAssertEqual(transport.recordedCalls[2].payloadType, "OwlFreshMouseEvent")
         XCTAssertTrue(transport.recordedCalls[3].payloadSummary.contains("keyCode: 83"))
         XCTAssertEqual(transport.recordedCalls[4].payloadType, "Void")
+        XCTAssertEqual(transport.recordedCalls[5].payloadType, "Void")
+        XCTAssertEqual(transport.recordedCalls[6].payloadType, "UInt32")
     }
 
     private let sampleMojo = """
@@ -147,5 +173,20 @@ private final class FakeHostSink: OwlFreshHostMojoSink {
     func captureSurface() async throws -> OwlFreshCaptureResult {
         calls.append("captureSurface")
         return OwlFreshCaptureResult(png: [], width: 0, height: 0, captureMode: "fake", error: "")
+    }
+
+    func getSurfaceTree() async throws -> OwlFreshSurfaceTree {
+        calls.append("getSurfaceTree")
+        return OwlFreshSurfaceTree(generation: 7, surfaces: [])
+    }
+
+    func acceptActivePopupMenuItem(_ index: UInt32) async throws -> Bool {
+        calls.append("acceptActivePopupMenuItem")
+        return index == 1
+    }
+
+    func cancelActivePopup() async throws -> Bool {
+        calls.append("cancelActivePopup")
+        return true
     }
 }

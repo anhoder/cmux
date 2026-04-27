@@ -46,6 +46,167 @@ index 62cab5dad3..f5cb60e098 100644
  
    if (browser_command_line.HasSwitch(switches::kForceHighPerformanceGPU)) {
      cmd_line->AppendSwitch(gpu::GpuDriverBugWorkaroundTypeToString(
+diff --git a/content/browser/renderer_host/popup_menu_helper_mac.h b/content/browser/renderer_host/popup_menu_helper_mac.h
+index 0530ac4075..d358a0d070 100644
+--- a/content/browser/renderer_host/popup_menu_helper_mac.h
++++ b/content/browser/renderer_host/popup_menu_helper_mac.h
+@@ -46,6 +46,8 @@ class PopupMenuHelper : public RenderWidgetHostObserver {
+ 
+   ~PopupMenuHelper() override;
+   void Hide();
++  void OwlFreshAcceptItem(uint32_t selected_item);
++  void OwlFreshCancel();
+ 
+   // Shows the popup menu and notifies the RenderFrameHost of the selection/
+   // cancellation. This call is blocking.
+@@ -80,6 +82,9 @@ class PopupMenuHelper : public RenderWidgetHostObserver {
+   base::WeakPtrFactory<PopupMenuHelper> weak_ptr_factory_{this};
+ };
+ 
++CONTENT_EXPORT bool OwlFreshAcceptActivePopupMenuItem(uint32_t selected_item);
++CONTENT_EXPORT bool OwlFreshCancelActivePopupMenu();
++
+ }  // namespace content
+ 
+ #endif  // CONTENT_BROWSER_RENDERER_HOST_POPUP_MENU_HELPER_MAC_H_
+diff --git a/content/browser/renderer_host/popup_menu_helper_mac.mm b/content/browser/renderer_host/popup_menu_helper_mac.mm
+index c56f5f4428..bc5235cffc 100644
+--- a/content/browser/renderer_host/popup_menu_helper_mac.mm
++++ b/content/browser/renderer_host/popup_menu_helper_mac.mm
+@@ -4,6 +4,10 @@
+ 
+ #include "content/browser/renderer_host/popup_menu_helper_mac.h"
+ 
++#include <algorithm>
++#include <cmath>
++
++#include "base/command_line.h"
+ #include "base/numerics/safe_conversions.h"
+ #import "content/app_shim_remote_cocoa/render_widget_host_view_cocoa.h"
+ #include "content/browser/permissions/permission_controller_impl.h"
+@@ -15,12 +19,28 @@
+ #include "content/common/content_export.h"
+ #include "content/public/browser/web_contents.h"
+ #import "ui/base/cocoa/base_view.h"
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
+ 
+ namespace content {
+ 
+ namespace {
+ 
+ bool g_allow_showing_popup_menus = true;
++PopupMenuHelper* g_owl_fresh_active_popup_menu = nullptr;
++
++std::vector<std::string> MenuLabels(
++    const std::vector<blink::mojom::MenuItemPtr>& items) {
++  std::vector<std::string> labels;
++  labels.reserve(items.size());
++  for (const auto& item : items) {
++    if (!item || item->type == blink::mojom::MenuItem::Type::kSeparator) {
++      labels.push_back("---");
++      continue;
++    }
++    labels.push_back(item->label.value_or(std::string()));
++  }
++  return labels;
++}
+ 
+ }  // namespace
+ 
+@@ -41,6 +61,9 @@
+ }
+ 
+ PopupMenuHelper::~PopupMenuHelper() {
++  if (g_owl_fresh_active_popup_menu == this) {
++    g_owl_fresh_active_popup_menu = nullptr;
++  }
+   Hide();
+ }
+ 
+@@ -77,6 +100,25 @@
+     return;
+   }
+ 
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    const int row_height =
++        std::max(28, static_cast<int>(std::ceil(item_font_size + 12)));
++    gfx::Rect popup_bounds(bounds_in_screen.x(), bounds_in_screen.bottom(),
++                           std::max(bounds_in_screen.width(), 260),
++                           std::max(row_height, row_height *
++                                                    static_cast<int>(items.size()) +
++                                                    8));
++    g_owl_fresh_active_popup_menu = this;
++    ui::OwlFreshPublishNativeMenuSurface(
++        reinterpret_cast<uint64_t>(this),
++        reinterpret_cast<uint64_t>(rwhvm),
++        CGRectMake(popup_bounds.x(), popup_bounds.y(), popup_bounds.width(),
++                   popup_bounds.height()),
++        rwhvm->GetCurrentScreenInfo().device_scale_factor, MenuLabels(items),
++        selected_item, "select-menu");
++    return;
++  }
++
+   remote_runner_.reset();
+   rwhvm->GetNSView()->DisplayPopupMenu(
+       remote_cocoa::mojom::PopupMenu::New(
+@@ -87,6 +129,10 @@
+ }
+ 
+ void PopupMenuHelper::Hide() {
++  if (g_owl_fresh_active_popup_menu == this) {
++    g_owl_fresh_active_popup_menu = nullptr;
++    ui::OwlFreshClearNativeMenuSurfaces();
++  }
+   if (remote_runner_) {
+     remote_runner_->Hide();
+   }
+@@ -94,6 +140,22 @@
+   popup_client_.reset();
+ }
+ 
++void PopupMenuHelper::OwlFreshAcceptItem(uint32_t selected_item) {
++  if (g_owl_fresh_active_popup_menu == this) {
++    g_owl_fresh_active_popup_menu = nullptr;
++  }
++  ui::OwlFreshClearNativeMenuSurfaces();
++  PopupMenuClosed(selected_item);
++}
++
++void PopupMenuHelper::OwlFreshCancel() {
++  if (g_owl_fresh_active_popup_menu == this) {
++    g_owl_fresh_active_popup_menu = nullptr;
++  }
++  ui::OwlFreshClearNativeMenuSurfaces();
++  PopupMenuClosed(std::nullopt);
++}
++
+ RenderWidgetHostViewMac* PopupMenuHelper::GetRenderWidgetHostView() const {
+   return static_cast<RenderWidgetHostViewMac*>(
+       render_frame_host_->GetOutermostMainFrameOrEmbedder()->GetView());
+@@ -126,6 +188,23 @@
+   delegate_->OnMenuClosed();  // May delete |this|.
+ }
+ 
++bool OwlFreshAcceptActivePopupMenuItem(uint32_t selected_item) {
++  if (!g_owl_fresh_active_popup_menu) {
++    return false;
++  }
++  g_owl_fresh_active_popup_menu->OwlFreshAcceptItem(selected_item);
++  return true;
++}
++
++bool OwlFreshCancelActivePopupMenu() {
++  if (!g_owl_fresh_active_popup_menu) {
++    ui::OwlFreshClearNativeMenuSurfaces();
++    return false;
++  }
++  g_owl_fresh_active_popup_menu->OwlFreshCancel();
++  return true;
++}
++
+ // As declared in //content/public/browser/popup_menu.h.
+ CONTENT_EXPORT void DontShowPopupMenus() {
+   g_allow_showing_popup_menus = false;
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index bdf3d9ca41..71e8799f76 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc
@@ -59,10 +220,64 @@ index bdf3d9ca41..71e8799f76 100644
            kGpuMemoryBufferReadbackFromTextureForceDisabledForDebugging,
        blink::switches::kMinHeightForGpuRasterTile,
 diff --git a/content/browser/renderer_host/render_widget_host_view_mac.mm b/content/browser/renderer_host/render_widget_host_view_mac.mm
-index 63041c4311..4cc2d07cd9 100644
+index 63041c4311..88fa566bc6 100644
 --- a/content/browser/renderer_host/render_widget_host_view_mac.mm
 +++ b/content/browser/renderer_host/render_widget_host_view_mac.mm
-@@ -589,6 +589,9 @@
+@@ -84,6 +84,7 @@
+ #include "ui/gfx/mac/coordinate_conversion.h"
+ #include "ui/gfx/native_ui_types.h"
+ #include "ui/menus/cocoa/text_services_context_menu.h"
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
+ 
+ using blink::WebInputEvent;
+ using blink::WebMouseEvent;
+@@ -181,8 +182,24 @@
+   // Update the contents that the NSView is displaying.
+   const gfx::CALayerParams* ca_layer_params =
+       browser_compositor_->GetLastCALayerParams();
+-  if (ca_layer_params)
++  if (ca_layer_params) {
++    if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed") &&
++        ca_layer_params->ca_context_id) {
++      gfx::Rect bounds = GetViewBounds();
++      ui::OwlFreshDisplayPortalPresentCAContextForSurface(
++          reinterpret_cast<uint64_t>(this),
++          popup_parent_host_view_
++              ? reinterpret_cast<uint64_t>(popup_parent_host_view_.get())
++              : 0,
++          popup_parent_host_view_ ? ui::OwlFreshSurfaceKind::kPopupWidget
++                                  : ui::OwlFreshSurfaceKind::kWebView,
++          ca_layer_params->ca_context_id,
++          CGRectMake(bounds.x(), bounds.y(), bounds.width(), bounds.height()),
++          ca_layer_params->scale_factor, true,
++          popup_parent_host_view_ ? "popup-widget" : "web-view");
++    }
+     ns_view_->SetCALayerParams(*ca_layer_params);
++  }
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+@@ -275,6 +292,9 @@
+ }
+ 
+ RenderWidgetHostViewMac::~RenderWidgetHostViewMac() {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    ui::OwlFreshMarkSurfaceHidden(reinterpret_cast<uint64_t>(this));
++  }
+   if (popup_parent_host_view_) {
+     DCHECK(!popup_parent_host_view_->popup_child_host_view_ ||
+            popup_parent_host_view_->popup_child_host_view_ == this);
+@@ -510,6 +530,9 @@
+ 
+ void RenderWidgetHostViewMac::Hide() {
+   is_visible_ = false;
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    ui::OwlFreshMarkSurfaceHidden(reinterpret_cast<uint64_t>(this));
++  }
+   ns_view_->SetVisible(is_visible_);
+   browser_compositor_->SetViewVisible(is_visible_);
+   WasOccluded();
+@@ -589,6 +612,9 @@
  }
  
  void RenderWidgetHostViewMac::WasOccluded() {
@@ -72,7 +287,7 @@ index 63041c4311..4cc2d07cd9 100644
    if (host()->IsHidden()) {
      return;
    }
-@@ -656,6 +659,9 @@
+@@ -656,6 +682,9 @@
  }
  
  bool RenderWidgetHostViewMac::HasFocus() {
@@ -82,7 +297,7 @@ index 63041c4311..4cc2d07cd9 100644
    return is_first_responder_;
  }
  
-@@ -1825,13 +1831,15 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
+@@ -1825,13 +1854,15 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
    // - Losing focus:
    //   - Only when the host is currently focused.
    //   This prevents duplicate LostFocus notifications.
@@ -100,7 +315,7 @@ index 63041c4311..4cc2d07cd9 100644
        SetTextInputActive(false);
        host()->LostFocus();
      }
-@@ -1839,6 +1847,9 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
+@@ -1839,6 +1870,9 @@ void CombineTextNodesAndMakeCallback(SpeechCallback callback,
  }
  
  void RenderWidgetHostViewMac::OnWindowIsKeyChanged(bool is_key) {
@@ -183,10 +398,10 @@ index 0000000000..09928bd888
 +
 diff --git a/content/shell/browser/owl_fresh_host_mac.mm b/content/shell/browser/owl_fresh_host_mac.mm
 new file mode 100644
-index 0000000000..3aee95d896
+index 0000000000..c126d8261e
 --- /dev/null
 +++ b/content/shell/browser/owl_fresh_host_mac.mm
-@@ -0,0 +1,982 @@
+@@ -0,0 +1,1044 @@
 +#include "content/shell/browser/owl_fresh_host_mac.h"
 +
 +#import <Cocoa/Cocoa.h>
@@ -213,6 +428,7 @@ index 0000000000..3aee95d896
 +#include "components/input/render_widget_host_input_event_router.h"
 +#include "content/browser/devtools/devtools_video_consumer.h"
 +#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/popup_menu_helper_mac.h"
 +#include "content/browser/renderer_host/render_widget_host_view_base.h"
 +#include "content/browser/web_contents/web_contents_impl.h"
 +#include "components/input/native_web_keyboard_event.h"
@@ -556,6 +772,42 @@ index 0000000000..3aee95d896
 +  return info;
 +}
 +
++mojom::OwlFreshSurfaceKind SurfaceKindToMojom(ui::OwlFreshSurfaceKind kind) {
++  switch (kind) {
++    case ui::OwlFreshSurfaceKind::kWebView:
++      return mojom::OwlFreshSurfaceKind::kWebView;
++    case ui::OwlFreshSurfaceKind::kPopupWidget:
++      return mojom::OwlFreshSurfaceKind::kPopupWidget;
++    case ui::OwlFreshSurfaceKind::kNativeMenu:
++      return mojom::OwlFreshSurfaceKind::kNativeMenu;
++  }
++}
++
++mojom::OwlFreshSurfaceTreePtr SurfaceTreeFromRegistry() {
++  auto tree = mojom::OwlFreshSurfaceTree::New();
++  tree->generation = ui::OwlFreshDisplayPortalGeneration();
++  for (const ui::OwlFreshSurfaceSnapshot& snapshot :
++       ui::OwlFreshSurfaceTreeSnapshot()) {
++    auto surface = mojom::OwlFreshSurfaceInfo::New();
++    surface->surface_id = snapshot.surface_id;
++    surface->parent_surface_id = snapshot.parent_surface_id;
++    surface->kind = SurfaceKindToMojom(snapshot.kind);
++    surface->context_id = snapshot.context_id;
++    surface->x = static_cast<int32_t>(snapshot.bounds.origin.x);
++    surface->y = static_cast<int32_t>(snapshot.bounds.origin.y);
++    surface->width = static_cast<uint32_t>(snapshot.bounds.size.width);
++    surface->height = static_cast<uint32_t>(snapshot.bounds.size.height);
++    surface->scale = snapshot.scale;
++    surface->z_index = snapshot.z_index;
++    surface->visible = snapshot.visible;
++    surface->menu_items = snapshot.menu_items;
++    surface->selected_index = snapshot.selected_index;
++    surface->label = snapshot.label;
++    tree->surfaces.push_back(std::move(surface));
++  }
++  return tree;
++}
++
 +class OwlFreshHostImpl final : public mojom::OwlFreshHost {
 + public:
 +  OwlFreshHostImpl() = default;
@@ -569,6 +821,7 @@ index 0000000000..3aee95d896
 +    EnsureRenderWidgetProducingFramesForOwlFresh();
 +    if (client_) {
 +      client_->OnReady(base::GetCurrentProcId(), CurrentCompositorInfo());
++      client_->OnSurfaceTreeChanged(SurfaceTreeFromRegistry());
 +      client_->OnHostLog("OwlFreshHost bound over Mojo");
 +    }
 +    PublishCompositorWithRetry(80);
@@ -854,6 +1107,29 @@ index 0000000000..3aee95d896
 +    return;
 +  }
 +
++  void GetSurfaceTree(GetSurfaceTreeCallback callback) override {
++    std::move(callback).Run(SurfaceTreeFromRegistry());
++  }
++
++  void AcceptActivePopupMenuItem(
++      uint32_t index,
++      AcceptActivePopupMenuItemCallback callback) override {
++    const bool ok = OwlFreshAcceptActivePopupMenuItem(index);
++    if (client_) {
++      client_->OnSurfaceTreeChanged(SurfaceTreeFromRegistry());
++    }
++    std::move(callback).Run(ok);
++  }
++
++  void CancelActivePopup(CancelActivePopupCallback callback) override {
++    const bool ok = OwlFreshCancelActivePopupMenu();
++    ui::OwlFreshClearNativeMenuSurfaces();
++    if (client_) {
++      client_->OnSurfaceTreeChanged(SurfaceTreeFromRegistry());
++    }
++    std::move(callback).Run(ok);
++  }
++
 + private:
 +  void CopyText(const std::string& text,
 +                input::NativeWebKeyboardEvent* event) {
@@ -877,6 +1153,7 @@ index 0000000000..3aee95d896
 +        last_context_id_ = context_id;
 +      }
 +      client_->OnCompositorChanged(CompositorInfoForContextID(context_id));
++      client_->OnSurfaceTreeChanged(SurfaceTreeFromRegistry());
 +    }
 +    if (attempts_remaining <= 0) {
 +      return;
@@ -1265,11 +1542,79 @@ index 274dffa179..1cc5a230f0 100644
  
    shell_data.delegate = delegate;
  }
+diff --git a/content/shell/browser/shell_web_contents_view_delegate_mac.mm b/content/shell/browser/shell_web_contents_view_delegate_mac.mm
+index b11f388bcd..b281455ab2 100644
+--- a/content/shell/browser/shell_web_contents_view_delegate_mac.mm
++++ b/content/shell/browser/shell_web_contents_view_delegate_mac.mm
+@@ -6,7 +6,10 @@
+ 
+ #import <Cocoa/Cocoa.h>
+ 
++#include <algorithm>
+ #include <memory>
++#include <string>
++#include <vector>
+ 
+ #include "base/command_line.h"
+ #include "base/memory/raw_ptr.h"
+@@ -26,6 +29,7 @@
+ #include "content/shell/common/shell_switches.h"
+ #include "third_party/blink/public/common/context_menu_data/edit_flags.h"
+ #include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
++#include "ui/accelerated_widget_mac/owl_fresh_context.h"
+ 
+ using blink::ContextMenuDataEditFlags;
+ 
+@@ -80,6 +84,19 @@ - (void)itemSelected:(id)sender {
+   return menu_item;
+ }
+ 
++std::vector<std::string> MenuItemTitles(NSMenu* menu) {
++  std::vector<std::string> titles;
++  for (NSMenuItem* item in menu.itemArray) {
++    if (item.separatorItem) {
++      titles.push_back("---");
++      continue;
++    }
++    const char* title = item.title.UTF8String;
++    titles.push_back(title ? title : "");
++  }
++  return titles;
++}
++
+ }  // namespace
+ 
+ namespace content {
+@@ -204,6 +221,24 @@ - (void)itemSelected:(id)sender {
+                       YES,
+                       delegate);
+ 
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("fresh-owl-embed")) {
++    gfx::Rect view_bounds = web_contents_->GetRenderWidgetHostView()
++                                ? web_contents_->GetRenderWidgetHostView()
++                                      ->GetViewBounds()
++                                : gfx::Rect();
++    gfx::Rect popup_bounds(view_bounds.x() + params.x,
++                           view_bounds.y() + params.y, 260,
++                           std::max(36, 34 * static_cast<int>(menu.numberOfItems) +
++                                            8));
++    ui::OwlFreshPublishNativeMenuSurface(
++        reinterpret_cast<uint64_t>(this),
++        reinterpret_cast<uint64_t>(web_contents_->GetRenderWidgetHostView()),
++        CGRectMake(popup_bounds.x(), popup_bounds.y(), popup_bounds.width(),
++                   popup_bounds.height()),
++        1.0f, MenuItemTitles(menu), -1, "context-menu");
++    return;
++  }
++
+   NSView* parent_view = web_contents_->GetContentNativeView().GetNativeNSView();
+   NSPoint position = parent_view.window.mouseLocationOutsideOfEventStream;
+   NSTimeInterval eventTime = NSApp.currentEvent.timestamp;
 diff --git a/content/shell/common/shell_controller.test-mojom b/content/shell/common/shell_controller.test-mojom
-index 53b2a8b770..19594942fd 100644
+index 53b2a8b770..0cacb933db 100644
 --- a/content/shell/common/shell_controller.test-mojom
 +++ b/content/shell/common/shell_controller.test-mojom
-@@ -7,6 +7,61 @@ module content.mojom;
+@@ -7,6 +7,93 @@ module content.mojom;
  import "mojo/public/mojom/base/string16.mojom";
  import "mojo/public/mojom/base/values.mojom";
  
@@ -1302,6 +1647,34 @@ index 53b2a8b770..19594942fd 100644
 +  uint32 context_id;
 +};
 +
++enum OwlFreshSurfaceKind {
++  kWebView = 0,
++  kPopupWidget = 1,
++  kNativeMenu = 2,
++};
++
++struct OwlFreshSurfaceInfo {
++  uint64 surface_id;
++  uint64 parent_surface_id;
++  OwlFreshSurfaceKind kind;
++  uint32 context_id;
++  int32 x;
++  int32 y;
++  uint32 width;
++  uint32 height;
++  float scale;
++  int32 z_index;
++  bool visible;
++  array<string> menu_items;
++  int32 selected_index;
++  string label;
++};
++
++struct OwlFreshSurfaceTree {
++  uint64 generation;
++  array<OwlFreshSurfaceInfo> surfaces;
++};
++
 +struct OwlFreshCaptureResult {
 +  array<uint8> png;
 +  uint32 width;
@@ -1313,6 +1686,7 @@ index 53b2a8b770..19594942fd 100644
 +interface OwlFreshClient {
 +  OnReady(int32 host_pid, OwlFreshCompositorInfo compositor);
 +  OnCompositorChanged(OwlFreshCompositorInfo compositor);
++  OnSurfaceTreeChanged(OwlFreshSurfaceTree surface_tree);
 +  OnNavigationChanged(string url, string title, bool loading);
 +  OnHostLog(string message);
 +};
@@ -1326,12 +1700,15 @@ index 53b2a8b770..19594942fd 100644
 +  SendKey(OwlFreshKeyEvent event);
 +  Flush() => (bool ok);
 +  CaptureSurface() => (OwlFreshCaptureResult result);
++  GetSurfaceTree() => (OwlFreshSurfaceTree surface_tree);
++  AcceptActivePopupMenuItem(uint32 index) => (bool ok);
++  CancelActivePopup() => (bool ok);
 +};
 +
  // A control interface which can be accessed by clients launching Content Shell
  // with a Mojo invitation on the command line. This is used by
  // LaunchAsMojoClientBrowserTest to exercise that mode of execution.
-@@ -21,7 +76,10 @@ interface ShellController {
+@@ -21,7 +108,10 @@ interface ShellController {
        => (mojo_base.mojom.Value value);
  
    // Tells Content Shell to close all windows and shut down. After sending this
@@ -1382,10 +1759,10 @@ index 0000000000..ab883e226a
 +}
 diff --git a/fresh_owl/owl_fresh_mojo_runtime.cc b/fresh_owl/owl_fresh_mojo_runtime.cc
 new file mode 100644
-index 0000000000..07bb1c36ec
+index 0000000000..2423ec796c
 --- /dev/null
 +++ b/fresh_owl/owl_fresh_mojo_runtime.cc
-@@ -0,0 +1,598 @@
+@@ -0,0 +1,712 @@
 +#include "fresh_owl/owl_fresh_mojo_runtime.h"
 +
 +#include <cstdlib>
@@ -1556,6 +1933,40 @@ index 0000000000..07bb1c36ec
 +  return Succeed(result_json, json);
 +}
 +
++base::DictValue SurfaceTreeToDict(
++    const content::mojom::OwlFreshSurfaceTreePtr& tree) {
++  base::DictValue dict;
++  dict.Set("generation", tree ? static_cast<int>(tree->generation) : 0);
++  base::ListValue surfaces;
++  if (tree) {
++    for (const auto& surface : tree->surfaces) {
++      base::DictValue surface_dict;
++      surface_dict.Set("surfaceId", static_cast<int>(surface->surface_id));
++      surface_dict.Set("parentSurfaceId",
++                       static_cast<int>(surface->parent_surface_id));
++      surface_dict.Set("kind", static_cast<int>(surface->kind));
++      surface_dict.Set("contextId", static_cast<int>(surface->context_id));
++      surface_dict.Set("x", surface->x);
++      surface_dict.Set("y", surface->y);
++      surface_dict.Set("width", static_cast<int>(surface->width));
++      surface_dict.Set("height", static_cast<int>(surface->height));
++      surface_dict.Set("scale", surface->scale);
++      surface_dict.Set("zIndex", surface->z_index);
++      surface_dict.Set("visible", surface->visible);
++      base::ListValue menu_items;
++      for (const std::string& item : surface->menu_items) {
++        menu_items.Append(item);
++      }
++      surface_dict.Set("menuItems", std::move(menu_items));
++      surface_dict.Set("selectedIndex", surface->selected_index);
++      surface_dict.Set("label", surface->label);
++      surfaces.Append(std::move(surface_dict));
++    }
++  }
++  dict.Set("surfaces", std::move(surfaces));
++  return dict;
++}
++
 +}  // namespace
 +
 +struct OwlFreshMojoSession;
@@ -1570,6 +1981,8 @@ index 0000000000..07bb1c36ec
 +               content::mojom::OwlFreshCompositorInfoPtr compositor) override;
 +  void OnCompositorChanged(
 +      content::mojom::OwlFreshCompositorInfoPtr compositor) override;
++  void OnSurfaceTreeChanged(
++      content::mojom::OwlFreshSurfaceTreePtr surface_tree) override;
 +  void OnNavigationChanged(const std::string& url,
 +                           const std::string& title,
 +                           bool loading) override;
@@ -1605,6 +2018,16 @@ index 0000000000..07bb1c36ec
 +  OwlFreshMojoEvent event = {};
 +  event.kind = kOwlFreshMojoEventCompositor;
 +  event.context_id = compositor ? compositor->context_id : 0;
++  Emit(session_->callback, session_->user_data, event);
++}
++
++void OwlFreshMojoClientImpl::OnSurfaceTreeChanged(
++    content::mojom::OwlFreshSurfaceTreePtr surface_tree) {
++  std::string json;
++  WriteJSON(base::Value(SurfaceTreeToDict(surface_tree)), &json);
++  OwlFreshMojoEvent event = {};
++  event.kind = kOwlFreshMojoEventSurfaceTree;
++  event.message = json.c_str();
 +  Emit(session_->callback, session_->user_data, event);
 +}
 +
@@ -1971,6 +2394,74 @@ index 0000000000..07bb1c36ec
 +    return status;
 +  }
 +
++  if (method == "getSurfaceTree") {
++    int status = 1;
++    base::RunLoop loop;
++    session->host->GetSurfaceTree(base::BindOnce(
++        [](base::OnceClosure quit,
++           int* status,
++           char** result_json,
++           char** error,
++           content::mojom::OwlFreshSurfaceTreePtr surface_tree) {
++          if (WriteDictResult(SurfaceTreeToDict(surface_tree), result_json,
++                              error) == 0) {
++            *status = 0;
++          }
++          std::move(quit).Run();
++        },
++        loop.QuitClosure(), &status, result_json, error));
++    loop.Run();
++    return status;
++  }
++
++  if (method == "acceptActivePopupMenuItem") {
++    std::optional<uint32_t> index = RequiredUInt32(dict, "index", error);
++    if (!index) {
++      return 1;
++    }
++    int status = 1;
++    base::RunLoop loop;
++    session->host->AcceptActivePopupMenuItem(
++        *index,
++        base::BindOnce(
++            [](base::OnceClosure quit,
++               int* status,
++               char** result_json,
++               char** error,
++               bool ok) {
++              base::DictValue dict;
++              dict.Set("ok", ok);
++              if (WriteDictResult(std::move(dict), result_json, error) == 0) {
++                *status = 0;
++              }
++              std::move(quit).Run();
++            },
++            loop.QuitClosure(), &status, result_json, error));
++    loop.Run();
++    return status;
++  }
++
++  if (method == "cancelActivePopup") {
++    int status = 1;
++    base::RunLoop loop;
++    session->host->CancelActivePopup(base::BindOnce(
++        [](base::OnceClosure quit,
++           int* status,
++           char** result_json,
++           char** error,
++           bool ok) {
++          base::DictValue dict;
++          dict.Set("ok", ok);
++          if (WriteDictResult(std::move(dict), result_json, error) == 0) {
++            *status = 0;
++          }
++          std::move(quit).Run();
++        },
++        loop.QuitClosure(), &status, result_json, error));
++    loop.Run();
++    return status;
++  }
++
 +  return Fail(error, base::StrCat({"unsupported OwlFreshHost method ", method}));
 +}
 +
@@ -1986,10 +2477,10 @@ index 0000000000..07bb1c36ec
 +}
 diff --git a/fresh_owl/owl_fresh_mojo_runtime.h b/fresh_owl/owl_fresh_mojo_runtime.h
 new file mode 100644
-index 0000000000..9134ee30cf
+index 0000000000..0ffff2ece7
 --- /dev/null
 +++ b/fresh_owl/owl_fresh_mojo_runtime.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,66 @@
 +#ifndef FRESH_OWL_OWL_FRESH_MOJO_RUNTIME_H_
 +#define FRESH_OWL_OWL_FRESH_MOJO_RUNTIME_H_
 +
@@ -2014,6 +2505,7 @@ index 0000000000..9134ee30cf
 +  kOwlFreshMojoEventCompositor = 3,
 +  kOwlFreshMojoEventNavigation = 4,
 +  kOwlFreshMojoEventDisconnected = 5,
++  kOwlFreshMojoEventSurfaceTree = 6,
 +} OwlFreshMojoEventKind;
 +
 +typedef struct OwlFreshMojoEvent {
@@ -2232,14 +2724,17 @@ index dcf493d629..8648983f2b 100644
  }  // namespace ui
 diff --git a/ui/accelerated_widget_mac/owl_fresh_context.h b/ui/accelerated_widget_mac/owl_fresh_context.h
 new file mode 100644
-index 0000000000..25fbfada36
+index 0000000000..7e4d959793
 --- /dev/null
 +++ b/ui/accelerated_widget_mac/owl_fresh_context.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,90 @@
 +#ifndef UI_ACCELERATED_WIDGET_MAC_OWL_FRESH_CONTEXT_H_
 +#define UI_ACCELERATED_WIDGET_MAC_OWL_FRESH_CONTEXT_H_
 +
 +#include <stdint.h>
++
++#include <string>
++#include <vector>
 +
 +#include <CoreGraphics/CoreGraphics.h>
 +#include <IOSurface/IOSurfaceRef.h>
@@ -2256,12 +2751,59 @@ index 0000000000..25fbfada36
 +
 +namespace ui {
 +
++enum class OwlFreshSurfaceKind {
++  kWebView = 0,
++  kPopupWidget = 1,
++  kNativeMenu = 2,
++};
++
++struct OwlFreshSurfaceSnapshot {
++  OwlFreshSurfaceSnapshot();
++  OwlFreshSurfaceSnapshot(const OwlFreshSurfaceSnapshot&);
++  OwlFreshSurfaceSnapshot& operator=(const OwlFreshSurfaceSnapshot&);
++  ~OwlFreshSurfaceSnapshot();
++
++  uint64_t surface_id = 0;
++  uint64_t parent_surface_id = 0;
++  OwlFreshSurfaceKind kind = OwlFreshSurfaceKind::kWebView;
++  uint32_t context_id = 0;
++  CGRect bounds = CGRectZero;
++  float scale = 1.0f;
++  int32_t z_index = 0;
++  bool visible = false;
++  std::vector<std::string> menu_items;
++  int32_t selected_index = -1;
++  std::string label;
++};
++
 +ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshSetLatestContextID(uint32_t id);
 +ACCELERATED_WIDGET_MAC_EXPORT uint32_t OwlFreshLatestContextID();
 +ACCELERATED_WIDGET_MAC_EXPORT uint64_t OwlFreshDisplayPortalGeneration();
++ACCELERATED_WIDGET_MAC_EXPORT std::vector<OwlFreshSurfaceSnapshot>
++OwlFreshSurfaceTreeSnapshot();
 +ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshDisplayPortalPresentCAContext(
 +    uint32_t ca_context_id,
 +    CGRect frame);
++ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshDisplayPortalPresentCAContextForSurface(
++    uint64_t surface_key,
++    uint64_t parent_surface_key,
++    OwlFreshSurfaceKind kind,
++    uint32_t ca_context_id,
++    CGRect bounds,
++    float scale,
++    bool visible,
++    const std::string& label);
++ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshPublishNativeMenuSurface(
++    uint64_t surface_key,
++    uint64_t parent_surface_key,
++    CGRect bounds,
++    float scale,
++    const std::vector<std::string>& items,
++    int32_t selected_index,
++    const std::string& label);
++ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshMarkSurfaceHidden(
++    uint64_t surface_key);
++ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshClearNativeMenuSurfaces();
 +ACCELERATED_WIDGET_MAC_EXPORT void OwlFreshDisplayPortalPresentIOSurface(
 +    IOSurfaceRef io_surface,
 +    const gfx::Size& dip_size,
@@ -2278,13 +2820,16 @@ index 0000000000..25fbfada36
 +#endif
 diff --git a/ui/accelerated_widget_mac/owl_fresh_context.mm b/ui/accelerated_widget_mac/owl_fresh_context.mm
 new file mode 100644
-index 0000000000..a9f7deb614
+index 0000000000..205e068a24
 --- /dev/null
 +++ b/ui/accelerated_widget_mac/owl_fresh_context.mm
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,409 @@
 +#include "ui/accelerated_widget_mac/owl_fresh_context.h"
 +
++#include <algorithm>
 +#include <atomic>
++#include <map>
++#include <utility>
 +
 +#import <CoreImage/CoreImage.h>
 +#import <IOSurface/IOSurface.h>
@@ -2305,6 +2850,24 @@ index 0000000000..a9f7deb614
 +  CIContext* __strong image_context = nil;
 +};
 +
++struct OwlFreshSurfaceRecord {
++  uint64_t stable_id = 0;
++  uint64_t surface_key = 0;
++  uint64_t parent_surface_key = 0;
++  OwlFreshSurfaceKind kind = OwlFreshSurfaceKind::kWebView;
++  uint32_t context_id = 0;
++  CAContext* __strong context = nil;
++  CALayer* __strong root_layer = nil;
++  CALayerHost* __strong host_layer = nil;
++  CGRect bounds = CGRectZero;
++  float scale = 1.0f;
++  int32_t z_index = 0;
++  bool visible = false;
++  std::vector<std::string> menu_items;
++  int32_t selected_index = -1;
++  std::string label;
++};
++
 +std::atomic<uint32_t> g_legacy_context_id{0};
 +std::atomic<uint32_t> g_portal_context_id{0};
 +std::atomic<uint64_t> g_portal_generation{0};
@@ -2314,7 +2877,25 @@ index 0000000000..a9f7deb614
 +  return *portal;
 +}
 +
++std::map<uint64_t, OwlFreshSurfaceRecord>& SurfaceRecords() {
++  static base::NoDestructor<std::map<uint64_t, OwlFreshSurfaceRecord>> records;
++  return *records;
++}
++
++uint64_t& NextSurfaceID() {
++  static uint64_t next_id = 1;
++  return next_id;
++}
++
 +CGRect NormalizedFrame(CGRect frame) {
++  if (CGRectIsEmpty(frame) || frame.size.width <= 0 || frame.size.height <= 0) {
++    return CGRectMake(0, 0, 1, 1);
++  }
++  return CGRectMake(frame.origin.x, frame.origin.y, frame.size.width,
++                    frame.size.height);
++}
++
++CGRect ZeroOriginFrame(CGRect frame) {
 +  if (CGRectIsEmpty(frame) || frame.size.width <= 0 || frame.size.height <= 0) {
 +    return CGRectMake(0, 0, 1, 1);
 +  }
@@ -2323,8 +2904,8 @@ index 0000000000..a9f7deb614
 +
 +void SizeLayer(CALayer* layer, CGRect frame) {
 +  layer.anchorPoint = CGPointZero;
-+  layer.frame = frame;
-+  layer.bounds = frame;
++  layer.frame = ZeroOriginFrame(frame);
++  layer.bounds = ZeroOriginFrame(frame);
 +  layer.position = CGPointZero;
 +}
 +
@@ -2340,9 +2921,25 @@ index 0000000000..a9f7deb614
 +  }
 +}
 +
++void EnsureSurfacePortal(OwlFreshSurfaceRecord& record) {
++  if (!record.context) {
++    CGSConnectionID connection = CGSMainConnectionID();
++    record.context = [CAContext contextWithCGSConnection:connection
++                                                 options:@{}];
++    record.root_layer = [[CALayer alloc] init];
++    record.root_layer.geometryFlipped = YES;
++    record.host_layer = [[CALayerHost alloc] init];
++    record.host_layer.autoresizingMask =
++        kCALayerWidthSizable | kCALayerHeightSizable;
++    [record.host_layer setValue:@YES forKey:@"inheritsSecurity"];
++    [record.root_layer addSublayer:record.host_layer];
++    record.context.layer = record.root_layer;
++  }
++}
++
 +void EnsurePortal(CGRect frame) {
 +  OwlFreshDisplayPortal& portal = Portal();
-+  frame = NormalizedFrame(frame);
++  frame = ZeroOriginFrame(frame);
 +
 +  EnsurePortalContext();
 +
@@ -2353,6 +2950,7 @@ index 0000000000..a9f7deb614
 +    portal.host_layer = [[CALayerHost alloc] init];
 +    portal.host_layer.autoresizingMask =
 +        kCALayerWidthSizable | kCALayerHeightSizable;
++    [portal.host_layer setValue:@YES forKey:@"inheritsSecurity"];
 +
 +    portal.image_layer = [[CALayer alloc] init];
 +    portal.image_layer.contentsGravity = kCAGravityTopLeft;
@@ -2367,7 +2965,33 @@ index 0000000000..a9f7deb614
 +  portal.context.layer = portal.root_layer;
 +}
 +
++OwlFreshSurfaceRecord& EnsureSurfaceRecord(uint64_t surface_key) {
++  std::map<uint64_t, OwlFreshSurfaceRecord>& records = SurfaceRecords();
++  auto [it, inserted] = records.try_emplace(surface_key);
++  OwlFreshSurfaceRecord& record = it->second;
++  if (inserted) {
++    record.surface_key = surface_key;
++    record.stable_id = NextSurfaceID()++;
++  }
++  return record;
++}
++
++uint64_t StableIDForKey(uint64_t surface_key) {
++  if (surface_key == 0) {
++    return 0;
++  }
++  auto it = SurfaceRecords().find(surface_key);
++  return it == SurfaceRecords().end() ? 0 : it->second.stable_id;
++}
++
 +}  // namespace
++
++OwlFreshSurfaceSnapshot::OwlFreshSurfaceSnapshot() = default;
++OwlFreshSurfaceSnapshot::OwlFreshSurfaceSnapshot(
++    const OwlFreshSurfaceSnapshot&) = default;
++OwlFreshSurfaceSnapshot& OwlFreshSurfaceSnapshot::operator=(
++    const OwlFreshSurfaceSnapshot&) = default;
++OwlFreshSurfaceSnapshot::~OwlFreshSurfaceSnapshot() = default;
 +
 +void OwlFreshSetLatestContextID(uint32_t id) {
 +  g_legacy_context_id.store(id, std::memory_order_relaxed);
@@ -2384,6 +3008,37 @@ index 0000000000..a9f7deb614
 +
 +uint64_t OwlFreshDisplayPortalGeneration() {
 +  return g_portal_generation.load(std::memory_order_relaxed);
++}
++
++std::vector<OwlFreshSurfaceSnapshot> OwlFreshSurfaceTreeSnapshot() {
++  std::vector<OwlFreshSurfaceSnapshot> snapshots;
++  for (const auto& [key, record] : SurfaceRecords()) {
++    if (!record.visible) {
++      continue;
++    }
++    OwlFreshSurfaceSnapshot snapshot;
++    snapshot.surface_id = record.stable_id;
++    snapshot.parent_surface_id = StableIDForKey(record.parent_surface_key);
++    snapshot.kind = record.kind;
++    snapshot.context_id = record.context_id;
++    snapshot.bounds = NormalizedFrame(record.bounds);
++    snapshot.scale = record.scale;
++    snapshot.z_index = record.z_index;
++    snapshot.visible = record.visible;
++    snapshot.menu_items = record.menu_items;
++    snapshot.selected_index = record.selected_index;
++    snapshot.label = record.label;
++    snapshots.push_back(std::move(snapshot));
++  }
++  std::stable_sort(snapshots.begin(), snapshots.end(),
++                   [](const OwlFreshSurfaceSnapshot& lhs,
++                      const OwlFreshSurfaceSnapshot& rhs) {
++                     if (lhs.z_index != rhs.z_index) {
++                       return lhs.z_index < rhs.z_index;
++                     }
++                     return lhs.surface_id < rhs.surface_id;
++                   });
++  return snapshots;
 +}
 +
 +void OwlFreshDisplayPortalPresentCAContext(uint32_t ca_context_id,
@@ -2407,6 +3062,102 @@ index 0000000000..a9f7deb614
 +  [CATransaction commit];
 +  [CATransaction flush];
 +  g_portal_generation.fetch_add(1, std::memory_order_relaxed);
++}
++
++void OwlFreshDisplayPortalPresentCAContextForSurface(
++    uint64_t surface_key,
++    uint64_t parent_surface_key,
++    OwlFreshSurfaceKind kind,
++    uint32_t ca_context_id,
++    CGRect bounds,
++    float scale,
++    bool visible,
++    const std::string& label) {
++  if (surface_key == 0 || ca_context_id == 0) {
++    return;
++  }
++
++  OwlFreshSurfaceRecord& record = EnsureSurfaceRecord(surface_key);
++  record.parent_surface_key = parent_surface_key;
++  record.kind = kind;
++  record.bounds = NormalizedFrame(bounds);
++  record.scale = scale <= 0 ? 1.0f : scale;
++  record.z_index = kind == OwlFreshSurfaceKind::kPopupWidget ? 100 : 0;
++  record.visible = visible;
++  record.menu_items.clear();
++  record.selected_index = -1;
++  record.label = label;
++
++  if (kind == OwlFreshSurfaceKind::kWebView) {
++    OwlFreshDisplayPortalPresentCAContext(ca_context_id, record.bounds);
++    record.context = nil;
++    record.root_layer = nil;
++    record.host_layer = nil;
++    record.context_id = OwlFreshLatestContextID();
++  } else {
++    [CATransaction begin];
++    [CATransaction setDisableActions:YES];
++    EnsureSurfacePortal(record);
++    SizeLayer(record.root_layer, record.bounds);
++    SizeLayer(record.host_layer, record.bounds);
++    record.host_layer.contextId = ca_context_id;
++    record.context.layer = record.root_layer;
++    record.context_id = record.context.contextId;
++    [CATransaction commit];
++    [CATransaction flush];
++  }
++
++  g_portal_generation.fetch_add(1, std::memory_order_relaxed);
++}
++
++void OwlFreshPublishNativeMenuSurface(
++    uint64_t surface_key,
++    uint64_t parent_surface_key,
++    CGRect bounds,
++    float scale,
++    const std::vector<std::string>& items,
++    int32_t selected_index,
++    const std::string& label) {
++  if (surface_key == 0 || items.empty()) {
++    return;
++  }
++  OwlFreshSurfaceRecord& record = EnsureSurfaceRecord(surface_key);
++  record.parent_surface_key = parent_surface_key;
++  record.kind = OwlFreshSurfaceKind::kNativeMenu;
++  record.context_id = 0;
++  record.context = nil;
++  record.root_layer = nil;
++  record.host_layer = nil;
++  record.bounds = NormalizedFrame(bounds);
++  record.scale = scale <= 0 ? 1.0f : scale;
++  record.z_index = 200;
++  record.visible = true;
++  record.menu_items = items;
++  record.selected_index = selected_index;
++  record.label = label;
++  g_portal_generation.fetch_add(1, std::memory_order_relaxed);
++}
++
++void OwlFreshMarkSurfaceHidden(uint64_t surface_key) {
++  auto it = SurfaceRecords().find(surface_key);
++  if (it == SurfaceRecords().end()) {
++    return;
++  }
++  it->second.visible = false;
++  g_portal_generation.fetch_add(1, std::memory_order_relaxed);
++}
++
++void OwlFreshClearNativeMenuSurfaces() {
++  bool changed = false;
++  for (auto& [key, record] : SurfaceRecords()) {
++    if (record.kind == OwlFreshSurfaceKind::kNativeMenu && record.visible) {
++      record.visible = false;
++      changed = true;
++    }
++  }
++  if (changed) {
++    g_portal_generation.fetch_add(1, std::memory_order_relaxed);
++  }
 +}
 +
 +void OwlFreshDisplayPortalPresentIOSurface(IOSurfaceRef io_surface,

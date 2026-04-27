@@ -98,6 +98,8 @@ public indirect enum MojoType: Equatable {
             return "UInt8"
         case .primitive("uint32"):
             return "UInt32"
+        case .primitive("uint64"):
+            return "UInt64"
         case .primitive("string"):
             return "String"
         case .primitive(let name), .named(let name):
@@ -313,7 +315,7 @@ private struct Parser {
             let name = try consumeIdentifier()
             try consume(">")
             return .pendingRemote(name)
-        case "bool", "float", "int32", "uint8", "uint32", "string":
+        case "bool", "float", "int32", "uint8", "uint32", "uint64", "string":
             return .primitive(token)
         default:
             guard token.first?.isLetter == true else {

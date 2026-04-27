@@ -54,11 +54,27 @@ private enum InputAction {
     case resize(OwlFreshHostResizeRequest, waitForMode: String)
     case text(String)
     case waitForJavaScript(label: String, script: String, expectations: [JavaScriptExpectation])
+    case waitForSurfaceTree(label: String, expectations: [SurfaceTreeExpectation])
+    case captureWindow(name: String, expected: Set<ExpectedPixel>)
+    case acceptActivePopupMenuItem(UInt32)
+    case cancelActivePopup
 }
 
 private struct JavaScriptExpectation {
     let key: String
     let value: ExpectedJavaScriptValue
+}
+
+private struct SurfaceTreeExpectation {
+    let kind: OwlFreshSurfaceKind
+    let label: String?
+    let menuItem: String?
+
+    init(kind: OwlFreshSurfaceKind, label: String? = nil, menuItem: String? = nil) {
+        self.kind = kind
+        self.label = label
+        self.menuItem = menuItem
+    }
 }
 
 private enum ExpectedJavaScriptValue {
@@ -106,6 +122,7 @@ private struct CaptureResult: Codable {
     let stats: PixelStats
     let profileHadDevToolsActivePort: Bool
     let sessionEvents: SessionEventSnapshot
+    let surfaceTree: OwlFreshSurfaceTree?
     let generatedTransportTracePath: String
     let generatedTransportCallCount: Int
 }
@@ -180,6 +197,7 @@ private struct SessionEventSnapshot: Codable {
     let loading: Bool
     let url: String
     let title: String
+    let surfaceTree: OwlFreshSurfaceTree?
     let logs: [String]
 }
 
@@ -208,6 +226,7 @@ private final class SessionEvents {
     private var loading = true
     private var url = ""
     private var title = ""
+    private var surfaceTree: OwlFreshSurfaceTree?
     private var logs: [String] = []
 
     func record(_ event: OwlFreshEvent) {
@@ -238,6 +257,12 @@ private final class SessionEvents {
             }
         case 5:
             disconnected = true
+        case 6:
+            if let message = event.message,
+               let data = String(cString: message).data(using: .utf8),
+               let tree = try? JSONDecoder().decode(OwlFreshSurfaceTree.self, from: data) {
+                surfaceTree = tree
+            }
         default:
             break
         }
@@ -264,6 +289,7 @@ private final class SessionEvents {
             loading: loading,
             url: url,
             title: title,
+            surfaceTree: surfaceTree,
             logs: logs
         )
     }
@@ -472,6 +498,11 @@ private final class LayerHostRunner {
         let widgetFixture = try writeFixture(
             name: "widget-fixture",
             html: Fixtures.widgetFixture,
+            directory: fixtureDirectory
+        )
+        let nativePopupFixture = try writeFixture(
+            name: "native-popup-fixture",
+            html: Fixtures.nativePopupFixture,
             directory: fixtureDirectory
         )
         var targets: [RenderTarget] = []
@@ -772,6 +803,7 @@ private final class LayerHostRunner {
             )
         }
         let requestedWidgetTargets = options.onlyTargets.contains("widget-fixture")
+            || options.onlyTargets.contains("native-popup-fixture")
         if options.includeWidgets || requestedWidgetTargets {
             targets.append(
                 RenderTarget(
@@ -814,6 +846,78 @@ private final class LayerHostRunner {
                         JavaScriptExpectation(key: "contextSeen", value: .bool(true)),
                         JavaScriptExpectation(key: "selectValue", value: .string("beta")),
                         JavaScriptExpectation(key: "status", value: .string("OWL_WIDGETS_OK")),
+                    ]
+                )
+            )
+            targets.append(
+                RenderTarget(
+                    name: "native-popup-fixture",
+                    url: nativePopupFixture.absoluteString,
+                    screenshotName: "native-popup-after-input.png",
+                    expected: [.green, .yellow, .dark],
+                    preInputScreenshotName: "native-popup-before-input.png",
+                    preInputExpected: [.blue, .dark, .light],
+                    inputActions: [
+                        .waitForJavaScript(
+                            label: "native popup fixture ready",
+                            script: """
+                            ({
+                              ready: window.owlNativePopupState?.ready === true
+                            })
+                            """,
+                            expectations: [
+                                JavaScriptExpectation(key: "ready", value: .bool(true)),
+                            ]
+                        ),
+                        .mouseClick(MouseClick(x: 190, y: 172)),
+                        .waitForSurfaceTree(
+                            label: "select popup surface",
+                            expectations: [
+                                SurfaceTreeExpectation(
+                                    kind: .nativeMenu,
+                                    label: "select-menu",
+                                    menuItem: "BETA_NATIVE_OPTION"
+                                ),
+                            ]
+                        ),
+                        .captureWindow(name: "native-select-popup-open.png", expected: [.blue, .dark, .light]),
+                        .acceptActivePopupMenuItem(1),
+                        .waitForJavaScript(
+                            label: "native select accepted",
+                            script: """
+                            ({
+                              selectValue: document.getElementById("nativeSelect")?.value || ""
+                            })
+                            """,
+                            expectations: [
+                                JavaScriptExpectation(key: "selectValue", value: .string("beta")),
+                            ]
+                        ),
+                        .mouseClick(MouseClick(x: 330, y: 338, button: 2)),
+                        .waitForSurfaceTree(
+                            label: "context menu surface",
+                            expectations: [
+                                SurfaceTreeExpectation(
+                                    kind: .nativeMenu,
+                                    label: "context-menu",
+                                    menuItem: "Inspect"
+                                ),
+                            ]
+                        ),
+                        .captureWindow(name: "native-context-menu-open.png", expected: [.blue, .dark, .light]),
+                        .cancelActivePopup,
+                    ],
+                    postInputDiagnosticScript: """
+                    ({
+                      contextSeen: window.owlNativePopupState?.contextSeen === true,
+                      selectValue: document.getElementById("nativeSelect")?.value || "",
+                      status: document.getElementById("status")?.textContent || ""
+                    })
+                    """,
+                    postInputExpectations: [
+                        JavaScriptExpectation(key: "contextSeen", value: .bool(true)),
+                        JavaScriptExpectation(key: "selectValue", value: .string("beta")),
+                        JavaScriptExpectation(key: "status", value: .string("OWL_NATIVE_POPUPS_OK")),
                     ]
                 )
             )
@@ -946,13 +1050,21 @@ private final class LayerHostRunner {
             contextID = baseline.contextID
         } else {
             try hostController.navigate(target.url)
-            contextID = try waitForContextID(
+            try waitForInitialReadinessIfPresent(
+                target: target,
+                runtime: runtime,
+                session: session,
+                events: sessionEvents,
+                app: app
+            )
+            try waitForHostFlush(runtime: runtime, session: session, app: app)
+            contextID = try waitForInitialWebViewContextID(
                 name: target.name,
                 events: sessionEvents,
                 runtime: runtime,
+                hostController: hostController,
                 app: app,
-                afterGeneration: baseline.contextGeneration,
-                rejectingContextID: nil
+                fallbackAfterGeneration: baseline.contextGeneration
             )
         }
         let window = try LayerHostWindow(
@@ -996,6 +1108,9 @@ private final class LayerHostRunner {
                 window.update(contextID: contextID)
                 pumpApp(app, for: 0.05)
             }
+            if let surfaceTree = snapshot.surfaceTree {
+                window.update(surfaceTree: surfaceTree)
+            }
 
             if !target.inputActions.isEmpty, inputSent, !postInputStateVerified {
                 do {
@@ -1035,6 +1150,7 @@ private final class LayerHostRunner {
                         try hostController.setFocus(true)
                         try performInputActions(
                             target.inputActions,
+                            target: target,
                             runtime: runtime,
                             hostController: hostController,
                             session: session,
@@ -1069,6 +1185,9 @@ private final class LayerHostRunner {
                         "\(target.name)-generated-transport-trace.json"
                     )
                     try JSONEncoder.pretty.encode(hostController.recordedCalls).write(to: traceURL)
+                    let finalEventSnapshot = sessionEvents.snapshot()
+                    let finalSurfaceTree = (try? hostController.getSurfaceTree())
+                        ?? finalEventSnapshot.surfaceTree
                     return CaptureResult(
                         name: target.name,
                         url: target.url,
@@ -1080,7 +1199,8 @@ private final class LayerHostRunner {
                         preInputScreenshotPath: capturedPreInputPath,
                         stats: stats,
                         profileHadDevToolsActivePort: hasDevToolsActivePort(profileDirectory: profileDirectory),
-                        sessionEvents: sessionEvents.snapshot(),
+                        sessionEvents: finalEventSnapshot,
+                        surfaceTree: finalSurfaceTree,
                         generatedTransportTracePath: traceURL.path,
                         generatedTransportCallCount: hostController.recordedCalls.count
                     )
@@ -1137,6 +1257,67 @@ private final class LayerHostRunner {
         throw VerifierError.timeout("timed out waiting for \(name) Mojo context id: \(events.snapshot())")
     }
 
+    private func waitForInitialReadinessIfPresent(
+        target: RenderTarget,
+        runtime: OwlFreshMojoRuntime,
+        session: OpaquePointer,
+        events: SessionEvents,
+        app: NSApplication
+    ) throws {
+        guard case .waitForJavaScript(let label, let script, let expectations) = target.inputActions.first else {
+            return
+        }
+        try waitForJavaScriptExpectations(
+            label: "initial \(label)",
+            script: script,
+            expectations: expectations,
+            runtime: runtime,
+            session: session,
+            events: events,
+            app: app
+        )
+    }
+
+    private func waitForInitialWebViewContextID(
+        name: String,
+        events: SessionEvents,
+        runtime: OwlFreshMojoRuntime,
+        hostController: OwlFreshMojoHostController,
+        app: NSApplication,
+        fallbackAfterGeneration: UInt64
+    ) throws -> UInt32 {
+        let deadline = Date().addingTimeInterval(min(6, options.timeout))
+        var fallbackContextID: UInt32?
+        var lastTree: OwlFreshSurfaceTree?
+        var lastError = ""
+        while Date() < deadline {
+            runtime.pollEvents(milliseconds: 50)
+            pumpApp(app, for: 0.02)
+            do {
+                let tree = try hostController.getSurfaceTree()
+                lastTree = tree
+                if let surface = tree.surfaces.first(where: {
+                    $0.visible && $0.kind == .webView && $0.contextId != 0
+                }) {
+                    return surface.contextId
+                }
+            } catch {
+                lastError = String(describing: error)
+            }
+            let snapshot = events.snapshot()
+            if snapshot.contextID != 0,
+               snapshot.contextGeneration > fallbackAfterGeneration {
+                fallbackContextID = snapshot.contextID
+            }
+        }
+        if let fallbackContextID {
+            return fallbackContextID
+        }
+        throw VerifierError.timeout(
+            "timed out waiting for \(name) initial web-view surface; lastTree=\(String(describing: lastTree)); lastError=\(lastError); events=\(events.snapshot())"
+        )
+    }
+
     private func waitForReady(
         name: String,
         events: SessionEvents,
@@ -1173,6 +1354,7 @@ private final class LayerHostRunner {
 
     private func performInputActions(
         _ actions: [InputAction],
+        target: RenderTarget,
         runtime: OwlFreshMojoRuntime,
         hostController: OwlFreshMojoHostController,
         session: OpaquePointer,
@@ -1261,6 +1443,45 @@ private final class LayerHostRunner {
                     events: events,
                     app: app
                 )
+            case .waitForSurfaceTree(let label, let expectations):
+                let tree = try waitForSurfaceTreeExpectations(
+                    label: label,
+                    expectations: expectations,
+                    runtime: runtime,
+                    hostController: hostController,
+                    session: session,
+                    events: events,
+                    window: window,
+                    app: app
+                )
+                window.update(surfaceTree: tree)
+            case .captureWindow(let name, let expected):
+                window.update(surfaceTree: try hostController.getSurfaceTree())
+                window.flushHostedLayer()
+                pumpApp(app, for: 0.05)
+                guard let windowID = swiftHostWindowID(title: window.title, minimumSize: currentSize) else {
+                    throw VerifierError.capture("Swift LayerHost window was not visible for \(name)")
+                }
+                let captureURL = options.outputDirectory.appendingPathComponent(name)
+                let capture = try captureWindow(windowID: windowID, to: captureURL)
+                let stats = analyze(image: capture.image)
+                guard expected.isSatisfied(by: stats) else {
+                    throw VerifierError.pixelCheck("\(target.name) \(name) pixels did not match \(expected): \(stats)")
+                }
+            case .acceptActivePopupMenuItem(let index):
+                guard try hostController.acceptActivePopupMenuItem(index) else {
+                    throw VerifierError.input("host did not accept active popup menu item \(index)")
+                }
+                runtime.pollEvents(milliseconds: 50)
+                window.update(surfaceTree: try hostController.getSurfaceTree())
+                window.flushHostedLayer()
+                try waitForHostFlush(runtime: runtime, session: session, app: app)
+            case .cancelActivePopup:
+                _ = try hostController.cancelActivePopup()
+                runtime.pollEvents(milliseconds: 50)
+                window.update(surfaceTree: try hostController.getSurfaceTree())
+                window.flushHostedLayer()
+                try waitForHostFlush(runtime: runtime, session: session, app: app)
             }
         }
     }
@@ -1296,6 +1517,59 @@ private final class LayerHostRunner {
         throw VerifierError.input(
             "timed out waiting for \(label); lastResult=\(lastResult); lastError=\(lastError); logs=\(events.snapshot().logs)"
         )
+    }
+
+    private func waitForSurfaceTreeExpectations(
+        label: String,
+        expectations: [SurfaceTreeExpectation],
+        runtime: OwlFreshMojoRuntime,
+        hostController: OwlFreshMojoHostController,
+        session: OpaquePointer,
+        events: SessionEvents,
+        window: LayerHostWindow,
+        app: NSApplication
+    ) throws -> OwlFreshSurfaceTree {
+        let deadline = Date().addingTimeInterval(10)
+        var lastTree: OwlFreshSurfaceTree?
+        var lastError = ""
+        while Date() < deadline {
+            runtime.pollEvents(milliseconds: 50)
+            pumpApp(app, for: 0.02)
+            do {
+                let tree = try hostController.getSurfaceTree()
+                lastTree = tree
+                window.update(surfaceTree: tree)
+                if surfaceTree(tree, satisfies: expectations) {
+                    return tree
+                }
+            } catch {
+                lastError = String(describing: error)
+            }
+        }
+        throw VerifierError.input(
+            "timed out waiting for \(label); lastTree=\(String(describing: lastTree)); lastError=\(lastError); logs=\(events.snapshot().logs)"
+        )
+    }
+
+    private func surfaceTree(
+        _ tree: OwlFreshSurfaceTree,
+        satisfies expectations: [SurfaceTreeExpectation]
+    ) -> Bool {
+        expectations.allSatisfy { expectation in
+            tree.surfaces.contains { surface in
+                guard surface.visible, surface.kind == expectation.kind else {
+                    return false
+                }
+                if let label = expectation.label, surface.label != label {
+                    return false
+                }
+                if let menuItem = expectation.menuItem,
+                   !surface.menuItems.contains(where: { $0.contains(menuItem) }) {
+                    return false
+                }
+                return true
+            }
+        }
     }
 
     private func waitForHostFlush(
@@ -1506,6 +1780,8 @@ private final class LayerHostWindow {
     private let contentView: NSView
     private let rootLayer: CALayer
     private let hostLayer: CALayer
+    private var popupHostLayers: [UInt64: CALayer] = [:]
+    private var nativeSurfaceLayers: [UInt64: CALayer] = [:]
 
     init(title: String, contextID: UInt32, size: CGSize) throws {
         self.title = title
@@ -1526,6 +1802,7 @@ private final class LayerHostWindow {
         hostLayer.bounds = rootLayer.bounds
         hostLayer.position = CGPoint.zero
         hostLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        hostLayer.zPosition = 0
         rootLayer.addSublayer(hostLayer)
         self.hostLayer = hostLayer
 
@@ -1566,6 +1843,12 @@ private final class LayerHostWindow {
         rootLayer.bounds = CGRect(origin: .zero, size: size)
         hostLayer.bounds = rootLayer.bounds
         hostLayer.position = CGPoint.zero
+        for layer in popupHostLayers.values {
+            layer.setNeedsLayout()
+        }
+        for layer in nativeSurfaceLayers.values {
+            layer.setNeedsLayout()
+        }
         CATransaction.commit()
         flushHostedLayer()
     }
@@ -1575,9 +1858,150 @@ private final class LayerHostWindow {
         flushHostedLayer()
     }
 
+    func update(surfaceTree: OwlFreshSurfaceTree) {
+        let visibleSurfaces = surfaceTree.surfaces
+            .filter(\.visible)
+            .sorted { lhs, rhs in
+                if lhs.zIndex != rhs.zIndex {
+                    return lhs.zIndex < rhs.zIndex
+                }
+                return lhs.surfaceId < rhs.surfaceId
+            }
+        guard let primary = visibleSurfaces.first(where: { $0.kind == .webView && $0.contextId != 0 }) ??
+            visibleSurfaces.first(where: { $0.contextId != 0 }) else {
+            renderNativeSurfaces(visibleSurfaces, origin: .zero)
+            flushHostedLayer()
+            return
+        }
+
+        let origin = CGPoint(x: CGFloat(primary.x), y: CGFloat(primary.y))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        hostLayer.isHidden = false
+        hostLayer.setValue(NSNumber(value: primary.contextId), forKey: "contextId")
+        hostLayer.frame = CGRect(origin: .zero, size: rootLayer.bounds.size)
+        hostLayer.bounds = rootLayer.bounds
+        hostLayer.position = CGPoint.zero
+        hostLayer.zPosition = CGFloat(primary.zIndex)
+
+        let renderPopupSurfaces = visibleSurfaces.filter { surface in
+            surface.contextId != 0 && surface.surfaceId != primary.surfaceId
+        }
+        let activePopupIDs = Set(renderPopupSurfaces.map(\.surfaceId))
+        for staleID in popupHostLayers.keys where !activePopupIDs.contains(staleID) {
+            popupHostLayers[staleID]?.removeFromSuperlayer()
+            popupHostLayers[staleID] = nil
+        }
+        for surface in renderPopupSurfaces {
+            let layer: CALayer
+            if let existing = popupHostLayers[surface.surfaceId] {
+                layer = existing
+                layer.setValue(NSNumber(value: surface.contextId), forKey: "contextId")
+            } else {
+                do {
+                    layer = try makeCALayerHost(contextID: surface.contextId)
+                    layer.anchorPoint = CGPoint.zero
+                    rootLayer.addSublayer(layer)
+                    popupHostLayers[surface.surfaceId] = layer
+                } catch {
+                    continue
+                }
+            }
+            layer.frame = frame(for: surface, origin: origin)
+            layer.bounds = CGRect(origin: .zero, size: layer.frame.size)
+            layer.position = layer.frame.origin
+            layer.zPosition = CGFloat(surface.zIndex)
+            layer.isHidden = false
+        }
+        CATransaction.commit()
+
+        renderNativeSurfaces(visibleSurfaces, origin: origin)
+        flushHostedLayer()
+    }
+
+    private func renderNativeSurfaces(_ surfaces: [OwlFreshSurfaceInfo], origin: CGPoint) {
+        let nativeSurfaces = surfaces.filter { $0.kind == .nativeMenu }
+        let activeIDs = Set(nativeSurfaces.map(\.surfaceId))
+        for staleID in nativeSurfaceLayers.keys where !activeIDs.contains(staleID) {
+            nativeSurfaceLayers[staleID]?.removeFromSuperlayer()
+            nativeSurfaceLayers[staleID] = nil
+        }
+        for surface in nativeSurfaces {
+            let layer = nativeSurfaceLayers[surface.surfaceId] ?? CALayer()
+            if layer.superlayer == nil {
+                rootLayer.addSublayer(layer)
+            }
+            nativeSurfaceLayers[surface.surfaceId] = layer
+            configureNativeMenuLayer(layer, surface: surface, frame: frame(for: surface, origin: origin))
+        }
+    }
+
+    private func frame(for surface: OwlFreshSurfaceInfo, origin: CGPoint) -> CGRect {
+        CGRect(
+            x: CGFloat(surface.x) - origin.x,
+            y: CGFloat(surface.y) - origin.y,
+            width: CGFloat(surface.width),
+            height: CGFloat(surface.height)
+        )
+    }
+
+    private func configureNativeMenuLayer(_ layer: CALayer, surface: OwlFreshSurfaceInfo, frame: CGRect) {
+        layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        layer.frame = frame
+        layer.bounds = CGRect(origin: .zero, size: frame.size)
+        layer.anchorPoint = CGPoint.zero
+        layer.position = frame.origin
+        layer.zPosition = CGFloat(surface.zIndex)
+        layer.isGeometryFlipped = true
+        layer.backgroundColor = NSColor.white.cgColor
+        layer.borderColor = NSColor.black.cgColor
+        layer.borderWidth = 3
+        layer.shadowOpacity = 0.18
+        layer.shadowRadius = 8
+        layer.shadowOffset = CGSize(width: 0, height: 3)
+
+        let title = CATextLayer()
+        title.contentsScale = NSScreen.main?.backingScaleFactor ?? 1
+        title.string = surface.label.uppercased()
+        title.fontSize = 13
+        title.foregroundColor = NSColor.white.cgColor
+        title.backgroundColor = NSColor(calibratedRed: 0, green: 0.35, blue: 1, alpha: 1).cgColor
+        title.alignmentMode = .left
+        title.frame = CGRect(x: 0, y: 0, width: frame.width, height: 24)
+        layer.addSublayer(title)
+
+        let rowHeight: CGFloat = 30
+        for (index, item) in surface.menuItems.enumerated() {
+            let row = CATextLayer()
+            row.contentsScale = NSScreen.main?.backingScaleFactor ?? 1
+            row.string = item
+            row.fontSize = 18
+            row.foregroundColor = NSColor.black.cgColor
+            row.backgroundColor = index == Int(surface.selectedIndex)
+                ? NSColor(calibratedRed: 1, green: 0.824, blue: 0, alpha: 1).cgColor
+                : NSColor.white.cgColor
+            row.alignmentMode = .left
+            row.frame = CGRect(
+                x: 10,
+                y: 28 + CGFloat(index) * rowHeight,
+                width: max(10, frame.width - 20),
+                height: rowHeight
+            )
+            layer.addSublayer(row)
+        }
+    }
+
     func flushHostedLayer() {
         hostLayer.setNeedsDisplay()
         hostLayer.displayIfNeeded()
+        for layer in popupHostLayers.values {
+            layer.setNeedsDisplay()
+            layer.displayIfNeeded()
+        }
+        for layer in nativeSurfaceLayers.values {
+            layer.setNeedsDisplay()
+            layer.displayIfNeeded()
+        }
         CATransaction.flush()
     }
 
@@ -1772,6 +2196,31 @@ private final class OwlFreshMojoRuntime {
         let data = Data(json.utf8)
         return try JSONDecoder().decode(RuntimeCaptureSurfaceResult.self, from: data)
     }
+
+    func getSurfaceTree(_ session: OpaquePointer?) throws -> OwlFreshSurfaceTree {
+        let json = try invokeJSON(session: session, interface: "OwlFreshHost", method: "getSurfaceTree")
+        let data = Data(json.utf8)
+        return try JSONDecoder().decode(OwlFreshSurfaceTree.self, from: data)
+    }
+
+    func acceptActivePopupMenuItem(_ session: OpaquePointer?, index: UInt32) throws -> Bool {
+        let result = try invokeJSON(
+            session: session,
+            interface: "OwlFreshHost",
+            method: "acceptActivePopupMenuItem",
+            payload: try runtimePayloadJSON(["index": Int(index)])
+        )
+        return try result.jsonObjectBoolValue(for: "ok")
+    }
+
+    func cancelActivePopup(_ session: OpaquePointer?) throws -> Bool {
+        let result = try invokeJSON(
+            session: session,
+            interface: "OwlFreshHost",
+            method: "cancelActivePopup"
+        )
+        return try result.jsonObjectBoolValue(for: "ok")
+    }
 }
 
 private struct RuntimeCaptureSurfaceResult: Decodable {
@@ -1783,10 +2232,14 @@ private struct RuntimeCaptureSurfaceResult: Decodable {
 }
 
 private final class OwlFreshMojoHostController {
+    private let runtime: OwlFreshMojoRuntime
+    private let session: OpaquePointer
     private let sink: OwlFreshMojoRuntimeHostSink
     private let transport: GeneratedOwlFreshHostMojoTransport
 
     init(runtime: OwlFreshMojoRuntime, session: OpaquePointer) {
+        self.runtime = runtime
+        self.session = session
         self.sink = OwlFreshMojoRuntimeHostSink(runtime: runtime, session: session)
         self.transport = GeneratedOwlFreshHostMojoTransport(sink: sink)
     }
@@ -1830,6 +2283,18 @@ private final class OwlFreshMojoHostController {
         let result = try await transport.captureSurface()
         try sink.throwIfFailed()
         return result
+    }
+
+    func getSurfaceTree() throws -> OwlFreshSurfaceTree {
+        try runtime.getSurfaceTree(session)
+    }
+
+    func acceptActivePopupMenuItem(_ index: UInt32) throws -> Bool {
+        try runtime.acceptActivePopupMenuItem(session, index: index)
+    }
+
+    func cancelActivePopup() throws -> Bool {
+        try runtime.cancelActivePopup(session)
     }
 }
 
@@ -1910,6 +2375,18 @@ private final class OwlFreshMojoRuntimeHostSink: OwlFreshHostMojoSink {
             captureMode: result.captureMode,
             error: result.error
         )
+    }
+
+    func getSurfaceTree() async throws -> OwlFreshSurfaceTree {
+        try runtime.getSurfaceTree(session)
+    }
+
+    func acceptActivePopupMenuItem(_ index: UInt32) async throws -> Bool {
+        try runtime.acceptActivePopupMenuItem(session, index: index)
+    }
+
+    func cancelActivePopup() async throws -> Bool {
+        try runtime.cancelActivePopup(session)
     }
 
     private func invoke(method: String, payload: [String: Any]) {
@@ -3262,7 +3739,7 @@ private enum Fixtures {
           position: absolute;
           left: 48px;
           top: 142px;
-          width: 280px;
+          width: 360px;
           height: 112px;
           font: 28px -apple-system, BlinkMacSystemFont, sans-serif;
         }
@@ -3385,6 +3862,144 @@ private enum Fixtures {
           render();
         });
         colorInput.addEventListener("input", render);
+        render();
+      </script>
+    </body>
+    </html>
+    """
+
+    static let nativePopupFixture = """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>OWL LayerHost native popup fixture</title>
+      <style>
+        html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: rgb(248,248,248); }
+        body { font: 26px -apple-system, BlinkMacSystemFont, sans-serif; color: rgb(20,20,20); }
+        #banner {
+          position: absolute;
+          left: 48px;
+          top: 34px;
+          width: 864px;
+          height: 58px;
+          background: rgb(0, 89, 255);
+          color: white;
+          display: flex;
+          align-items: center;
+          padding-left: 22px;
+          box-sizing: border-box;
+          font-weight: 900;
+        }
+        label {
+          position: absolute;
+          left: 48px;
+          font-weight: 900;
+        }
+        #selectLabel { top: 112px; }
+        #contextLabel { top: 266px; }
+        #nativeSelect {
+          position: absolute;
+          left: 48px;
+          top: 142px;
+          width: 280px;
+          height: 56px;
+          box-sizing: border-box;
+          border: 4px solid rgb(20,20,20);
+          border-radius: 0;
+          background: white;
+          color: rgb(20,20,20);
+          font: 24px -apple-system, BlinkMacSystemFont, sans-serif;
+          font-weight: 900;
+        }
+        #selectState {
+          position: absolute;
+          left: 440px;
+          top: 142px;
+          width: 520px;
+          height: 58px;
+          display: flex;
+          align-items: center;
+          font-weight: 900;
+        }
+        #contextZone {
+          position: absolute;
+          left: 48px;
+          top: 296px;
+          width: 864px;
+          height: 88px;
+          border: 4px solid rgb(20,20,20);
+          box-sizing: border-box;
+          background: white;
+          display: flex;
+          align-items: center;
+          padding-left: 24px;
+          font-weight: 900;
+        }
+        #status {
+          position: absolute;
+          left: 48px;
+          top: 540px;
+          width: 864px;
+          height: 70px;
+          border: 4px solid rgb(20,20,20);
+          box-sizing: border-box;
+          background: rgb(238,238,238);
+          display: flex;
+          align-items: center;
+          padding-left: 24px;
+          font-size: 34px;
+          font-weight: 900;
+        }
+        .ok {
+          background: rgb(255, 210, 0) !important;
+        }
+        body.done #status {
+          background: rgb(0, 204, 82);
+        }
+      </style>
+    </head>
+    <body>
+      <div id="banner">OWL_NATIVE_POPUPS_READY</div>
+      <label id="selectLabel" for="nativeSelect">collapsed select</label>
+      <select id="nativeSelect">
+        <option value="alpha">ALPHA_NATIVE_OPTION</option>
+        <option value="beta">BETA_NATIVE_OPTION</option>
+        <option value="gamma">GAMMA_NATIVE_OPTION</option>
+      </select>
+      <div id="selectState">select: alpha</div>
+      <label id="contextLabel" for="contextZone">context menu target</label>
+      <div id="contextZone">right click here</div>
+      <div id="status">OWL_NATIVE_POPUPS_WAITING</div>
+      <script>
+        const state = {
+          ready: true,
+          contextSeen: false
+        };
+        window.owlNativePopupState = state;
+
+        const select = document.getElementById("nativeSelect");
+        const selectState = document.getElementById("selectState");
+        const contextZone = document.getElementById("contextZone");
+        const status = document.getElementById("status");
+
+        const render = () => {
+          selectState.textContent = "select: " + select.value;
+          selectState.classList.toggle("ok", select.value === "beta");
+          contextZone.textContent = state.contextSeen ? "OWL_CONTEXT_MENU_SEEN" : "right click here";
+          contextZone.classList.toggle("ok", state.contextSeen);
+          if (select.value === "beta" && state.contextSeen) {
+            document.body.classList.add("done");
+            status.textContent = "OWL_NATIVE_POPUPS_OK";
+          }
+        };
+
+        select.addEventListener("change", render);
+        select.addEventListener("input", render);
+        contextZone.addEventListener("contextmenu", () => {
+          state.contextSeen = true;
+          render();
+        });
         render();
       </script>
     </body>
