@@ -625,15 +625,7 @@ private struct PassthroughHoverTrackingView: NSViewRepresentable {
             removeLocalMouseMonitor()
         }
 
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            guard bounds.contains(point) else { return nil }
-            switch NSApp.currentEvent?.type {
-            case .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate:
-                return self
-            default:
-                return nil
-            }
-        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -691,7 +683,20 @@ private struct PassthroughHoverTrackingView: NSViewRepresentable {
         }
 
         private func updateHover(from event: NSEvent) {
-            updateHoverFromCurrentMouseLocation()
+            guard let window else {
+                emitHoverChanged(false)
+                return
+            }
+            guard event.window == nil || event.window === window else {
+                emitHoverChanged(false)
+                return
+            }
+
+            let pointInWindow = event.window === window
+                ? event.locationInWindow
+                : window.mouseLocationOutsideOfEventStream
+            let pointInView = convert(pointInWindow, from: nil)
+            emitHoverChanged(bounds.insetBy(dx: -1, dy: -1).contains(pointInView))
         }
 
         private func updateHoverFromCurrentMouseLocation() {
@@ -699,9 +704,8 @@ private struct PassthroughHoverTrackingView: NSViewRepresentable {
                 emitHoverChanged(false)
                 return
             }
-            let rectInWindow = convert(bounds, to: nil)
-            let rectInScreen = window.convertToScreen(rectInWindow)
-            emitHoverChanged(rectInScreen.contains(NSEvent.mouseLocation))
+            let pointInView = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            emitHoverChanged(bounds.insetBy(dx: -1, dy: -1).contains(pointInView))
         }
 
         private func emitHoverChanged(_ newValue: Bool) {
