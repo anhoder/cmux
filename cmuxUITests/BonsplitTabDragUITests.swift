@@ -144,7 +144,7 @@ final class BonsplitTabDragUITests: XCTestCase {
 
         let initialFrame = window.frame
         let point = CGPoint(x: initialFrame.midX, y: initialFrame.minY + 16)
-        doubleClick(atAccessibilityPoint: point)
+        doubleClick(in: window, atAccessibilityPoint: point)
 
         XCTAssertTrue(
             waitForCondition(timeout: 4.0) {
@@ -618,21 +618,16 @@ final class BonsplitTabDragUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
 
-    private func doubleClick(atAccessibilityPoint point: CGPoint) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        XCTAssertNotNil(source, "Expected CGEventSource for raw mouse double-click")
-        guard let source else { return }
-
-        let quartzPoint = quartzPoint(fromAccessibilityPoint: point)
-        postMouseEvent(type: .mouseMoved, at: quartzPoint, source: source)
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-
-        postMouseEvent(type: .leftMouseDown, at: quartzPoint, source: source, clickState: 1)
-        postMouseEvent(type: .leftMouseUp, at: quartzPoint, source: source, clickState: 1)
+    private func doubleClick(in window: XCUIElement, atAccessibilityPoint point: CGPoint) {
+        let target = window.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(
+                dx: point.x - window.frame.minX,
+                dy: point.y - window.frame.minY
+            )
+        )
+        target.click()
         RunLoop.current.run(until: Date().addingTimeInterval(0.08))
-
-        postMouseEvent(type: .leftMouseDown, at: quartzPoint, source: source, clickState: 2)
-        postMouseEvent(type: .leftMouseUp, at: quartzPoint, source: source, clickState: 2)
+        target.click()
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     }
 
