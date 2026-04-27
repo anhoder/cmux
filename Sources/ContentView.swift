@@ -624,6 +624,17 @@ private final class PassthroughWindowOverlayContainerView: NSView {
     }
 }
 
+@MainActor
+private final class NativeTitlebarBackdropView: NSView {
+    override var isOpaque: Bool {
+        layer?.isOpaque ?? false
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
 #if DEBUG
 private func debugCommandPaletteWindowSummary(_ window: NSWindow?) -> String {
     guard let window else { return "nil" }
@@ -3621,6 +3632,12 @@ struct ContentView: View {
 
             // Keep content below the titlebar so drags on Bonsplit's tab bar don't
             // get interpreted as window drags.
+            // User settings decide whether window glass is active. The native Tahoe
+            // NSGlassEffectView path vs the older NSVisualEffectView fallback is chosen
+            // inside WindowGlassEffect.apply.
+            let currentThemeBackground = appearance.compositedTerminalBackgroundColor
+            let shouldApplyWindowGlass = appearance.windowGlassSettings.shouldApply()
+            let shouldForceTransparentHosting = appearance.shouldUseTransparentHosting()
             let computedTitlebarHeight = window.frame.height - window.contentLayoutRect.height
             let nextPadding = max(28, min(72, computedTitlebarHeight))
             let nextSafeAreaTop = max(0, window.contentView?.safeAreaInsets.top ?? 0)
@@ -3634,18 +3651,19 @@ struct ContentView: View {
                     hostingSafeAreaTop = nextSafeAreaTop
                 }
             }
+            installNativeTitlebarBackdrop(
+                in: window,
+                height: nextPadding,
+                color: currentThemeBackground,
+                // Shared-surface mode already lets the native titlebar composite with
+                // the same clear window backdrop as the terminal and sidebars.
+                enabled: shouldForceTransparentHosting && !appearance.unifySurfaceBackdrops
+            )
 #if DEBUG
             if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
                 UpdateLogStore.shared.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
             }
 #endif
-            // User settings decide whether window glass is active. The native Tahoe
-            // NSGlassEffectView path vs the older NSVisualEffectView fallback is chosen
-            // inside WindowGlassEffect.apply.
-            let currentThemeBackground = appearance.compositedTerminalBackgroundColor
-            let shouldApplyWindowGlass = appearance.windowGlassSettings.shouldApply()
-            let shouldForceTransparentHosting = appearance.shouldUseTransparentHosting()
-
             if shouldForceTransparentHosting {
                 window.isOpaque = false
                 // Keep the window clear whenever translucency is active. Relying only on
@@ -3938,6 +3956,51 @@ struct ContentView: View {
         guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == windowIdentifier }) else { return }
         let tintColor = (NSColor(hex: bgGlassTintHex) ?? .black).withAlphaComponent(bgGlassTintOpacity)
         WindowGlassEffect.updateTint(to: window, color: tintColor)
+    }
+
+    private func installNativeTitlebarBackdrop(
+        in window: NSWindow,
+        height: CGFloat,
+        color: NSColor,
+        enabled: Bool
+    ) {
+        guard let contentView = window.contentView,
+              let themeFrame = contentView.superview else { return }
+
+        let identifier = NSUserInterfaceItemIdentifier("cmux.nativeTitlebarBackdrop")
+        let existing = themeFrame.subviews.first { $0.identifier == identifier }
+        guard enabled else {
+            existing?.removeFromSuperview()
+            return
+        }
+
+        let backdrop = existing ?? NativeTitlebarBackdropView(frame: .zero)
+        backdrop.identifier = identifier
+        backdrop.wantsLayer = true
+        backdrop.layer?.backgroundColor = color.cgColor
+        backdrop.layer?.isOpaque = color.alphaComponent >= 0.999
+        backdrop.autoresizingMask = [.width, .minYMargin]
+        let resolvedHeight = max(0, height)
+        backdrop.frame = NSRect(
+            x: 0,
+            y: max(0, themeFrame.bounds.height - resolvedHeight),
+            width: themeFrame.bounds.width,
+            height: resolvedHeight
+        )
+
+        if backdrop.superview == nil {
+            var titlebarChromeView: NSView? = window.standardWindowButton(.closeButton)
+            while let parent = titlebarChromeView?.superview, parent !== themeFrame {
+                titlebarChromeView = parent
+            }
+
+            if let titlebarChromeView,
+               titlebarChromeView.superview === themeFrame {
+                themeFrame.addSubview(backdrop, positioned: .below, relativeTo: titlebarChromeView)
+            } else {
+                themeFrame.addSubview(backdrop, positioned: .above, relativeTo: nil)
+            }
+        }
     }
 
     private func setTitlebarControlsHidden(_ hidden: Bool, in window: NSWindow) {
