@@ -3998,7 +3998,7 @@ struct ContentView: View {
                titlebarChromeView.superview === themeFrame {
                 themeFrame.addSubview(backdrop, positioned: .below, relativeTo: titlebarChromeView)
             } else {
-                themeFrame.addSubview(backdrop, positioned: .above, relativeTo: nil)
+                themeFrame.addSubview(backdrop, positioned: .below, relativeTo: nil)
             }
         }
     }
