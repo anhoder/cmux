@@ -11302,6 +11302,22 @@ final class Workspace: Identifiable, ObservableObject {
         return shortcuts
     }
 
+    private static func workspaceAndSurfaceIDsClipboardText(workspaceId: UUID, surfaceId: UUID) -> String {
+        """
+        workspace_id=\(workspaceId.uuidString)
+        surface_id=\(surfaceId.uuidString)
+        """
+    }
+
+    private func copyWorkspaceAndSurfaceIDsToPasteboard(surfaceId: UUID) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(
+            Self.workspaceAndSurfaceIDsClipboardText(workspaceId: id, surfaceId: surfaceId),
+            forType: .string
+        )
+    }
+
     // MARK: - Flash/Notification Support
 
     func triggerFocusFlash(panelId: UUID) {
@@ -13538,6 +13554,9 @@ extension Workspace: BonsplitDelegate {
         case .clearName:
             guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
             setPanelCustomTitle(panelId: panelId, title: nil)
+        case .copyIdentifiers:
+            guard let panelId = panelIdFromSurfaceId(tab.id) else { return }
+            copyWorkspaceAndSurfaceIDsToPasteboard(surfaceId: panelId)
         case .closeToLeft:
             closeTabs(tabIdsToLeft(of: tab.id, inPane: pane))
         case .closeToRight:
